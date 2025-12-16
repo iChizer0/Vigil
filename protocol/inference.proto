@@ -1,0 +1,101 @@
+syntax = "proto3";
+
+// Enum mirrors rc_task_type in rc_infer.h
+enum TaskType {
+  TASK_TYPE_CLASSIFICATION = 0;
+  TASK_TYPE_DETECTION = 1;
+  TASK_TYPE_SEGMENTATION = 2;
+  TASK_TYPE_TRACKING = 3;
+  TASK_TYPE_KEYPOINTS = 4;
+}
+
+message InferenceBox {
+  // CHANGED: coordinates switched from int32 -> float to match Box_result (float) in rc_infer.h
+  float left = 1;
+  float top = 2;
+  float right = 3;
+  float bottom = 4;
+}
+
+message InferencePoint {
+  // CHANGED: keypoint coordinates int32 -> float to match Point_result (float) in rc_infer.h
+  float x = 1;
+  float y = 2;
+}
+
+// Detection results (corresponds to rc_result_detection)
+message InferenceDetectionEntry {
+  InferenceBox box = 1;
+  float score = 2;
+  int32 class_id = 3;
+  string class_name = 4;
+}
+
+message InferenceDetectionResult {
+  repeated InferenceDetectionEntry entries = 1;
+}
+
+// Classification results (corresponds to rc_result_classification)
+message InferenceClassificationEntry {
+  float score = 1;
+  int32 class_id = 2;
+  string class_name = 3;
+}
+
+message InferenceClassificationResult {
+  repeated InferenceClassificationEntry entries = 1;
+}
+
+// Segmentation results (corresponds to rc_result_segmentation)
+message InferenceSegmentationEntry {
+  InferenceBox box = 1;           // Optional: ROI box if available
+  float score = 2;
+  int32 class_id = 3;
+  string class_name = 4;
+  bytes mask = 5;        // Flattened mask buffer (row-major)
+  int32 mask_width = 6;
+  int32 mask_height = 7;
+}
+
+message InferenceSegmentationResult {
+  repeated InferenceSegmentationEntry entries = 1;
+}
+
+// Tracking results (corresponds to rc_result_tracking)
+message InferenceTrackingEntry {
+  InferenceBox box = 1;
+  float score = 2;
+  int32 class_id = 3;
+  string class_name = 4;
+  int32 track_id = 5;
+}
+
+message InferenceTrackingResult {
+  repeated InferenceTrackingEntry entries = 1;
+}
+
+// Keypoints results (corresponds to rc_result_keypoints)
+message InferenceKeypointEntry {
+  InferencePoint point = 1;
+  float score = 2;
+  int32 class_id = 3;
+  string class_name = 4;
+}
+
+message InferenceKeypointsResult {
+  repeated InferenceKeypointEntry entries = 1;
+}
+
+// Top-level message corresponding to rc_result
+message InferenceResult {
+  TaskType task_type = 1;
+  int64 timestamp_ms = 2;  // Timestamp in milliseconds since epoch
+  int32 model_id = 3;      // Identifier for the model that produced the result
+  oneof data {
+    InferenceDetectionResult detection = 10;
+    InferenceClassificationResult classification = 11;
+    InferenceSegmentationResult segmentation = 12;
+    InferenceTrackingResult tracking = 13;
+    InferenceKeypointsResult keypoints = 14;
+  }
+}
