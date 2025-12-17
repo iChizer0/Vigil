@@ -18,6 +18,17 @@ endif()
 if(VIGIL_USE_SYSTEM_NLOHMANN_JSON)
 	find_package(nlohmann_json 3.12.0 REQUIRED)
 else()
+	if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/nlohmann_json/CMakeLists.txt")
+		# Request git to initialize and update the nlohmann_json submodule
+		execute_process(
+			COMMAND git submodule update --init --recursive 3rdparty/nlohmann_json
+			WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+			RESULT_VARIABLE NLOHMANN_JSON_SUBMODULE_RESULT
+		)
+		if(NOT NLOHMANN_JSON_SUBMODULE_RESULT EQUAL 0)
+			message(FATAL_ERROR "Failed to fetch nlohmann_json submodule (exit code ${NLOHMANN_JSON_SUBMODULE_RESULT})")
+		endif()
+	endif()
 	set(JSON_BuildTests OFF CACHE INTERNAL "Disable nlohmann_json tests")
 	set(JSON_Install ON CACHE INTERNAL "Install bundled nlohmann_json alongside Vigil")
 	add_subdirectory(3rdparty/nlohmann_json EXCLUDE_FROM_ALL)
