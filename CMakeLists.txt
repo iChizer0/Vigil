@@ -21,7 +21,7 @@ else()
 	if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/nlohmann_json/CMakeLists.txt")
 		# Request git to initialize and update the nlohmann_json submodule
 		execute_process(
-			COMMAND git submodule update --init --recursive 3rdparty/nlohmann_json
+			COMMAND git submodule update --init --recursive --depth=1 3rdparty/nlohmann_json
 			WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 			RESULT_VARIABLE NLOHMANN_JSON_SUBMODULE_RESULT
 		)
