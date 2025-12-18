@@ -201,34 +201,36 @@ private:
     bool onLoop() override
     {
         MediaFrame frame;
+        auto &ctx_media_mutex = this->ctxRef().media_mutex;
+        auto &ctx_media_frame_buffer = this->ctxRef().media_frame_buffer;
         do
         {
-            this->ctxRef().media_mutex.lock();
-            if (this->ctxRef().media_frame_buffer.empty())
+            ctx_media_mutex.lock();
+            auto it = ctx_media_frame_buffer.begin();
+            if (it == ctx_media_frame_buffer.end())
             {
-                this->ctxRef().media_mutex.unlock();
+                ctx_media_mutex.unlock();
                 std::this_thread::sleep_for(kVideoFrameWaitDelay);
                 continue;
             }
-            const auto &media_frame = this->ctxRef().media_frame_buffer.top();
-            if (isClipFinished() && media_frame.isKeyFrame())
+            if (isClipFinished() && it->isKeyFrame())
             {
-                this->ctxRef().media_mutex.unlock();
+                ctx_media_mutex.unlock();
                 return true; // Finish current clip on next key frame
             }
             if (_is_clip_start)
             {
-                if (!media_frame.isKeyFrame())
+                if (!it->isKeyFrame())
                 {
-                    this->ctxRef().media_frame_buffer.pop();
-                    this->ctxRef().media_mutex.unlock();
+                    ctx_media_frame_buffer.pop_front();
+                    ctx_media_mutex.unlock();
                     continue; // Discard frames until key frame is found
                 }
                 _is_clip_start = false;
             }
-            media_frame.transferTo(frame);
-            this->ctxRef().media_frame_buffer.pop();
-            this->ctxRef().media_mutex.unlock();
+            it->transferTo(frame);
+            ctx_media_frame_buffer.erase(it);
+            ctx_media_mutex.unlock();
             break;
         }
         while (this->shouldContinueWriting());
