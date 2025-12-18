@@ -123,7 +123,7 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame)
     return 0;
 }
 
-vg_sta_e vg_media_suspend_write(bool wait)
+vg_sta_e vg_media_scoped_suspend_write(bool wait)
 {
     const std::shared_lock lock(vigil_instance_mutex);
     if (!vigil_instance)
@@ -143,7 +143,7 @@ vg_sta_e vg_media_suspend_write(bool wait)
     }
 }
 
-vg_sta_e vg_media_resume_write(bool reset_media_queue)
+vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue)
 {
     const std::shared_lock lock(vigil_instance_mutex);
     if (!vigil_instance)
@@ -152,13 +152,20 @@ vg_sta_e vg_media_resume_write(bool reset_media_queue)
     try
     {
         const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
-        if (vigil_instance_scoped_suspend_count > 0)
+        if (vigil_instance_scoped_suspend_count == 1)
+        {
+            if (vigil_instance->storageEndpoint().resumeWrite(reset_media_queue) == 0)
+            {
+                vigil_instance_scoped_suspend_count = 0;
+                return 0;
+            }
+        }
+        else if (vigil_instance_scoped_suspend_count > 1)
         {
             --vigil_instance_scoped_suspend_count;
             return 0;
         }
-        return vigil_instance->storageEndpoint().resumeWrite(
-            reset_media_queue); // Only actually resume when count is zero
+        return ECANCELED;
     }
     catch (const std::exception &e)
     {
