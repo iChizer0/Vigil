@@ -668,25 +668,37 @@ struct SlotStats final
     FileSize free_bytes;
 };
 
-struct VideoFrame
+template<typename T>
+struct NonCopyable
+{
+public:
+    NonCopyable(const NonCopyable &) = delete;
+    NonCopyable &operator=(const NonCopyable &) = delete;
+
+protected:
+    NonCopyable() = default;
+    ~NonCopyable() = default;
+
+    NonCopyable(NonCopyable &&) noexcept = default;
+    NonCopyable &operator=(NonCopyable &&) noexcept = default;
+};
+
+struct BaseFrame: private NonCopyable<BaseFrame>
 {
     int64_t pts;
     void *data;
     size_t bytes_len;
-    int key_frame;
 
-    VideoFrame(const vg_video_frame_t &frame)
-        : pts(frame.pts), data(nullptr), bytes_len(frame.bytes_len), key_frame(frame.key_frame)
+    BaseFrame(int64_t pts_, void *data_, size_t bytes_len_) : pts(pts_), data(data_), bytes_len(bytes_len_)
     {
-        if (frame.data && frame.bytes_len > 0)
+        if (data_ && bytes_len_ > 0)
         {
-            data = new (std::nothrow) uint8_t[frame.bytes_len];
-            if (data)
-                std::memcpy(data, frame.data, frame.bytes_len);
+            if (data = new (std::nothrow) uint8_t[bytes_len_]; data)
+                std::memcpy(data, data_, bytes_len_);
         }
     }
 
-    ~VideoFrame() noexcept
+    ~BaseFrame() noexcept
     {
         if (data)
         {
@@ -695,7 +707,41 @@ struct VideoFrame
         }
     }
 
-    vg_video_frame_t to() const noexcept
+    BaseFrame(BaseFrame &&other) noexcept : pts(other.pts), data(other.data), bytes_len(other.bytes_len)
+    {
+        other.data = nullptr;
+        other.bytes_len = 0;
+    }
+
+    BaseFrame &operator=(BaseFrame &&other) noexcept
+    {
+        if (this != &other)
+        {
+            std::swap(pts, other.pts);
+            std::swap(data, other.data);
+            std::swap(bytes_len, other.bytes_len);
+        }
+        return *this;
+    }
+};
+
+struct VideoFrame: public BaseFrame
+{
+    int key_frame;
+
+    VideoFrame(const vg_video_frame_t &frame)
+        : BaseFrame(frame.pts, frame.data, frame.bytes_len), key_frame(frame.key_frame)
+    {
+    }
+
+    ~VideoFrame() noexcept = default;
+
+    inline bool isKeyFrame() const noexcept
+    {
+        return key_frame == kKeyFrameTypeId;
+    }
+
+    vg_video_frame_t toRef() const noexcept
     {
         return vg_video_frame_t {
             .pts = pts,
@@ -705,55 +751,20 @@ struct VideoFrame
         };
     }
 
-    VideoFrame(const VideoFrame &) = delete;
-    VideoFrame &operator=(const VideoFrame &) = delete;
+    VideoFrame(VideoFrame &&other) noexcept = default;
+    VideoFrame &operator=(VideoFrame &&other) noexcept = default;
 
-    VideoFrame(VideoFrame &&other) noexcept
-        : pts(other.pts), data(other.data), bytes_len(other.bytes_len), key_frame(other.key_frame)
-    {
-        other.data = nullptr;
-        other.bytes_len = 0;
-    }
-
-    VideoFrame &operator=(VideoFrame &&other) noexcept
-    {
-        if (this != &other)
-        {
-            std::swap(pts, other.pts);
-            std::swap(data, other.data);
-            std::swap(bytes_len, other.bytes_len);
-            std::swap(key_frame, other.key_frame);
-        }
-        return *this;
-    }
+private:
+    static inline const constexpr int kKeyFrameTypeId = 1;
 };
 
-struct AudioFrame
+struct AudioFrame: public BaseFrame
 {
-    int64_t pts;
-    void *data;
-    size_t bytes_len;
+    AudioFrame(const vg_audio_frame_t &frame) : BaseFrame(frame.pts, frame.data, frame.bytes_len) { }
 
-    AudioFrame(const vg_audio_frame_t &frame) : pts(frame.pts), data(nullptr), bytes_len(frame.bytes_len)
-    {
-        if (frame.data && frame.bytes_len > 0)
-        {
-            data = new (std::nothrow) uint8_t[frame.bytes_len];
-            if (data)
-                std::memcpy(data, frame.data, frame.bytes_len);
-        }
-    }
+    ~AudioFrame() noexcept = default;
 
-    ~AudioFrame() noexcept
-    {
-        if (data)
-        {
-            delete[] static_cast<uint8_t *>(data);
-            data = nullptr;
-        }
-    }
-
-    vg_audio_frame_t to() const noexcept
+    vg_audio_frame_t toRef() const noexcept
     {
         return vg_audio_frame_t {
             .pts = pts,
@@ -762,41 +773,26 @@ struct AudioFrame
         };
     }
 
-    AudioFrame(const AudioFrame &) = delete;
-    AudioFrame &operator=(const AudioFrame &) = delete;
-
-    AudioFrame(AudioFrame &&other) noexcept : pts(other.pts), data(other.data), bytes_len(other.bytes_len)
-    {
-        other.data = nullptr;
-        other.bytes_len = 0;
-    }
-
-    AudioFrame &operator=(AudioFrame &&other) noexcept
-    {
-        if (this != &other)
-        {
-            std::swap(pts, other.pts);
-            std::swap(data, other.data);
-            std::swap(bytes_len, other.bytes_len);
-        }
-        return *this;
-    }
+    AudioFrame(AudioFrame &&other) noexcept = default;
+    AudioFrame &operator=(AudioFrame &&other) noexcept = default;
 };
 
 struct MediaFrame
 {
     std::chrono::steady_clock::time_point time_stamp;
-    mutable std::variant<VideoFrame, AudioFrame, std::monostate> frame;
+    mutable std::shared_ptr<std::variant<VideoFrame, AudioFrame>> frame;
 
-    MediaFrame() : time_stamp(), frame(std::monostate {}) { }
+    MediaFrame() : time_stamp(), frame() { }
 
     MediaFrame(const vg_video_frame_t &vf)
-        : time_stamp(std::chrono::steady_clock::now()), frame(std::in_place_type<VideoFrame>, vf)
+        : time_stamp(std::chrono::steady_clock::now()),
+          frame(std::make_shared<std::variant<VideoFrame, AudioFrame>>(std::in_place_type<VideoFrame>, vf))
     {
     }
 
     MediaFrame(const vg_audio_frame_t &af)
-        : time_stamp(std::chrono::steady_clock::now()), frame(std::in_place_type<AudioFrame>, af)
+        : time_stamp(std::chrono::steady_clock::now()),
+          frame(std::make_shared<std::variant<VideoFrame, AudioFrame>>(std::in_place_type<AudioFrame>, af))
     {
     }
 
@@ -804,39 +800,21 @@ struct MediaFrame
 
     inline bool isKeyFrame() const noexcept
     {
-        if (std::holds_alternative<VideoFrame>(frame))
-        {
-            const auto &vf = std::get<VideoFrame>(frame);
-            return vf.key_frame == kKeyFrameTypeId;
-        }
+        if (!frame)
+            return false;
+        if (const auto vf = std::get_if<VideoFrame>(frame.get()); vf)
+            return vf->isKeyFrame();
         return false;
     }
 
-    inline void moveTo(MediaFrame &other) const noexcept
+    inline void transferTo(MediaFrame &other) const noexcept
     {
         other.time_stamp = time_stamp;
-        frame.swap(other.frame);
+        other.frame = std::move(frame);
     }
 
-    inline void copyTo(MediaFrame &other) const
-    {
-        other.time_stamp = time_stamp;
-        if (std::holds_alternative<VideoFrame>(frame))
-        {
-            const auto &vf = std::get<VideoFrame>(frame);
-            other.frame = VideoFrame(vf.to());
-        }
-        else if (std::holds_alternative<AudioFrame>(frame))
-        {
-            const auto &af = std::get<AudioFrame>(frame);
-            other.frame = AudioFrame(af.to());
-        }
-        else
-            other.frame = std::monostate {};
-    }
-
-    MediaFrame(const MediaFrame &) = delete;
-    MediaFrame &operator=(const MediaFrame &) = delete;
+    MediaFrame(const MediaFrame &) = default;
+    MediaFrame &operator=(const MediaFrame &) = default;
 
     MediaFrame(MediaFrame &&) noexcept = default;
     MediaFrame &operator=(MediaFrame &&) noexcept = default;
@@ -848,9 +826,6 @@ struct MediaFrame
             return a.time_stamp > b.time_stamp;
         }
     };
-
-private:
-    static inline const constexpr int kKeyFrameTypeId = 1;
 };
 
 struct FileWriterSettings

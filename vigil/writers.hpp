@@ -226,7 +226,7 @@ private:
                 }
                 _is_clip_start = false;
             }
-            media_frame.moveTo(frame);
+            media_frame.transferTo(frame);
             this->ctxRef().media_frame_buffer.pop();
             this->ctxRef().media_mutex.unlock();
             break;
@@ -244,171 +244,48 @@ private:
 
     inline bool writeMediaFrame(const MediaFrame &media_frame)
     {
-        if (std::holds_alternative<VideoFrame>(media_frame.frame))
+        if (!media_frame.frame)
         {
-            const auto &vf = std::get<VideoFrame>(media_frame.frame);
-            auto video_frame = vf.to();
-            const auto ret = this->ctxRef().c_api.media.video_file_write_video_frame_cb(_fd, &video_frame,
-                this->ctxRef().c_api.media.user_data);
-            if (ret != 0)
-            {
-                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to write video frame to file with fd ", _fd,
-                    ", code: ", static_cast<int>(ret));
-                return false;
-            }
-            return true;
+            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_WARN, "Media frame is empty, skipping write");
+            return false;
         }
-
-        if (std::holds_alternative<AudioFrame>(media_frame.frame))
-        {
-            const auto &af = std::get<AudioFrame>(media_frame.frame);
-            auto audio_frame = af.to();
-            const auto ret = this->ctxRef().c_api.media.video_file_write_audio_frame_cb(_fd, &audio_frame,
-                this->ctxRef().c_api.media.user_data);
-            if (ret != 0)
-            {
-                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to write audio frame to file with fd ", _fd,
-                    ", code: ", static_cast<int>(ret));
-                return false;
-            }
-            return true;
-        }
-
-        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_WARN, "Media frame is neither video nor audio frame, skipping write");
-        return false;
-    }
-
-private:
-    std::chrono::seconds _video_clip_length;
-    int _fd;
-    bool _is_clip_start;
-    bool _is_clip_finish;
-};
-
-// - MARK: Passive Video Writer
-
-template<typename T>
-class PassiveVideoWriter final: public BaseWriter<T>
-{
-public:
-    PassiveVideoWriter(FileWriterSettingsWithRevision &&settings, T &slot)
-        : BaseWriter<T>(settings, slot), _video_clip_length(settings.second.video_clip_length), _fd(-1),
-          _is_clip_start(true), _is_clip_finish(false)
-    {
-        if (!this->ctxRef().c_api.media.video_file_create_cb || !this->ctxRef().c_api.media.video_file_finish_cb)
-            throw Exception("PassiveVideoWriter initialized without video file create/finish callbacks set");
-        if (!this->ctxRef().c_api.media.video_file_write_audio_frame_cb
-            || !this->ctxRef().c_api.media.video_file_write_video_frame_cb)
-            throw Exception("PassiveVideoWriter initialized with audio frame write callback set or without video frame "
-                            "write callback set");
-
-        if (auto ret = this->ctxRef().c_api.media.video_file_create_cb(&_fd, this->cacheFilePath().c_str(),
-                this->format().c_str(), this->ctxRef().c_api.media.user_data);
-            ret != 0)
-            throw Exception("PassiveVideoWriter failed to create video file at path " + this->cacheFilePath().string()
-                            + ": " + std::to_string(static_cast<int>(ret)));
-    }
-
-    ~PassiveVideoWriter() override
-    {
-        if (_fd >= 0)
-        {
-            if (auto ret = this->ctxRef().c_api.media.video_file_finish_cb(_fd, this->ctxRef().c_api.media.user_data);
-                ret != 0)
-                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to finish video file with fd ", _fd,
-                    ", code: ", static_cast<int>(ret));
-            _fd = -1;
-        }
-    }
-
-private:
-    static inline constexpr const std::chrono::milliseconds kVideoFrameWaitDelay = std::chrono::milliseconds(10);
-
-private:
-    bool onLoop() override
-    {
-        MediaFrame frame;
-        do
-        {
-            this->ctxRef().media_mutex.lock();
-            if (this->ctxRef().media_frame_buffer.empty())
-            {
-                this->ctxRef().media_mutex.unlock();
-                std::this_thread::sleep_for(kVideoFrameWaitDelay);
-                continue;
-            }
-            const auto &media_frame = this->ctxRef().media_frame_buffer.top();
-            if (media_frame.time_stamp <= _last_frame_time) // No newer frame
-            {
-                this->ctxRef().media_mutex.unlock();
-                std::this_thread::sleep_for(kVideoFrameWaitDelay);
-                continue;
-            }
-            _last_frame_time = media_frame.time_stamp;
-            if (isClipFinished() && media_frame.isKeyFrame()) // Finished or need to finish clip
-            {
-                this->ctxRef().media_mutex.unlock();
-                return true; // Finish current clip on next key frame
-            }
-            if (_is_clip_start)
-            {
-                if (!media_frame.isKeyFrame())
+        return std::visit(
+            [&](auto &&arg) -> bool {
+                using FrameType = std::decay_t<decltype(arg)>;
+                if constexpr (std::is_same_v<FrameType, VideoFrame>)
                 {
-                    this->ctxRef().media_mutex.unlock();
-                    std::this_thread::sleep_for(kVideoFrameWaitDelay);
-                    continue;
+                    const auto video_frame = arg.toRef();
+                    const auto ret = this->ctxRef().c_api.media.video_file_write_video_frame_cb(_fd, &video_frame,
+                        this->ctxRef().c_api.media.user_data);
+                    if (ret != 0)
+                    {
+                        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to write video frame to file with fd ",
+                            _fd, ", code: ", static_cast<int>(ret));
+                        return false;
+                    }
+                    return true;
                 }
-                _is_clip_start = false;
-            }
-            media_frame.copyTo(frame);
-            this->ctxRef().media_mutex.unlock();
-            break;
-        }
-        while (this->shouldContinueWriting());
-        return !writeMediaFrame(frame);
-    }
-
-    inline bool isClipFinished() noexcept
-    {
-        if (!_is_clip_finish)
-            _is_clip_finish = (std::chrono::steady_clock::now() - this->startTime()) >= _video_clip_length;
-        return _is_clip_finish;
-    }
-
-    inline bool writeMediaFrame(const MediaFrame &media_frame)
-    {
-        if (std::holds_alternative<VideoFrame>(media_frame.frame))
-        {
-            const auto &vf = std::get<VideoFrame>(media_frame.frame);
-            auto video_frame = vf.to();
-            const auto ret = this->ctxRef().c_api.media.video_file_write_video_frame_cb(_fd, &video_frame,
-                this->ctxRef().c_api.media.user_data);
-            if (ret != 0)
-            {
-                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to write video frame to file with fd ", _fd,
-                    ", code: ", static_cast<int>(ret));
-                return false;
-            }
-            return true;
-        }
-
-        if (std::holds_alternative<AudioFrame>(media_frame.frame))
-        {
-            const auto &af = std::get<AudioFrame>(media_frame.frame);
-            auto audio_frame = af.to();
-            const auto ret = this->ctxRef().c_api.media.video_file_write_audio_frame_cb(_fd, &audio_frame,
-                this->ctxRef().c_api.media.user_data);
-            if (ret != 0)
-            {
-                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to write audio frame to file with fd ", _fd,
-                    ", code: ", static_cast<int>(ret));
-                return false;
-            }
-            return true;
-        }
-
-        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_WARN, "Media frame is neither video nor audio frame, skipping write");
-        return false;
+                else if constexpr (std::is_same_v<FrameType, AudioFrame>)
+                {
+                    const auto audio_frame = arg.toRef();
+                    const auto ret = this->ctxRef().c_api.media.video_file_write_audio_frame_cb(_fd, &audio_frame,
+                        this->ctxRef().c_api.media.user_data);
+                    if (ret != 0)
+                    {
+                        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to write audio frame to file with fd ",
+                            _fd, ", code: ", static_cast<int>(ret));
+                        return false;
+                    }
+                    return true;
+                }
+                else
+                {
+                    VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_WARN,
+                        "Media frame is neither video nor audio frame, skipping write");
+                    return false;
+                }
+            },
+            *media_frame.frame);
     }
 
 private:
@@ -416,7 +293,6 @@ private:
     int _fd;
     bool _is_clip_start;
     bool _is_clip_finish;
-    std::chrono::steady_clock::time_point _last_frame_time;
 };
 
 } // namespace vigil::writers
