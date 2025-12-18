@@ -23,7 +23,9 @@
 
 namespace vigil_c_api {
 
-std::shared_mutex vigil_instance_mutex; // Used for HTTP API
+static inline std::shared_mutex vigil_instance_mutex; // Used for HTTP API
+static inline std::mutex vigil_instance_scoped_suspend_mutex;
+static inline size_t vigil_instance_scoped_suspend_count = 0;
 static inline std::unique_ptr<vigil::Vigil> vigil_instance = nullptr;
 
 } // namespace vigil_c_api
@@ -50,6 +52,8 @@ vg_sta_e vg_service_init(vg_config_t *config)
         return EINVAL;
 
     const std::unique_lock lock(vigil_instance_mutex);
+    const std::lock_guard lock2(vigil_instance_scoped_suspend_mutex);
+    vigil_instance_scoped_suspend_count = 0; // Reset scoped suspend count on init
     try
     {
         if (vigil_instance)
@@ -127,7 +131,11 @@ vg_sta_e vg_media_suspend_write(bool wait)
 
     try
     {
-        return vigil_instance->storageEndpoint().suspendWrite(wait);
+        const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
+        const auto ret = vigil_instance->storageEndpoint().suspendWrite(wait);
+        if (ret == 0)
+            ++vigil_instance_scoped_suspend_count;
+        return ret;
     }
     catch (const std::exception &e)
     {
@@ -143,7 +151,14 @@ vg_sta_e vg_media_resume_write(bool reset_media_queue)
 
     try
     {
-        return vigil_instance->storageEndpoint().resumeWrite(reset_media_queue);
+        const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
+        if (vigil_instance_scoped_suspend_count > 0)
+        {
+            --vigil_instance_scoped_suspend_count;
+            return 0;
+        }
+        return vigil_instance->storageEndpoint().resumeWrite(
+            reset_media_queue); // Only actually resume when count is zero
     }
     catch (const std::exception &e)
     {
