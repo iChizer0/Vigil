@@ -1,7 +1,6 @@
 #ifndef VIGIL_CTYPES_H
 #define VIGIL_CTYPES_H
 
-#include <cstdint>
 #ifdef VG_CTYPES_VERSION
 #error "Duplicate definition of VG_CTYPES_VERSION"
 #else
