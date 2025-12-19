@@ -3,8 +3,7 @@
 #define VIGIL_CONFIGS_HPP
 
 #include <chrono>
-#include <cstdint>
-#include <memory>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -496,6 +495,6 @@ struct StorageControlConfig
     }
 };
 
-} // namespace vigil::config
+} // namespace vigil::configs
 
 #endif

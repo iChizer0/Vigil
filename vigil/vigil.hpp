@@ -5,7 +5,6 @@
 #include <memory>
 
 #include "endpoints.hpp"
-#include "storage.hpp"
 #include "vigil_ctypes.h"
 
 namespace vigil {

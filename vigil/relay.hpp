@@ -19,12 +19,10 @@
 #include "context.hpp"
 #include "log.hpp"
 #include "status.hpp"
-#include "types.hpp"
 
 namespace vigil::relay {
 
 using namespace vigil::status;
-using namespace vigil::types;
 using namespace vigil::constants;
 
 class Relay final

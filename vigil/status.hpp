@@ -2,11 +2,9 @@
 #ifndef VIGIL_STATUS_HPP
 #define VIGIL_STATUS_HPP
 
-#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>

@@ -4,8 +4,6 @@
 
 #include <chrono>
 
-#include "vigil_ctypes.h"
-
 #ifndef VG_LOG_LEVEL
 #define VG_LOG_LEVEL (vg_log_level_e::VG_LOG_LEVEL_DEBUG)
 #endif

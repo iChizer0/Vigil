@@ -26,7 +26,6 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 
-#include "configs.hpp"
 #include "constants.hpp"
 #include "context.hpp"
 #include "index_manager.hpp"
@@ -41,7 +40,6 @@ namespace vigil::slot {
 
 using namespace vigil::status;
 using namespace vigil::types;
-using namespace vigil::configs;
 using namespace vigil::constants;
 using namespace vigil::index_manager;
 using namespace vigil::write_stats;

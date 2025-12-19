@@ -2,24 +2,17 @@
 #ifndef VIGIL_WRITE_STATS_HPP
 #define VIGIL_WRITE_STATS_HPP
 
-#include <algorithm>
+#include <numeric>
 #include <array>
-#include <atomic>
 #include <cctype>
 #include <chrono>
-#include <cstdint>
-#include <memory>
 #include <mutex>
 
-#include "constants.hpp"
-#include "context.hpp"
-#include "log.hpp"
 #include "types.hpp"
 
 namespace vigil::write_stats {
 
 using namespace vigil::types;
-using namespace vigil::constants;
 
 class WriteStats final
 {

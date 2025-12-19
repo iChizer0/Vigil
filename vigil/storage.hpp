@@ -31,12 +31,10 @@
 #include "log.hpp"
 #include "slot.hpp"
 #include "status.hpp"
-#include "types.hpp"
 
 namespace vigil::storage {
 
 using namespace vigil::status;
-using namespace vigil::types;
 using namespace vigil::configs;
 using namespace vigil::constants;
 using namespace vigil::slot;
