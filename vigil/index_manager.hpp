@@ -69,7 +69,6 @@ public:
 
     bool trySync() noexcept
     {
-        FileSize new_used_bytes = 0;
         const auto last_fs_sync_rev = _fs_sync_revision.load(std::memory_order_acquire);
         std::vector<std::pair<FileIndex, FileSize>> new_1st_level_stats;
         try
@@ -95,7 +94,6 @@ public:
                                 "Failed to get size for entry during indexing: ", entry.path());
                             return false;
                         }
-                        new_used_bytes += *entry_size;
                         new_1st_level_stats.emplace_back(FileIndex(entry.path(), kStorageFirstLevelDirNameTimeFormat),
                             *entry_size);
                         if (last_fs_sync_rev != _fs_sync_revision.load(std::memory_order_acquire))

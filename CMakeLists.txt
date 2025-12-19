@@ -11,6 +11,10 @@ option(VIGIL_USE_SYSTEM_NLOHMANN_JSON "Use system-provided nlohmann_json" OFF)
 option(VIGIL_USE_SYSTEM_PROTOBUF "Use system-provided Protobuf" OFF)
 option(VIGIL_USE_BUILDROOT_SYSROOT "Use Buildroot sysroot for cross-compilation" OFF)
 
+if(NOT VIGIL_USE_BUILDROOT_SYSROOT)
+	set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
+
 if(VIGIL_ENABLE_WARNINGS)
 	set(VIGIL_WARNING_FLAGS -Wall -Wextra -Wpedantic)
 endif()
