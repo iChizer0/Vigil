@@ -12,6 +12,7 @@ namespace vigil::constants {
 
 static inline constexpr const int kEndpointErrorBase = 30000;
 
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winterference-size"
 static inline constexpr const size_t kHardwareDestructiveInterferenceSize = std::hardware_destructive_interference_size;

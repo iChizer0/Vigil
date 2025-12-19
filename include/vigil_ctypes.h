@@ -1,6 +1,7 @@
 #ifndef VIGIL_CTYPES_H
 #define VIGIL_CTYPES_H
 
+#include <cstdint>
 #ifdef VG_CTYPES_VERSION
 #error "Duplicate definition of VG_CTYPES_VERSION"
 #else
@@ -83,6 +84,7 @@ typedef struct vg_rule_stats_t
 {
     vg_rule_type_e last_eval_type; /**< Type of the last evaluated rule. */
     const char *last_eval_name;    /**< Internal managed string, null terminated, do not free. */
+    int64_t last_eval_timestamp;   /**< Timestamp of the last evaluation. */
 } vg_rule_stats_t;
 
 /**

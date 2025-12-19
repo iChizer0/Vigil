@@ -1,4 +1,5 @@
 #pragma once
+#include <shared_mutex>
 #ifndef VIGIL_TYPES_HPP
 #define VIGIL_TYPES_HPP
 

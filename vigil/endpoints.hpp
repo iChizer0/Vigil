@@ -1,4 +1,5 @@
 #pragma once
+#include "vigil_ctypes.h"
 #ifndef VIGIL_ENDPOINTS_HPP
 #define VIGIL_ENDPOINTS_HPP
 
@@ -489,11 +490,16 @@ private:
             return; // No new data to evaluate or disabled
 
         bool matched = false;
+        vg_rule_type_e type = VG_RULE_TYPE_UNKNOWN;
         std::string id;
         {
             const std::shared_lock lock(_schedule_rule_mutex);
             if (_schedule_rule && _schedule_rule->operator()(*_ctx))
+            {
                 matched = true;
+                type = _schedule_rule->type();
+                id = _schedule_rule->id();
+            }
         }
         if (!matched)
             goto l_not_matched;
@@ -502,6 +508,7 @@ private:
             if (_record_rule && _record_rule->operator()(*_ctx))
             {
                 matched = true;
+                type = _record_rule->type();
                 id = _record_rule->id();
             }
             else
@@ -512,8 +519,15 @@ private:
         {
             const std::unique_lock lock(_ctx->last_evaluation_result_mutex);
             _ctx->last_evaluation_result.setMatched(true);
+            _ctx->last_evaluation_result.setId(id);
             _ctx->last_evaluation_result.setTimestamp(_ctx->time_stamp);
-            _ctx->last_evaluation_result.setId(std::move(id));
+        }
+        if (_ctx->c_api.basic.on_rule_activate_cb)
+        {
+            const auto stats = vg_rule_stats_t { .last_eval_type = type,
+                .last_eval_name = id.c_str(),
+                .last_eval_timestamp = _ctx->time_stamp };
+            _ctx->c_api.basic.on_rule_activate_cb(&stats);
         }
 
         return;
@@ -784,6 +798,6 @@ private:
     std::unique_ptr<ConfigStore> _storage_config_store;
 };
 
-} // namespace vigil::endpoint
+} // namespace vigil::endpoints
 
 #endif
