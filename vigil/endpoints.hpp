@@ -518,9 +518,7 @@ private:
             goto l_not_matched;
         {
             const std::unique_lock lock(_ctx->last_evaluation_result_mutex);
-            _ctx->last_evaluation_result.setMatched(true);
-            _ctx->last_evaluation_result.setId(id);
-            _ctx->last_evaluation_result.setTimestamp(_ctx->time_stamp);
+            _ctx->last_evaluation_result.emplace(true);
         }
         if (_ctx->c_api.basic.on_rule_activate_cb)
         {
@@ -534,7 +532,7 @@ private:
 
     l_not_matched: {
         const std::unique_lock lock(_ctx->last_evaluation_result_mutex);
-        _ctx->last_evaluation_result.reset();
+        _ctx->last_evaluation_result.emplace(false);
     }
     }
 

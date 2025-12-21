@@ -638,6 +638,10 @@ private:
 
     void writerThreadTask()
     {
+        {
+            const std::unique_lock lock(_ctx.last_evaluation_result_mutex);
+            _ctx.last_evaluation_result.reset();
+        }
         while (!_stop_token.load(std::memory_order_acquire))
         {
             // If already has a writer, check if it is finished
@@ -661,7 +665,7 @@ private:
             }
 
             const auto start = std::chrono::steady_clock::now();
-            bool start_new_writer = true;
+            bool start_new_writer = false;
 
             // Check if we are asked to stop writing (suspend)
             if (start_new_writer = isReadyToWrite(); !start_new_writer)
@@ -683,7 +687,8 @@ private:
             // If no writer is active, check the rule evaluation status if should create one
             {
                 const std::unique_lock lock(_ctx.last_evaluation_result_mutex);
-                start_new_writer = _ctx.last_evaluation_result.matched();
+                start_new_writer = _ctx.last_evaluation_result.value();
+                _ctx.last_evaluation_result.reset();
             }
             if (!start_new_writer)
                 goto l_whether_start_new;

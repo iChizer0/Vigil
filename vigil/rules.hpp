@@ -93,7 +93,7 @@ public:
 
     bool operator()(const Context &ctx) const noexcept override
     {
-       return  _msk_rng ? filterDetection(ctx) : filterClassification(ctx);
+        return _msk_rng ? filterDetection(ctx) : filterClassification(ctx);
     }
 
 private:

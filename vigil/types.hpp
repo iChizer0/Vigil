@@ -47,61 +47,32 @@ private:
 class EvaluationResult final
 {
 public:
-    EvaluationResult() : _matched(false), _timestamp(0), _id() { }
+    EvaluationResult() : _consumed(true), _matched(false) { }
 
     ~EvaluationResult() = default;
 
-    inline bool matched() const noexcept
+    inline bool emplace(bool matched) noexcept
     {
-        return _matched;
-    }
-
-    inline int64_t timestamp() const noexcept
-    {
-        return _timestamp;
-    }
-
-    std::string id() const noexcept
-    {
-        return _id;
-    }
-
-    inline operator bool() const noexcept
-    {
-        return _matched;
-    }
-
-    inline void setMatched(bool matched) noexcept
-    {
+        if (!_consumed)
+            return false;
         _matched = matched;
+        return true;
     }
 
-    inline void setTimestamp(int64_t ts) noexcept
+    inline bool value() const noexcept
     {
-        _timestamp = ts;
-    }
-
-    inline void setId(const std::string &id) noexcept
-    {
-        _id = id;
-    }
-
-    inline void setId(std::string &id) noexcept
-    {
-        _id = std::move(id);
+        return _matched;
     }
 
     inline void reset() noexcept
     {
+        _consumed = true;
         _matched = false;
-        _timestamp = 0;
-        _id.clear();
     }
 
 private:
+    bool _consumed;
     bool _matched;
-    int64_t _timestamp;
-    std::string _id;
 };
 
 template<typename T>
