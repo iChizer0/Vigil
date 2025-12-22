@@ -31,9 +31,9 @@ template<typename T>
 class BaseWriter
 {
 public:
-    BaseWriter(FileWriterSettingsWithRevision settings, T &slot)
+    BaseWriter(FileWriterSettingsWithRevision settings, T &slot, std::shared_ptr<EvaluationResult> reason)
         : _settings(std::move(settings)), _slot(slot), _start_time(std::chrono::steady_clock::now()),
-          _cache_file_info(settings.second.evaluation_result)
+          _cache_file_info(reason)
     {
         if (!initPathsAndFileName())
             throw Exception("BaseWriter failed to initialize paths and file name");
@@ -136,7 +136,8 @@ template<typename T>
 class ImageWriter final: public BaseWriter<T>
 {
 public:
-    ImageWriter(FileWriterSettingsWithRevision settings, T &slot) : BaseWriter<T>(std::move(settings), slot)
+    ImageWriter(FileWriterSettingsWithRevision settings, T &slot, std::shared_ptr<EvaluationResult> reason)
+        : BaseWriter<T>(std::move(settings), slot, reason)
     {
         if (!this->ctxRef().c_api.media.image_capture_cb)
             throw Exception("ImageWriter initialized without image_capture_cb set");
@@ -165,8 +166,8 @@ template<typename T>
 class VideoWriter final: public BaseWriter<T>
 {
 public:
-    VideoWriter(FileWriterSettingsWithRevision settings, T &slot)
-        : BaseWriter<T>(settings, slot), _video_clip_length(settings.second.video_clip_length), _fd(-1),
+    VideoWriter(FileWriterSettingsWithRevision settings, T &slot, std::shared_ptr<EvaluationResult> reason)
+        : BaseWriter<T>(settings, slot, reason), _video_clip_length(settings.second.video_clip_length), _fd(-1),
           _is_clip_start(true), _is_clip_finish(false)
     {
         if (!this->ctxRef().c_api.media.video_file_create_cb || !this->ctxRef().c_api.media.video_file_finish_cb)

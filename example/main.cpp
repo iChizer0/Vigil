@@ -43,7 +43,7 @@ vg_sta_e log_cb(vg_log_level_e level, const char *msg, size_t bytes_len)
 
 void on_rule_activate_cb(const vg_rule_stats_t *stats)
 {
-    std::cout << "Rule activated: " << (stats->last_eval_name ? stats->last_eval_name : "unknown") << std::endl;
+    std::cout << "Rule activated: " << (stats->id ? stats->id : "unknown") << std::endl;
 }
 
 vg_sta_e acquire_cb(int pin, vg_gpio_pin_lvl_e initial_level, size_t debounce_time_ms)
@@ -149,8 +149,8 @@ int main()
     // Storage
     config.storage.internal_device_path = "/dev/null";
     config.storage.internal_mount_point = "/tmp";
-    config.storage.data_directory = "data";
-    config.storage.relay_directory = "relay";
+    config.storage.data_directory_name = "data";
+    config.storage.relay_directory_path = "relay";
     config.storage.on_mount_cb = on_mount_cb;
     config.storage.on_unmount_cb = on_unmount_cb;
     config.storage.is_hidden_device_cb = is_hidden_device_cb;

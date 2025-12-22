@@ -182,9 +182,6 @@ struct Context
     mutable std::shared_mutex writer_settings_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> writer_settings_revision = 0;
     FileWriterSettings writer_settings = FileWriterSettings();
-    // Sync record cache status (shared)
-    mutable std::shared_mutex record_cache_mutex;
-    std::queue<CacheFileInfo> record_cache_queue;
     // Sync HTTP rule activation (shared)
     mutable std::atomic<bool> http_rule_activated = false;
 

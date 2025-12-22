@@ -29,7 +29,7 @@ class Relay final
 {
 public:
     Relay(Context &ctx, const std::filesystem::path &target_dir)
-        : _ctx(ctx), _target_dir_path(target_dir), _relay_dir_path(_ctx.c_api.storage.relay_directory), _mutex(),
+        : _ctx(ctx), _target_dir_path(target_dir), _relay_dir_path(_ctx.c_api.storage.relay_directory_path), _mutex(),
           _relay_dir_mutex(), _relay_dir_name(), _relay_thread(nullptr), _last_active_time()
     {
     }

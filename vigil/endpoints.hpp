@@ -573,9 +573,7 @@ private:
 
         if (_ctx->c_api.basic.on_rule_activate_cb)
         {
-            const auto stats = vg_rule_stats_t { .last_eval_type = type,
-                .last_eval_name = id.c_str(),
-                .last_eval_timestamp = _ctx->time_stamp };
+            const auto stats = vg_rule_stats_t { .type = type, .id = id.c_str(), .timestamp = _ctx->time_stamp };
             _ctx->c_api.basic.on_rule_activate_cb(&stats);
         }
         try

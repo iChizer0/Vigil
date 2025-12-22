@@ -32,6 +32,7 @@ static inline constexpr const size_t kVideoFrameBufferSize = 30 * 5;
 static inline constexpr const size_t kAudioFrameBufferSize = 50 * 5;
 static inline constexpr const size_t kMediaMuxerBufferSize = kVideoFrameBufferSize + kAudioFrameBufferSize;
 
+static inline constexpr const std::string_view kStorageMountBasePath = "/mnt";
 static inline constexpr const char *kStorageFirstLevelDirNameTimeFormat = "%Y-%m-%d";
 static inline constexpr const size_t kStorageNetlinkBufferSize = 4096;
 static inline constexpr const std::string_view kStorageNetlinkAction = "ACTION=";

@@ -69,8 +69,8 @@ void printStats(IndexManager &manager)
         const auto sys_time = std::chrono::file_clock::to_sys(index.creation_time);
         const std::time_t c_time = std::chrono::system_clock::to_time_t(sys_time);
         std::tm tm = *std::localtime(&c_time);
-        std::cout << "  " << std::setw(24) << std::left << index.name << " | size: " << std::setw(12)
-                  << std::right << size << " bytes | created: " << std::put_time(&tm, "%F %T") << std::endl;
+        std::cout << "  " << std::setw(24) << std::left << index.name << " | size: " << std::setw(12) << std::right
+                  << size << " bytes | created: " << std::put_time(&tm, "%F %T") << std::endl;
     }
 }
 
@@ -162,8 +162,7 @@ bool createTempCacheFileWithDD(const std::filesystem::path &path, FileSize bytes
     const FileSize bs = std::clamp<FileSize>(bytes, 1, 1024 * 1024);
     const FileSize count = (bytes + bs - 1) / bs;
     std::ostringstream cmd;
-    cmd << "dd if=/dev/zero of=" << escapePathForShell(path) << " bs=" << bs << " count=" << count
-        << " status=none";
+    cmd << "dd if=/dev/zero of=" << escapePathForShell(path) << " bs=" << bs << " count=" << count << " status=none";
     const auto exit_code = std::system(cmd.str().c_str());
     if (exit_code != 0)
     {
@@ -175,9 +174,9 @@ bool createTempCacheFileWithDD(const std::filesystem::path &path, FileSize bytes
 
 std::filesystem::path makeTempCacheFilePath(const std::filesystem::path &root)
 {
-    const auto stamp = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now().time_since_epoch())
-                           .count();
+    const auto stamp
+        = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+              .count();
     return root / ".tmp_cache_files" / ("cache_" + std::to_string(stamp));
 }
 
@@ -188,7 +187,7 @@ int main(int argc, char **argv)
     vg_config_t cfg {};
     cfg.basic.log_cb = log_cb;
     cfg.basic.log_level = VG_LOG_LEVEL_DEBUG;
-    cfg.storage.relay_directory = "relay";
+    cfg.storage.relay_directory_path = "relay";
 
     Context ctx(cfg);
 
@@ -271,8 +270,7 @@ int main(int argc, char **argv)
                 cache_file_info.target_dir_name = tokens[1];
                 cache_file_info.creation_time = std::chrono::file_clock::now();
                 if (auto added = manager.moveAndAddCacheFile(cache_file_info))
-                    std::cout << "Moved cache file into '" << tokens[1] << "' (" << *added << " bytes)"
-                              << std::endl;
+                    std::cout << "Moved cache file into '" << tokens[1] << "' (" << *added << " bytes)" << std::endl;
                 else
                 {
                     std::cout << "moveAndAddCacheFile failed" << std::endl;

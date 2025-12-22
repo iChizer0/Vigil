@@ -48,26 +48,26 @@ public:
           _initial_scan_done(false)
     {
         // Check data directory name validity (non-empty, not slash or dot)
-        if (_ctx.c_api.storage.data_directory)
+        if (_ctx.c_api.storage.data_directory_name)
         {
-            const auto size = std::strlen(_ctx.c_api.storage.data_directory);
-            const auto has_slash_or_dot = std::any_of(_ctx.c_api.storage.data_directory,
-                _ctx.c_api.storage.data_directory + size, [](char c) { return c == '/' || c == '.'; });
+            const auto size = std::strlen(_ctx.c_api.storage.data_directory_name);
+            const auto has_slash_or_dot = std::any_of(_ctx.c_api.storage.data_directory_name,
+                _ctx.c_api.storage.data_directory_name + size, [](char c) { return c == '/' || c == '.'; });
             if (size > 0 && !has_slash_or_dot)
-                _data_dir_name = _ctx.c_api.storage.data_directory;
+                _data_dir_name = _ctx.c_api.storage.data_directory_name;
             else
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Invalid data directory name ", _ctx.c_api.storage.data_directory,
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Invalid data directory name ", _ctx.c_api.storage.data_directory_name,
                     ", using default name ", kDataDirDefaultName);
         }
 
         // Clean relay directory
-        if (_ctx.c_api.storage.relay_directory)
+        if (_ctx.c_api.storage.relay_directory_path)
         {
             std::error_code ec;
-            std::filesystem::remove_all(_ctx.c_api.storage.relay_directory, ec);
+            std::filesystem::remove_all(_ctx.c_api.storage.relay_directory_path, ec);
             if (ec)
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to clean relay directory ",
-                    _ctx.c_api.storage.relay_directory, ": ", ec.message());
+                    _ctx.c_api.storage.relay_directory_path, ": ", ec.message());
         }
 
         // Start manager thread
@@ -357,7 +357,7 @@ private:
 
     std::filesystem::path getMountPath(const std::string &dev_name) const
     {
-        return std::filesystem::path("/mnt") / ("vg_" + dev_name);
+        return std::filesystem::path(kStorageMountBasePath) / ("vg_" + dev_name);
     }
 
     void syncAndUpdateSlotsWithNetlink()
@@ -393,9 +393,17 @@ private:
             bool internal;
         };
         std::unordered_map<std::string, SlotInfo> dev_2_slot_info_vec;
-        if (_ctx.c_api.storage.internal_device_path && _ctx.c_api.storage.internal_mount_point)
+        if (_ctx.c_api.storage.internal_device_path)
+        {
+            std::string mount_point;
+            if (_ctx.c_api.storage.internal_mount_point)
+                mount_point = _ctx.c_api.storage.internal_mount_point;
+            else
+                mount_point
+                    = getMountPath(std::filesystem::path(_ctx.c_api.storage.internal_device_path).filename().string());
             dev_2_slot_info_vec.emplace(_ctx.c_api.storage.internal_device_path,
-                SlotInfo { _ctx.c_api.storage.internal_mount_point, false, true });
+                SlotInfo { std::move(mount_point), false, true });
+        }
 
         if (!_initial_scan_done)
         {

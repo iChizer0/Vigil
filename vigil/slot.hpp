@@ -500,14 +500,10 @@ private:
                 }
                 if (!cache_file_info) // If no cache file info is available, break the loop
                     break;
-                if (auto size = _index_manager.moveAndAddCacheFile(*cache_file_info))
+                if (auto size = _index_manager.moveAndAddCacheFile(*cache_file_info); size)
                 {
                     if (*size > 0)
                         _write_stats.addNewWriteStat(*size);
-                    {
-                        const std::unique_lock lock(_ctx.record_cache_mutex);
-                        _ctx.record_cache_queue.push(*cache_file_info);
-                    }
                 }
                 else
                 {
@@ -722,14 +718,15 @@ private:
             try
             {
                 auto writer_settings = _ctx.getWriterSettings();
-                writer_settings.second.evaluation_result = evaluation_result;
                 switch (writer_settings.second.type)
                 {
                     case FileWriterSettings::CaptureType::Image:
-                        _writer_task = std::make_unique<ImageWriter<Slot>>(std::move(writer_settings), *this);
+                        _writer_task
+                            = std::make_unique<ImageWriter<Slot>>(std::move(writer_settings), *this, evaluation_result);
                         break;
                     case FileWriterSettings::CaptureType::Video:
-                        _writer_task = std::make_unique<VideoWriter<Slot>>(std::move(writer_settings), *this);
+                        _writer_task
+                            = std::make_unique<VideoWriter<Slot>>(std::move(writer_settings), *this, evaluation_result);
                         break;
                     default: {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,

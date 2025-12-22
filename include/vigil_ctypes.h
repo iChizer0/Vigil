@@ -82,9 +82,9 @@ typedef enum vg_rule_type_e {
 
 typedef struct vg_rule_stats_t
 {
-    vg_rule_type_e last_eval_type; /**< Type of the last evaluated rule. */
-    const char *last_eval_name;    /**< Internal managed string, null terminated, do not free. */
-    int64_t last_eval_timestamp;   /**< Timestamp of the last evaluation. */
+    vg_rule_type_e type; /**< Type of the last evaluated rule. */
+    const char *id;      /**< Internal managed string, null terminated, do not free. */
+    int64_t timestamp;   /**< Timestamp of the last evaluation. */
 } vg_rule_stats_t;
 
 /**
@@ -163,8 +163,8 @@ typedef struct vg_config_storage_t
                                                     from storage management. */
     const char *internal_device_path; /**< Device path to the internal storage device. e.g. /dev/mmcblk0p1 */
     const char *internal_mount_point; /**< Filesystem path to the internal storage mount point. */
-    const char *data_directory;       /**< Filesystem path to the data storage root. e.g. DCIM, don't start with '/' */
-    const char *relay_directory;      /**< Filesystem path to the nginx relay directory for Vigil relay data. */
+    const char *data_directory_name;  /**< Filesystem name to the data storage root. e.g. DCIM, don't start with '/' */
+    const char *relay_directory_path; /**< Filesystem path to the nginx relay directory for Vigil relay data. */
 } vg_config_storage_t;
 
 typedef struct vg_config_t
