@@ -504,6 +504,10 @@ private:
                 {
                     if (*size > 0)
                         _write_stats.addNewWriteStat(*size);
+                    {
+                        const std::unique_lock lock(_ctx.record_cache_mutex);
+                        _ctx.record_cache_queue.push(*cache_file_info);
+                    }
                 }
                 else
                 {
@@ -651,6 +655,10 @@ private:
                 {
                     const auto end = _writer_task->startTime() + _writer_task->interval();
                     _writer_task.reset();
+                    {
+                        const std::unique_lock lock(_ctx.last_evaluation_result_mutex);
+                        _ctx.last_evaluation_result.reset(); // Clear evaluation result after writer finished
+                    }
                     do
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -666,10 +674,11 @@ private:
 
             const auto start = std::chrono::steady_clock::now();
             bool start_new_writer = false;
+            std::shared_ptr<EvaluationResult> evaluation_result;
 
             // Check if we are asked to stop writing (suspend)
             if (start_new_writer = isReadyToWrite(); !start_new_writer)
-                goto l_whether_start_new;
+                goto l_continue;
 
             // Check if could create a new writer
             if (!_quota_rotate.load(std::memory_order_acquire))
@@ -677,38 +686,43 @@ private:
                 if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit > 0)
                 {
                     if (start_new_writer = _index_manager.usedBytes() < limit; !start_new_writer)
-                        goto l_whether_start_new;
+                        goto l_continue;
                 }
                 else if (start_new_writer = _stats.load(std::memory_order_acquire).free_bytes > kMinFileSystemFreeBytes;
                     !start_new_writer)
-                    goto l_whether_start_new;
+                    goto l_continue;
             }
 
             // If no writer is active, check the rule evaluation status if should create one
             {
                 const std::unique_lock lock(_ctx.last_evaluation_result_mutex);
-                start_new_writer = _ctx.last_evaluation_result.value();
-                _ctx.last_evaluation_result.reset();
+                if (_ctx.last_evaluation_result)
+                {
+                    start_new_writer = true;
+                    evaluation_result = _ctx.last_evaluation_result;
+                }
             }
             if (!start_new_writer)
-                goto l_whether_start_new;
+                goto l_continue;
 
             // If media is paused, do not start new writer
             if (start_new_writer = !_ctx.media_paused.load(std::memory_order_acquire); !start_new_writer)
-                goto l_whether_start_new;
+                goto l_continue;
 
-        l_whether_start_new:
-            if (!start_new_writer)
-            {
-                const auto elapsed = std::chrono::steady_clock::now() - start;
-                if (elapsed < kWriterProbeInterval)
-                    std::this_thread::sleep_for(kWriterProbeInterval - elapsed);
-                continue;
-            }
+            goto l_start_new;
 
+        l_continue: {
+            const auto elapsed = std::chrono::steady_clock::now() - start;
+            if (elapsed < kWriterProbeInterval)
+                std::this_thread::sleep_for(kWriterProbeInterval - elapsed);
+            continue;
+        }
+
+        l_start_new:
             try
             {
                 auto writer_settings = _ctx.getWriterSettings();
+                writer_settings.second.evaluation_result = evaluation_result;
                 switch (writer_settings.second.type)
                 {
                     case FileWriterSettings::CaptureType::Image:
@@ -717,10 +731,13 @@ private:
                     case FileWriterSettings::CaptureType::Video:
                         _writer_task = std::make_unique<VideoWriter<Slot>>(std::move(writer_settings), *this);
                         break;
-                    default:
+                    default: {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
                             "Unsupported writer type for storage slot with device path ", _dev_path);
-                        break;
+                        const std::unique_lock lock(_ctx.last_evaluation_result_mutex);
+                        _ctx.last_evaluation_result.reset(); // Clear invalid evaluation result
+                    }
+                    break;
                 }
             }
             catch (const std::exception &e)

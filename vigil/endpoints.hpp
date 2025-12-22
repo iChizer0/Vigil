@@ -473,7 +473,7 @@ public:
     }
 
 private:
-    void ruleThreadTask()
+    void ruleThreadTask() noexcept
     {
         while (!_rule_stop_token.load(std::memory_order_relaxed))
         {
@@ -484,42 +484,34 @@ private:
         }
     }
 
-    inline void ruleTaskLoop()
+    inline void ruleTaskLoop() noexcept
     {
         if (!_ctx->tick())
             return; // No new data to evaluate or disabled
 
-        bool matched = false;
         vg_rule_type_e type = VG_RULE_TYPE_UNKNOWN;
         std::string id;
         {
             const std::shared_lock lock(_schedule_rule_mutex);
             if (_schedule_rule && _schedule_rule->operator()(*_ctx))
             {
-                matched = true;
                 type = _schedule_rule->type();
                 id = _schedule_rule->id();
             }
+            else
+                return;
         }
-        if (!matched)
-            goto l_not_matched;
         {
             const std::shared_lock lock_record(_record_rule_mutex);
             if (_record_rule && _record_rule->operator()(*_ctx))
             {
-                matched = true;
                 type = _record_rule->type();
                 id = _record_rule->id();
             }
             else
-                matched = false;
+                return;
         }
-        if (!matched)
-            goto l_not_matched;
-        {
-            const std::unique_lock lock(_ctx->last_evaluation_result_mutex);
-            _ctx->last_evaluation_result.emplace(true);
-        }
+
         if (_ctx->c_api.basic.on_rule_activate_cb)
         {
             const auto stats = vg_rule_stats_t { .last_eval_type = type,
@@ -527,13 +519,16 @@ private:
                 .last_eval_timestamp = _ctx->time_stamp };
             _ctx->c_api.basic.on_rule_activate_cb(&stats);
         }
-
-        return;
-
-    l_not_matched: {
-        const std::unique_lock lock(_ctx->last_evaluation_result_mutex);
-        _ctx->last_evaluation_result.emplace(false);
-    }
+        try
+        {
+            const std::unique_lock lock(_ctx->last_evaluation_result_mutex);
+            if (!_ctx->last_evaluation_result)
+                _ctx->last_evaluation_result = std::make_shared<EvaluationResult>(_ctx->current_time, _ctx->time_stamp);
+        }
+        catch (std::exception &e)
+        {
+            VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Failed to create EvaluationResult in ruleTaskLoop: ", e.what());
+        }
     }
 
 private:

@@ -172,7 +172,7 @@ struct Context
     std::queue<InferenceResult> inference_queue;
     // Sync last rule evaluation result, updated in RuleEndpoint::operator()()
     std::mutex last_evaluation_result_mutex;
-    EvaluationResult last_evaluation_result = {};
+    std::shared_ptr<EvaluationResult> last_evaluation_result;
     // Sync video/audio frame buffers, updated in enqueueMediaFrame()
     std::mutex media_mutex;
     std::deque<MediaFrame> media_frame_buffer;
@@ -182,6 +182,9 @@ struct Context
     mutable std::shared_mutex writer_settings_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> writer_settings_revision = 0;
     FileWriterSettings writer_settings = FileWriterSettings();
+    // Sync record cache status (shared)
+    mutable std::shared_mutex record_cache_mutex;
+    std::queue<CacheFileInfo> record_cache_queue;
 
     // Local data, updated in tick()
     std::chrono::steady_clock::time_point current_time = {};

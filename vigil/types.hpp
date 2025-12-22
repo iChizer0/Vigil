@@ -1,5 +1,5 @@
 #pragma once
-#include <shared_mutex>
+#include <optional>
 #ifndef VIGIL_TYPES_HPP
 #define VIGIL_TYPES_HPP
 
@@ -44,35 +44,16 @@ private:
     std::string _msg;
 };
 
-class EvaluationResult final
+struct EvaluationResult
 {
-public:
-    EvaluationResult() : _consumed(true), _matched(false) { }
+    std::chrono::steady_clock::time_point eval_timepoint;
+    int64_t eval_timestamp;
+
+    EvaluationResult() : eval_timepoint(), eval_timestamp(0) { }
+
+    EvaluationResult(std::chrono::steady_clock::time_point tp, int64_t ts) : eval_timepoint(tp), eval_timestamp(ts) { }
 
     ~EvaluationResult() = default;
-
-    inline bool emplace(bool matched) noexcept
-    {
-        if (!_consumed)
-            return false;
-        _matched = matched;
-        return true;
-    }
-
-    inline bool value() const noexcept
-    {
-        return _matched;
-    }
-
-    inline void reset() noexcept
-    {
-        _consumed = true;
-        _matched = false;
-    }
-
-private:
-    bool _consumed;
-    bool _matched;
 };
 
 template<typename T>
@@ -588,6 +569,16 @@ struct CacheFileInfo final
     std::filesystem::path cache_file_path;
     std::string target_dir_name;
     std::filesystem::file_time_type creation_time;
+    std::shared_ptr<EvaluationResult> evaluation_result;
+
+    CacheFileInfo() : cache_file_path(), target_dir_name(), creation_time(), evaluation_result() { }
+
+    CacheFileInfo(std::shared_ptr<EvaluationResult> er)
+        : cache_file_path(), target_dir_name(), creation_time(), evaluation_result(er)
+    {
+    }
+
+    ~CacheFileInfo() = default;
 };
 
 enum class SlotState : int {
@@ -804,6 +795,7 @@ struct FileWriterSettings
     std::chrono::milliseconds interval;
     std::string_view file_name_prefix;
     std::chrono::seconds video_clip_length;
+    std::shared_ptr<EvaluationResult> evaluation_result;
 
     FileWriterSettings(std::string fmt = kRecordWriterDefaultFormat,
         std::chrono::milliseconds itv = kRecordWriterDefaultIntervalMs,

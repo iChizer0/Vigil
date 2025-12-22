@@ -32,7 +32,8 @@ class BaseWriter
 {
 public:
     BaseWriter(FileWriterSettingsWithRevision settings, T &slot)
-        : _settings(std::move(settings)), _slot(slot), _start_time(std::chrono::steady_clock::now()), _cache_file_info()
+        : _settings(std::move(settings)), _slot(slot), _start_time(std::chrono::steady_clock::now()),
+          _cache_file_info(settings.second.evaluation_result)
     {
         if (!initPathsAndFileName())
             throw Exception("BaseWriter failed to initialize paths and file name");
