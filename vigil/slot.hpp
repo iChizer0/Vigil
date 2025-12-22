@@ -369,7 +369,7 @@ public:
     // - MARK: Slot Protected Methods
 
 protected:
-    friend BaseWriter<Slot>;
+    friend SlotAdaptedWriter<Slot>;
 
     inline Context &ctxRef() const
     {
@@ -649,7 +649,7 @@ private:
             {
                 if (_writer_task->tryFinishWrite())
                 {
-                    const auto end = _writer_task->startTime() + _writer_task->interval();
+                    const auto end = _writer_task->endTime();
                     _writer_task.reset();
                     {
                         const std::unique_lock lock(_ctx.last_evaluation_result_mutex);
@@ -721,12 +721,12 @@ private:
                 switch (writer_settings.second.type)
                 {
                     case FileWriterSettings::CaptureType::Image:
-                        _writer_task
-                            = std::make_unique<ImageWriter<Slot>>(std::move(writer_settings), *this, evaluation_result);
+                        _writer_task = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
+                            std::ref(_ctx), std::move(writer_settings), evaluation_result);
                         break;
                     case FileWriterSettings::CaptureType::Video:
-                        _writer_task
-                            = std::make_unique<VideoWriter<Slot>>(std::move(writer_settings), *this, evaluation_result);
+                        _writer_task = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
+                            std::ref(_ctx), std::move(writer_settings), evaluation_result);
                         break;
                     default: {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
@@ -1284,7 +1284,7 @@ private:
     mutable WriteStats _write_stats;
 
     // Writer task
-    std::unique_ptr<BaseWriter<Slot>> _writer_task;
+    std::unique_ptr<SlotAdaptedWriter<Slot>> _writer_task;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<
         bool> _writer_task_stop_token; // Controls whether new writes are allowed and current writes should stop
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<int> _writer_task_count;
