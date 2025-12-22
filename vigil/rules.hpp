@@ -400,6 +400,29 @@ private:
     mutable int _found;
 };
 
+class HTTPRule: public BaseRule
+{
+public:
+    HTTPRule(const HTTPRuleConfig &, const Context &ctx) noexcept : BaseRule(VG_RULE_TYPE_HTTP, 0)
+    {
+        ctx.http_rule_activated.store(false);
+    }
+
+    ~HTTPRule() = default;
+
+private:
+    bool operator()(const Context &ctx) const noexcept override
+    {
+        auto activated = ctx.http_rule_activated.load(std::memory_order_acquire);
+        if (activated)
+        {
+            return ctx.http_rule_activated.compare_exchange_strong(activated, false, std::memory_order_acq_rel,
+                std::memory_order_acquire);
+        }
+        return false;
+    }
+};
+
 class ScheduleRule: public BaseRule
 {
 public:

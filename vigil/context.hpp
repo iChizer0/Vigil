@@ -185,6 +185,8 @@ struct Context
     // Sync record cache status (shared)
     mutable std::shared_mutex record_cache_mutex;
     std::queue<CacheFileInfo> record_cache_queue;
+    // Sync HTTP rule activation (shared)
+    mutable std::atomic<bool> http_rule_activated = false;
 
     // Local data, updated in tick()
     std::chrono::steady_clock::time_point current_time = {};

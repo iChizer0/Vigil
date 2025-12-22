@@ -16,6 +16,7 @@
 #include "inference.pb.h"
 #include "vigil.hpp"
 #include "vigil_capi.h"
+#include "vigil_ctypes.h"
 
 namespace vigil_c_api {
 
@@ -413,6 +414,29 @@ vg_sta_e vg_http_api_rule_record_config_post(const vg_http_api_request_t *reques
     {
         auto req_j = vg_http_api_request_2_json(*request);
         auto res_j = vigil_instance->ruleEndpoint().updateRecordRuleConfig(req_j, true);
+        return vg_http_api_json_2_response(res_j, *response);
+    }
+    catch (const std::exception &e)
+    {
+        vg_log_exception(vigil_instance->context().c_api, e);
+        return EFAULT;
+    }
+}
+
+vg_sta_e vg_http_api_rule_control_http_rule_activate_post(const vg_http_api_request_t *request,
+    vg_http_api_response_t *response)
+{
+    if (!request || !response || response->free_cb || response->body)
+        return EINVAL;
+
+    const std::shared_lock lock(vigil_instance_mutex);
+    if (!vigil_instance)
+        return ESRCH;
+
+    try
+    {
+        auto req_j = vg_http_api_request_2_json(*request);
+        auto res_j = vigil_instance->ruleEndpoint().controlHTTPRuleActivate(req_j);
         return vg_http_api_json_2_response(res_j, *response);
     }
     catch (const std::exception &e)

@@ -293,6 +293,11 @@ struct TTYRuleConfig
     }
 };
 
+struct HTTPRuleConfig
+{
+    HTTPRuleConfig() = default;
+};
+
 struct ScheduleRuleConfig
 {
     std::vector<TimeRange> active_weekdays;

@@ -77,6 +77,7 @@ typedef enum vg_rule_type_e {
     VG_RULE_TYPE_GPIO = 4,
     VG_RULE_TYPE_TTY = 5,
     VG_RULE_TYPE_SCHEDULE = 6,
+    VG_RULE_TYPE_HTTP = 7,
 } vg_rule_type_e;
 
 typedef struct vg_rule_stats_t

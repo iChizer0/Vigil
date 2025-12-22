@@ -104,6 +104,9 @@ vg_sta_e vg_http_api_rule_schedule_config_post(const vg_http_api_request_t *requ
 vg_sta_e vg_http_api_rule_record_config_get(vg_http_api_response_t *response);
 vg_sta_e vg_http_api_rule_record_config_post(const vg_http_api_request_t *request, vg_http_api_response_t *response);
 
+vg_sta_e vg_http_api_rule_control_http_rule_activate_post(const vg_http_api_request_t *request,
+    vg_http_api_response_t *response);
+
 // Storage Endpoint APIs
 vg_sta_e vg_http_api_storage_config_get(vg_http_api_response_t *response);
 vg_sta_e vg_http_api_storage_config_post(const vg_http_api_request_t *request, vg_http_api_response_t *response);

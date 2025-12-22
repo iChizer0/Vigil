@@ -342,6 +342,8 @@ public:
                 swapTypedRecordRule<GPIORule>(GPIORuleConfig(j.at("dGPIO"), *_ctx));
             else if (rule_type == "TTY")
                 swapTypedRecordRule<TTYRule>(TTYRuleConfig(j.at("dTTY"), *_ctx));
+            else if (rule_type == "HTTP")
+                swapTypedRecordRule<HTTPRule>(HTTPRuleConfig());
             else
                 throw Exception("Invalid rule type while updating record rule config '" + rule_type + "'");
 
@@ -408,6 +410,11 @@ public:
                         res_j["dTTY"] = obj;
                         current_selected = "TTY";
                     }
+                    else if constexpr (std::is_same_v<ConfigType, HTTPRuleConfig>)
+                    {
+                        // No parameters for HTTPRuleConfig
+                        current_selected = "HTTP";
+                    }
                 },
                 _record_rule_config_variant);
             res_j["sCurrentSelected"] = current_selected;
@@ -465,6 +472,58 @@ public:
         {
             res_j.clear();
             ret = ret != 0 ? ret : ENOENT;
+            res_j["message"] = e.what();
+        }
+        res_j["code"] = static_cast<int>(ret == 0 ? 0 : (kEndpointErrorBase + std::abs(ret)));
+
+        return res_j;
+    }
+
+    nlohmann::json controlHTTPRuleActivate(const nlohmann::json &)
+    {
+        auto res_j = nlohmann::json::object();
+        vg_sta_e ret = 0;
+
+        try
+        {
+            // Check if current record rule is HTTPRule
+            {
+                const std::shared_lock lock(_record_rule_mutex);
+                if (!_record_rule || _record_rule->type() != VG_RULE_TYPE_HTTP)
+                {
+                    ret = EPERM;
+                    throw Exception("Current record rule is not HTTP rule, cannot activate");
+                }
+            }
+
+            // Check if have pending evaluation result
+            {
+                const std::unique_lock lock(_ctx->last_evaluation_result_mutex);
+                if (_ctx->last_evaluation_result)
+                {
+                    ret = EBUSY;
+                    throw Exception("Pending evaluation result exists, cannot activate HTTP rule");
+                }
+            }
+
+            // Check if last activation is still in effect
+            if (_ctx->http_rule_activated.load())
+            {
+                ret = EALREADY;
+                throw Exception("HTTP rule is already activated, cannot activate again");
+            }
+
+            auto activate = _ctx->http_rule_activated.load();
+            if (!_ctx->http_rule_activated.compare_exchange_strong(activate, true))
+            {
+                ret = EAGAIN;
+                throw Exception("HTTP rule activation state changed concurrently, cannot activate");
+            }
+        }
+        catch (const std::exception &e)
+        {
+            res_j.clear();
+            ret = ret != 0 ? ret : EFAULT;
             res_j["message"] = e.what();
         }
         res_j["code"] = static_cast<int>(ret == 0 ? 0 : (kEndpointErrorBase + std::abs(ret)));
@@ -562,6 +621,8 @@ private:
                     return std::make_unique<GPIORule>(cfg, *_ctx);
                 else if constexpr (std::is_same_v<ConfigType, TTYRuleConfig>)
                     return std::make_unique<TTYRule>(cfg, *_ctx);
+                else if constexpr (std::is_same_v<ConfigType, HTTPRuleConfig>)
+                    return std::make_unique<HTTPRule>(cfg, *_ctx);
                 else
                     return nullptr;
             },
@@ -580,7 +641,7 @@ private:
 
     mutable std::shared_mutex _record_rule_mutex;
     nlohmann::json _record_rule_config;
-    std::variant<std::monostate, InferenceRuleSetConfig, TimerRuleConfig, GPIORuleConfig, TTYRuleConfig>
+    std::variant<std::monostate, InferenceRuleSetConfig, TimerRuleConfig, GPIORuleConfig, TTYRuleConfig, HTTPRuleConfig>
         _record_rule_config_variant;
     std::unique_ptr<BaseRule> _record_rule;
 
