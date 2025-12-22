@@ -1,5 +1,4 @@
 #pragma once
-#include <optional>
 #ifndef VIGIL_TYPES_HPP
 #define VIGIL_TYPES_HPP
 
