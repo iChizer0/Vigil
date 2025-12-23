@@ -13,6 +13,7 @@
 #include <variant>
 
 #include "constants.hpp"
+#include "log.hpp"
 #include "types.hpp"
 
 namespace vigil {
@@ -78,11 +79,12 @@ struct Context
             return false;
         }
 
-        current_time = std::chrono::steady_clock::now();
-        local_time = LocalTime::now();
-        time_stamp
-            = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
-                  .count();
+        {
+            steady_time = std::chrono::steady_clock::now();
+            const auto now = std::chrono::system_clock::now();
+            unix_time = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+            local_time = LocalTime(now);
+        }
 
         if (inference_subscribers.load(std::memory_order_relaxed) > 0)
         {
@@ -92,7 +94,7 @@ struct Context
                 return false;
 
             auto &[ts, result] = inference_queue.front();
-            time_stamp = ts; // Update timestamp to that of the inference result
+            unix_time = ts; // Update timestamp to that of the inference result
             if (auto *detection_vec = std::get_if<DetectionResultVec>(&result))
                 detections = std::move(*detection_vec);
             else if (auto *classification_vec = std::get_if<ClassificationResultVec>(&result))
@@ -164,6 +166,36 @@ struct Context
         return { writer_settings_revision.load(std::memory_order_acquire), writer_settings };
     }
 
+    // Try to update rule event (should be called in the same thread as tick())
+    bool tryUpdateRuleEvent(vg_rule_type_e type, const std::string &id) const noexcept
+    {
+        try
+        {
+            const std::unique_lock lock(rule_event_mutex);
+            if (!rule_event)
+            {
+                rule_event = std::make_shared<WriteEvent>(steady_time, unix_time);
+                rule_event_owner.type = type;
+                rule_event_owner.id = id;
+                rule_event_owner.timestamp = unix_time;
+                return true;
+            }
+        }
+        catch (std::exception &e)
+        {
+            VG_LOG(log, VG_LOG_LEVEL_ERROR, "Failed to create EvaluationResult in ruleTaskLoop: ", e.what());
+        }
+        return false;
+    }
+
+    // Clear rule event (thread-safe)
+    void clearRuleEvent() const noexcept
+    {
+        const std::unique_lock lock(rule_event_mutex);
+        rule_event.reset();
+        rule_event_owner.clear();
+    }
+
     // Shared data
     // Used to control rule evaluation and inference subscriptions
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> rule_enabled = false;
@@ -172,9 +204,9 @@ struct Context
     std::mutex inference_mutex;
     std::queue<InferenceResult> inference_queue;
     // Sync rule event, updated in RuleEndpoint::operator()()
-    std::shared_mutex rule_event_mutex;
-    std::shared_ptr<WriteEvent> rule_event;
-    EventOwner rule_event_owner;
+    mutable std::shared_mutex rule_event_mutex;
+    mutable std::shared_ptr<WriteEvent> rule_event;
+    mutable EventOwner rule_event_owner;
     // Sync video/audio frame buffers, updated in enqueueMediaFrame()
     std::mutex media_mutex;
     std::deque<MediaFrame> media_buffer;
@@ -184,13 +216,11 @@ struct Context
     mutable std::shared_mutex writer_settings_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> writer_settings_revision = 0;
     FileWriterSettings writer_settings = FileWriterSettings();
-    // Sync HTTP rule activation (shared)
-    mutable std::atomic<bool> http_rule_activated = false;
 
     // Local data, updated in tick()
-    std::chrono::steady_clock::time_point current_time = {};
-    LocalTime local_time = {};
-    int64_t time_stamp = 0;
+    mutable std::chrono::steady_clock::time_point steady_time = {};
+    mutable int64_t unix_time = 0;
+    LocalTime local_time = LocalTime::now();
     DetectionResultVec detections = {};
     ClassificationResultVec classifications = {};
 

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -277,7 +278,7 @@ public:
 
     bool operator()(const Context &ctx) const noexcept override
     {
-        auto now = ctx.current_time;
+        auto now = ctx.steady_time;
         if (now - _last_trigger_time >= _interval)
         {
             _last_trigger_time = now;
@@ -446,24 +447,45 @@ private:
 class HTTPRule: public BaseRule
 {
 public:
-    HTTPRule(const HTTPRuleConfig &, const Context &ctx) noexcept : BaseRule(VG_RULE_TYPE_HTTP, 0)
+    HTTPRule(const HTTPRuleConfig &, const Context &ctx) noexcept
+        : BaseRule(VG_RULE_TYPE_HTTP, 0), _ctx(ctx), _mutex(), _activated(false)
     {
-        ctx.http_rule_activated.store(false);
     }
 
     ~HTTPRule() = default;
 
+    vg_sta_e tryActivate() noexcept
+    {
+        const std::unique_lock lock(_mutex);
+        if (_activated)
+            return EALREADY;
+        {
+            const std::unique_lock lock2(_ctx.rule_event_mutex);
+            if (_ctx.rule_event)
+                return EBUSY;
+        }
+        _activated = true;
+        return 0;
+    }
+
 private:
     bool operator()(const Context &ctx) const noexcept override
     {
-        auto activated = ctx.http_rule_activated.load(std::memory_order_acquire);
-        if (activated)
+        const std::unique_lock lock(_mutex);
+        if (_activated)
         {
-            return ctx.http_rule_activated.compare_exchange_strong(activated, false, std::memory_order_acq_rel,
-                std::memory_order_acquire);
+            if (!ctx.tryUpdateRuleEvent(type(), id()))
+                return false;
+            _activated = false;
+            return true;
         }
         return false;
     }
+
+private:
+    const Context &_ctx;
+    mutable std::mutex _mutex;
+    mutable bool _activated;
 };
 
 class ScheduleRule: public BaseRule

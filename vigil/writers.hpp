@@ -138,6 +138,7 @@ public:
     {
         _slot.addToCacheFileSyncQueue(_cache_file_info);
         _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
+        this->ctxRef().clearRuleEvent();
     }
 
 protected:

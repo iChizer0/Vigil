@@ -522,39 +522,14 @@ public:
 
         try
         {
-            // Check if current record rule is HTTPRule
+            const std::shared_lock lock(_record_rule_mutex);
+            if (!_record_rule || _record_rule->type() != VG_RULE_TYPE_HTTP)
             {
-                const std::shared_lock lock(_record_rule_mutex);
-                if (!_record_rule || _record_rule->type() != VG_RULE_TYPE_HTTP)
-                {
-                    ret = EPERM;
-                    throw Exception("Current record rule is not HTTP rule, cannot activate");
-                }
+                ret = EPERM;
+                throw Exception("Current record rule is not HTTP rule, cannot activate");
             }
-
-            // Check if have pending evaluation result
-            {
-                const std::unique_lock lock(_ctx->rule_event_mutex);
-                if (_ctx->rule_event)
-                {
-                    ret = EBUSY;
-                    throw Exception("Pending evaluation result exists, cannot activate HTTP rule");
-                }
-            }
-
-            // Check if last activation is still in effect
-            if (_ctx->http_rule_activated.load())
-            {
-                ret = EALREADY;
-                throw Exception("HTTP rule is already activated, cannot activate again");
-            }
-
-            auto activate = _ctx->http_rule_activated.load();
-            if (!_ctx->http_rule_activated.compare_exchange_strong(activate, true))
-            {
-                ret = EAGAIN;
-                throw Exception("HTTP rule activation state changed concurrently, cannot activate");
-            }
+            if (ret = static_cast<HTTPRule *>(_record_rule.get())->tryActivate(); ret != 0)
+                throw Exception("Failed to activate HTTP rule, error code: " + std::to_string(ret));
         }
         catch (const std::exception &e)
         {
@@ -609,24 +584,11 @@ private:
 
         if (_ctx->c_api.basic.on_rule_event_cb)
         {
-            const auto evt = vg_rule_evt_t { .type = type, .id = id.c_str(), .timestamp = _ctx->time_stamp };
+            const auto evt = vg_rule_evt_t { .type = type, .id = id.c_str(), .timestamp = _ctx->unix_time };
             _ctx->c_api.basic.on_rule_event_cb(&evt);
         }
-        try
-        {
-            const std::unique_lock lock(_ctx->rule_event_mutex);
-            if (!_ctx->rule_event)
-            {
-                _ctx->rule_event = std::make_shared<WriteEvent>(_ctx->current_time, _ctx->time_stamp);
-                _ctx->rule_event_owner.type = type;
-                _ctx->rule_event_owner.id = id;
-                _ctx->rule_event_owner.timestamp = _ctx->time_stamp;
-            }
-        }
-        catch (std::exception &e)
-        {
-            VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Failed to create EvaluationResult in ruleTaskLoop: ", e.what());
-        }
+
+        _ctx->tryUpdateRuleEvent(type, id);
     }
 
 private:

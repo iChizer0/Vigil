@@ -148,7 +148,7 @@ private:
 class LocalTime final
 {
 public:
-    LocalTime(std::chrono::system_clock::time_point utc_now = std::chrono::system_clock::now()) noexcept
+    LocalTime(std::chrono::system_clock::time_point utc_now) noexcept
     {
         auto utc_now_t = std::chrono::system_clock::to_time_t(utc_now);
         _local_tm = localtime_r(&utc_now_t, &_local_tm_storage);
@@ -170,9 +170,9 @@ public:
 
     ~LocalTime() = default;
 
-    static LocalTime now() noexcept
+    static inline LocalTime now() noexcept
     {
-        return LocalTime();
+        return LocalTime(std::chrono::system_clock::now());
     }
 
     std::tm tm() const noexcept

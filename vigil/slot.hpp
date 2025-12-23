@@ -514,7 +514,7 @@ private:
                             .path = path_str.c_str(),
                             .size_bytes = result->second > 0 ? static_cast<size_t>(result->second) : 0,
                             .attrs = attrs_str,
-                            .timestamp = _ctx.time_stamp,
+                            .timestamp = _ctx.unix_time,
                         };
                         _ctx.c_api.basic.on_file_event_cb(&file_evt);
                     }
@@ -652,11 +652,7 @@ private:
 
     void writerThreadTask()
     {
-        {
-            const std::unique_lock lock(_ctx.rule_event_mutex);
-            _ctx.rule_event.reset();
-            _ctx.rule_event_owner.clear();
-        }
+        _ctx.clearRuleEvent(); // Clear any existing rule event at start
         while (!_stop_token.load(std::memory_order_acquire))
         {
             // If already has a writer, check if it is finished
@@ -665,11 +661,6 @@ private:
                 const auto result = _writer_task->operator()();
                 const auto end = _writer_task->endTime();
                 _writer_task.reset();
-                {
-                    const std::unique_lock lock(_ctx.rule_event_mutex);
-                    _ctx.rule_event.reset(); // Clear evaluation result after writer finished
-                    _ctx.rule_event_owner.clear();
-                }
                 if (result->status != WriteEvent::Status::Interrupted)
                 {
                     do
