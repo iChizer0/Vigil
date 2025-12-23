@@ -655,6 +655,7 @@ private:
         {
             const std::unique_lock lock(_ctx.rule_event_mutex);
             _ctx.rule_event.reset();
+            _ctx.rule_event_owner.clear();
         }
         while (!_stop_token.load(std::memory_order_acquire))
         {
@@ -667,6 +668,7 @@ private:
                 {
                     const std::unique_lock lock(_ctx.rule_event_mutex);
                     _ctx.rule_event.reset(); // Clear evaluation result after writer finished
+                    _ctx.rule_event_owner.clear();
                 }
                 if (result->status != WriteEvent::Status::Interrupted)
                 {

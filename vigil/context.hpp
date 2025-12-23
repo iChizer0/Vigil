@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <deque>
 #include <mutex>
 #include <queue>
@@ -171,8 +172,9 @@ struct Context
     std::mutex inference_mutex;
     std::queue<InferenceResult> inference_queue;
     // Sync rule event, updated in RuleEndpoint::operator()()
-    std::mutex rule_event_mutex;
+    std::shared_mutex rule_event_mutex;
     std::shared_ptr<WriteEvent> rule_event;
+    EventOwner rule_event_owner;
     // Sync video/audio frame buffers, updated in enqueueMediaFrame()
     std::mutex media_mutex;
     std::deque<MediaFrame> media_frame_buffer;

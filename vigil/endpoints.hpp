@@ -1,8 +1,8 @@
 #pragma once
-#include "vigil_ctypes.h"
 #ifndef VIGIL_ENDPOINTS_HPP
 #define VIGIL_ENDPOINTS_HPP
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -332,20 +332,21 @@ public:
 
         try
         {
-            const auto rule_type = j.at("sCurrentSelected").get<std::string>();
+            const auto rule_type_str = j.at("sCurrentSelected").get<std::string>();
+            const auto rule_type = BaseRule::TypeFromString(rule_type_str);
             const std::unique_lock lock(_record_rule_mutex);
-            if (rule_type == "InferenceSet")
+            if (rule_type == VG_RULE_TYPE_INFERENCE_SET)
                 swapTypedRecordRule<InferenceRuleSet>(InferenceRuleSetConfig(j.at("lInferenceSet"), *_ctx));
-            else if (rule_type == "Timer")
+            else if (rule_type == VG_RULE_TYPE_TIMER)
                 swapTypedRecordRule<TimerRule>(TimerRuleConfig(j.at("dTimer"), *_ctx));
-            else if (rule_type == "GPIO")
+            else if (rule_type == VG_RULE_TYPE_GPIO)
                 swapTypedRecordRule<GPIORule>(GPIORuleConfig(j.at("dGPIO"), *_ctx));
-            else if (rule_type == "TTY")
+            else if (rule_type == VG_RULE_TYPE_TTY)
                 swapTypedRecordRule<TTYRule>(TTYRuleConfig(j.at("dTTY"), *_ctx));
-            else if (rule_type == "HTTP")
+            else if (rule_type == VG_RULE_TYPE_HTTP)
                 swapTypedRecordRule<HTTPRule>(HTTPRuleConfig());
             else
-                throw Exception("Invalid rule type while updating record rule config '" + rule_type + "'");
+                throw Exception("Invalid rule type while updating record rule config '" + rule_type_str + "'");
 
             _record_rule_config = j;
 
@@ -376,7 +377,6 @@ public:
         {
             const std::shared_lock lock(_record_rule_mutex);
             res_j = _record_rule_config;
-            std::string current_selected;
             std::visit(
                 [&](auto &cfg) {
                     using ConfigType = std::decay_t<decltype(cfg)>;
@@ -387,37 +387,29 @@ public:
                         auto arr = nlohmann::json::array();
                         cfg.to(arr, *_ctx);
                         res_j["lInferenceSet"] = arr;
-                        current_selected = "InferenceSet";
                     }
                     else if constexpr (std::is_same_v<ConfigType, TimerRuleConfig>)
                     {
                         auto obj = nlohmann::json::object();
                         cfg.to(obj, *_ctx);
                         res_j["dTimer"] = obj;
-                        current_selected = "Timer";
                     }
                     else if constexpr (std::is_same_v<ConfigType, GPIORuleConfig>)
                     {
                         auto obj = nlohmann::json::object();
                         cfg.to(obj, *_ctx);
                         res_j["dGPIO"] = obj;
-                        current_selected = "GPIO";
                     }
                     else if constexpr (std::is_same_v<ConfigType, TTYRuleConfig>)
                     {
                         auto obj = nlohmann::json::object();
                         cfg.to(obj, *_ctx);
                         res_j["dTTY"] = obj;
-                        current_selected = "TTY";
-                    }
-                    else if constexpr (std::is_same_v<ConfigType, HTTPRuleConfig>)
-                    {
-                        // No parameters for HTTPRuleConfig
-                        current_selected = "HTTP";
                     }
                 },
                 _record_rule_config_variant);
-            res_j["sCurrentSelected"] = current_selected;
+            res_j["sCurrentSelected"]
+                = BaseRule::TypeString(_record_rule ? _record_rule->type() : VG_RULE_TYPE_UNKNOWN);
         }
         catch (const std::exception &e)
         {
@@ -437,6 +429,32 @@ public:
 
         try
         {
+            {
+                auto rule_event_obj = nlohmann::json::object();
+                std::shared_ptr<WriteEvent> evt;
+                EventOwner owner;
+                {
+                    const std::shared_lock lock(_ctx->rule_event_mutex);
+                    evt = _ctx->rule_event;
+                    owner = _ctx->rule_event_owner;
+                }
+                {
+                    if (evt)
+                    {
+                        auto evt_obj = nlohmann::json::object();
+                        evt_obj["sStatus"] = WriteEvent::StatusString(evt->status.load(std::memory_order_relaxed));
+                        evt_obj["iTimestamp"] = evt->timestamp;
+                        rule_event_obj["dRuleEvent"] = evt_obj;
+                    }
+                }
+                {
+                    auto owner_obj = nlohmann::json::object();
+                    owner_obj["sRuleType"] = BaseRule::TypeString(owner.type);
+                    owner_obj["sRuleID"] = owner.id;
+                    owner_obj["iTimestamp"] = owner.timestamp;
+                    rule_event_obj["dRuleEventOwner"] = owner_obj;
+                }
+            }
             {
                 auto gpios_obj = nlohmann::json::object();
                 if (_ctx->c_api.gpios.pins && _ctx->c_api.gpios.len > 0)
@@ -598,7 +616,12 @@ private:
         {
             const std::unique_lock lock(_ctx->rule_event_mutex);
             if (!_ctx->rule_event)
+            {
                 _ctx->rule_event = std::make_shared<WriteEvent>(_ctx->current_time, _ctx->time_stamp);
+                _ctx->rule_event_owner.type = type;
+                _ctx->rule_event_owner.id = id;
+                _ctx->rule_event_owner.timestamp = _ctx->time_stamp;
+            }
         }
         catch (std::exception &e)
         {

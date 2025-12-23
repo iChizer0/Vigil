@@ -87,6 +87,24 @@ struct WriteEvent
     ~WriteEvent() = default;
 };
 
+struct EventOwner
+{
+    vg_rule_type_e type;
+    std::string id;
+    int64_t timestamp;
+
+    void clear() noexcept
+    {
+        type = VG_RULE_TYPE_UNKNOWN;
+        id.clear();
+        timestamp = 0;
+    }
+
+    EventOwner() : type(VG_RULE_TYPE_UNKNOWN), id(""), timestamp(0) { }
+
+    ~EventOwner() = default;
+};
+
 template<typename T>
 class Range final
 {

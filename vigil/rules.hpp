@@ -36,6 +36,49 @@ public:
 
     virtual ~BaseRule() = default;
 
+    static inline const char *TypeString(vg_rule_type_e type) noexcept
+    {
+        switch (type)
+        {
+            case VG_RULE_TYPE_INFERENCE:
+                return "Inference";
+            case VG_RULE_TYPE_INFERENCE_SET:
+                return "InferenceSet";
+            case VG_RULE_TYPE_TIMER:
+                return "Timer";
+            case VG_RULE_TYPE_GPIO:
+                return "GPIO";
+            case VG_RULE_TYPE_TTY:
+                return "TTY";
+            case VG_RULE_TYPE_SCHEDULE:
+                return "Schedule";
+            case VG_RULE_TYPE_HTTP:
+                return "HTTP";
+            default:
+                return "Unknown";
+        }
+    }
+
+    static vg_rule_type_e TypeFromString(const std::string &type_str) noexcept
+    {
+        if (type_str == "Inference")
+            return VG_RULE_TYPE_INFERENCE;
+        else if (type_str == "InferenceSet")
+            return VG_RULE_TYPE_INFERENCE_SET;
+        else if (type_str == "Timer")
+            return VG_RULE_TYPE_TIMER;
+        else if (type_str == "GPIO")
+            return VG_RULE_TYPE_GPIO;
+        else if (type_str == "TTY")
+            return VG_RULE_TYPE_TTY;
+        else if (type_str == "Schedule")
+            return VG_RULE_TYPE_SCHEDULE;
+        else if (type_str == "HTTP")
+            return VG_RULE_TYPE_HTTP;
+        else
+            return VG_RULE_TYPE_UNKNOWN;
+    }
+
     vg_rule_type_e type() const noexcept
     {
         return _type;
