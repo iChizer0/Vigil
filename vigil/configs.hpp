@@ -153,21 +153,26 @@ struct GPIORuleConfig
 
     GPIORuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
+        size_t debounce_ms_min = 0;
         {
-            pin_number = -1;
             j.at("sName").get_to(pin_name);
             if (ctx.c_api.gpios.pins == nullptr || ctx.c_api.gpios.len == 0)
                 throw Exception("C API GPIO configuration is empty while parsing GPIO rule");
+            vg_config_gpio_pin_t *pin = nullptr;
             for (size_t i = 0; i < ctx.c_api.gpios.len; ++i)
             {
                 if (ctx.c_api.gpios.pins[i].name && pin_name == ctx.c_api.gpios.pins[i].name)
                 {
-                    pin_number = ctx.c_api.gpios.pins[i].num;
+                    pin = &ctx.c_api.gpios.pins[i];
                     break;
                 }
             }
-            if (pin_number == -1)
+            if (!pin)
                 throw Exception("Failed to find GPIO with name '" + pin_name + "' in C API while parsing GPIO rule");
+            if (pin->direction != VG_GPIO_PIN_DIR_IN)
+                throw Exception("GPIO '" + pin_name + "' is not configured as input in C API while parsing GPIO rule");
+            pin_number = pin->num;
+            debounce_ms_min = pin->debounce_ms_min;
         }
         {
             auto initial_level_str = j.at("sInitialLevel").get<std::string>();
@@ -203,7 +208,13 @@ struct GPIORuleConfig
             else
                 throw Exception("Invalid signal string '" + signal_str + "' while parsing GPIO rule");
         }
-        j.at("iDebounceDurationMs").get_to(debounce_durations_ms);
+        {
+            j.at("iDebounceDurationMs").get_to(debounce_durations_ms);
+            if (debounce_durations_ms < debounce_ms_min)
+                throw Exception("Debounce duration " + std::to_string(debounce_durations_ms)
+                                + " ms is less than minimum " + std::to_string(debounce_ms_min) + " ms for GPIO '"
+                                + pin_name + "' while parsing GPIO rule");
+        }
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const

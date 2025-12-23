@@ -58,7 +58,7 @@ void release_cb(int pin)
     std::cout << "Release pin " << pin << std::endl;
 }
 
-vg_gpio_pin_lvl_e sync_level_cb(int pin)
+vg_gpio_pin_lvl_e get_level_cb(int pin)
 {
     return VG_GPIO_PIN_LVL_LOW;
 }
@@ -129,7 +129,7 @@ int main()
     // GPIOs
     config.gpios.acquire_cb = acquire_cb;
     config.gpios.release_cb = release_cb;
-    config.gpios.sync_level_cb = sync_level_cb;
+    config.gpios.get_level_cb = get_level_cb;
     config.gpios.sync_event_cb = sync_event_cb;
     config.gpios.len = 0;
     config.gpios.pins = nullptr;

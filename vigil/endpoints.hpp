@@ -444,9 +444,27 @@ public:
                     for (size_t i = 0; i < _ctx->c_api.gpios.len; ++i)
                     {
                         const auto &pin = _ctx->c_api.gpios.pins[i];
+                        if (pin.direction != VG_GPIO_PIN_DIR_IN)
+                            continue;
                         gpios_obj[pin.name ? std::string(pin.name) : std::to_string(pin.num)] = {
                             { "iNum", pin.num },
                             { "bActiveHigh", pin.active_high },
+                            { "sCurrentLevel",
+                                [&pin, this]() -> const char * {
+                                    const auto lvl = _ctx->c_api.gpios.get_level_cb
+                                                         ? _ctx->c_api.gpios.get_level_cb(pin.num)
+                                                         : VG_GPIO_PIN_LVL_NONE;
+                                    switch (lvl)
+                                    {
+                                        case VG_GPIO_PIN_LVL_HIGH:
+                                            return "High";
+                                        case VG_GPIO_PIN_LVL_LOW:
+                                            return "Low";
+                                        default:
+                                            return "Unknown";
+                                    }
+                                }() },
+                            { "iDebounceMsMin", pin.debounce_ms_min },
                         };
                     }
                 }

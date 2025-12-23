@@ -259,7 +259,7 @@ public:
             throw Exception("No GPIO acquire callback provided in C API while initializing GPIO rule");
         if (!_release_cb)
             throw Exception("No GPIO release callback provided in C API while initializing GPIO rule");
-        if (!ctx.c_api.gpios.sync_level_cb && !ctx.c_api.gpios.sync_event_cb)
+        if (!ctx.c_api.gpios.get_level_cb && !ctx.c_api.gpios.sync_event_cb)
             throw Exception("No GPIO sync level or last event callback provided in C API while initializing GPIO rule");
 
         if (auto sta = ctx.c_api.gpios.acquire_cb(cfg.pin_number, cfg.initial_level, cfg.debounce_durations_ms);
@@ -280,7 +280,7 @@ public:
         if (_event != VG_GPIO_PIN_EVT_NONE)
             return ctx.c_api.gpios.sync_event_cb(_pin_number) == _event;
         else if (_level != VG_GPIO_PIN_LVL_NONE)
-            return ctx.c_api.gpios.sync_level_cb(_pin_number) == _level;
+            return ctx.c_api.gpios.get_level_cb(_pin_number) == _level;
         return false;
     }
 
