@@ -140,22 +140,22 @@ struct Context
         static_assert(std::is_same_v<std::remove_cvref_t<T>, MediaFrame>,
             "enqueueMediaFrame only accepts MediaFrame type.");
         const std::unique_lock lock(media_mutex);
-        auto rit = media_frame_buffer.crbegin();
-        for (; rit != media_frame_buffer.crend(); ++rit)
+        auto rit = media_buffer.crbegin();
+        for (; rit != media_buffer.crend(); ++rit)
         {
             if (rit->time_stamp <= frame.time_stamp)
                 break;
         }
-        media_frame_buffer.insert(rit.base(), std::forward<T>(frame));
-        while (media_frame_buffer.size() >= kMediaMuxerBufferSize)
-            media_frame_buffer.pop_front();
+        media_buffer.insert(rit.base(), std::forward<T>(frame));
+        while (media_buffer.size() >= kMediaMuxerBufferSize)
+            media_buffer.pop_front();
     }
 
     // Clear media frames (thread-safe)
     void clearMediaBuffer() noexcept
     {
         const std::unique_lock lock(media_mutex);
-        media_frame_buffer.clear();
+        media_buffer.clear();
     }
 
     FileWriterSettingsWithRevision getWriterSettings() const noexcept
@@ -177,7 +177,7 @@ struct Context
     EventOwner rule_event_owner;
     // Sync video/audio frame buffers, updated in enqueueMediaFrame()
     std::mutex media_mutex;
-    std::deque<MediaFrame> media_frame_buffer;
+    std::deque<MediaFrame> media_buffer;
     std::mutex media_pause_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> media_paused = false;
     // Sync record writer settings

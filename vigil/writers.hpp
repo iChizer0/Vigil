@@ -63,6 +63,16 @@ public:
         return _start_time + _settings.second.interval;
     }
 
+    inline std::mutex &mediaMutex() const noexcept
+    {
+        return static_cast<const T *>(this)->mediaMutexImpl();
+    }
+
+    inline std::deque<MediaFrame> &mediaBuffer() noexcept
+    {
+        return static_cast<T *>(this)->mediaBufferImpl();
+    }
+
     inline bool shouldContinueWriting() const noexcept
     {
         return !_ctx.media_paused.load(std::memory_order_relaxed)
@@ -132,6 +142,16 @@ public:
 
 protected:
     friend AdaptableWriter<SlotAdaptedWriter<T>>;
+
+    inline std::mutex &mediaMutexImpl() const noexcept
+    {
+        return this->ctxRef().media_mutex;
+    }
+
+    inline std::deque<MediaFrame> &mediaBufferImpl() noexcept
+    {
+        return this->ctxRef().media_buffer;
+    }
 
     inline std::filesystem::path getFilePathImpl() const noexcept
     {
@@ -281,14 +301,14 @@ private:
     WriteEvent::Status waitUntilWriteFinish() noexcept override
     {
         MediaFrame frame;
-        auto &ctx_media_mutex = this->ctxRef().media_mutex;
-        auto &ctx_media_frame_buffer = this->ctxRef().media_frame_buffer;
+        auto &ctx_media_mutex = this->mediaMutex();
+        auto &ctx_media_buffer = this->mediaBuffer();
 
         do
         {
             ctx_media_mutex.lock();
-            auto it = ctx_media_frame_buffer.begin();
-            if (it == ctx_media_frame_buffer.end())
+            auto it = ctx_media_buffer.begin();
+            if (it == ctx_media_buffer.end())
             {
                 ctx_media_mutex.unlock();
                 std::this_thread::sleep_for(kVideoFrameWaitDelay);
@@ -303,14 +323,14 @@ private:
             {
                 if (!it->isKeyFrame())
                 {
-                    ctx_media_frame_buffer.pop_front();
+                    ctx_media_buffer.pop_front();
                     ctx_media_mutex.unlock();
                     continue; // Discard frames until key frame is found
                 }
                 _is_clip_start = false;
             }
             it->transferTo(frame);
-            ctx_media_frame_buffer.erase(it);
+            ctx_media_buffer.erase(it);
             ctx_media_mutex.unlock();
             if (!writeMediaFrame(frame)) [[unlikely]]
             {
