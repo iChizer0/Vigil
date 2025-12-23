@@ -80,12 +80,25 @@ typedef enum vg_rule_type_e {
     VG_RULE_TYPE_HTTP = 7,
 } vg_rule_type_e;
 
-typedef struct vg_rule_stats_t
+typedef struct vg_rule_evt_t
 {
     vg_rule_type_e type; /**< Type of the last evaluated rule. */
     const char *id;      /**< Internal managed string, null terminated, do not free. */
     int64_t timestamp;   /**< Timestamp of the last evaluation. */
-} vg_rule_stats_t;
+} vg_rule_evt_t;
+
+typedef enum vg_file_evt_op_type_e {
+    VG_FILE_EVT_OP_ADDED = 1,
+} vg_file_evt_op_type_e;
+
+typedef struct vg_file_evt_t
+{
+    vg_file_evt_op_type_e op_type; /**< Type of file event operation. */
+    const char *path;              /**< Internal managed string, null terminated, do not free. */
+    size_t size_bytes;             /**< Size of the file in bytes. */
+    const char *attrs;             /**< Internal managed string, null terminated, do not free. */
+    int64_t timestamp; /**< Timestamp of the file event (can be corresponding to the timestamp of rule event). */
+} vg_file_evt_t;
 
 /**
  * @brief Basic runtime configuration for the Vigil library.
@@ -97,9 +110,9 @@ typedef struct vg_config_basic_t
 {
     vg_log_level_e log_level; /**< Minimum log severity that should be emitted. */
     vg_sta_e (*log_cb)(vg_log_level_e level, const char *msg, size_t bytes_len); /**< Optional logging callback. */
-    void (*on_rule_activate_cb)(
-        const vg_rule_stats_t *stats); /**< Optional callback invoked when a rule is activated. */
-    const char *config_directory;      /**< Filesystem path to the configuration root. */
+    void (*on_rule_event_cb)(const vg_rule_evt_t *stats);    /**< Optional callback invoked when a rule is activated. */
+    void (*on_file_event_cb)(const vg_file_evt_t *file_evt); /**< Optional callback invoked on file events. */
+    const char *config_directory;                            /**< Filesystem path to the configuration root. */
 } vg_config_basic_t;
 
 typedef enum vg_gpio_pin_lvl_e {

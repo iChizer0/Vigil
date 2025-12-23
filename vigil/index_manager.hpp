@@ -14,6 +14,7 @@
 #include <shared_mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "constants.hpp"
@@ -135,7 +136,8 @@ public:
         return true;
     }
 
-    std::optional<FileSize> moveAndAddCacheFile(const CacheFileInfo &cache_file_info) noexcept
+    std::optional<std::pair<std::filesystem::path, FileSize>> moveAndAddCacheFile(
+        const CacheFileInfo &cache_file_info) noexcept
     {
         if (cache_file_info.path.empty() || cache_file_info.first_level_dir_name.empty())
             return std::nullopt;
@@ -196,7 +198,7 @@ public:
                     return std::nullopt;
                 }
                 it->second.fetch_add(file_size, std::memory_order_relaxed);
-                return file_size;
+                return std::make_pair(target_file_path, file_size);
             }
         }
     }

@@ -1,5 +1,4 @@
 #pragma once
-#include <exception>
 #ifndef VIGIL_WRITERS_HPP
 #define VIGIL_WRITERS_HPP
 
@@ -38,7 +37,7 @@ public:
     {
         if (!_event)
             throw Exception("AdaptableWriter initialized with null event");
-        setEventStatus(WriteEvent::Status::Started);
+        setEventStatus(WriteEvent::Status::Writing);
     }
 
     virtual ~AdaptableWriter() noexcept = default;

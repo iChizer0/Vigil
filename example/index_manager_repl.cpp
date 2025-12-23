@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#include "vigil/storage.hpp"
+#include "vigil/vigil.hpp"
 
 using namespace vigil;
 using namespace vigil::storage;
@@ -270,7 +270,8 @@ int main(int argc, char **argv)
                 cache_file_info.first_level_dir_name = tokens[1];
                 cache_file_info.creation_time = std::chrono::file_clock::now();
                 if (auto added = manager.moveAndAddCacheFile(cache_file_info))
-                    std::cout << "Moved cache file into '" << tokens[1] << "' (" << *added << " bytes)" << std::endl;
+                    std::cout << "Moved cache file into '" << tokens[1] << "' (" << added->second << " bytes)"
+                              << std::endl;
                 else
                 {
                     std::cout << "moveAndAddCacheFile failed" << std::endl;

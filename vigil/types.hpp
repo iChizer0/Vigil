@@ -47,20 +47,40 @@ private:
 struct WriteEvent
 {
     enum class Status {
-        New,
-        Started,
+        Pending,
+        Writing,
         Completed,
         Failed,
         Interrupted,
     };
 
+    static inline const char *StatusString(Status status) noexcept
+    {
+        switch (status)
+        {
+            case Status::Pending:
+                return "Pending";
+            case Status::Writing:
+                return "Writing";
+            case Status::Completed:
+                return "Completed";
+            case Status::Failed:
+                return "Failed";
+            case Status::Interrupted:
+                return "Interrupted";
+            default:
+                return "Unknown";
+        }
+    }
+
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<Status> status;
     const std::chrono::steady_clock::time_point timepoint;
     const int64_t timestamp;
 
-    WriteEvent() : status(Status::New), timepoint(), timestamp(0) { }
+    WriteEvent() : status(Status::Pending), timepoint(), timestamp(0) { }
 
-    WriteEvent(std::chrono::steady_clock::time_point tp, int64_t ts) : status(Status::New), timepoint(tp), timestamp(ts)
+    WriteEvent(std::chrono::steady_clock::time_point tp, int64_t ts)
+        : status(Status::Pending), timepoint(tp), timestamp(ts)
     {
     }
 

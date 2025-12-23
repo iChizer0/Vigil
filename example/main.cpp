@@ -41,9 +41,9 @@ vg_sta_e log_cb(vg_log_level_e level, const char *msg, size_t bytes_len)
     return 0;
 }
 
-void on_rule_activate_cb(const vg_rule_stats_t *stats)
+void on_rule_event_cb(const vg_rule_evt_t *evt)
 {
-    std::cout << "Rule activated: " << (stats->id ? stats->id : "unknown") << std::endl;
+    std::cout << "Rule activated: " << (evt->id ? evt->id : "unknown") << std::endl;
 }
 
 vg_sta_e acquire_cb(int pin, vg_gpio_pin_lvl_e initial_level, size_t debounce_time_ms)
@@ -124,7 +124,7 @@ int main()
     config.basic.config_directory = "./config";
     config.basic.log_level = VG_LOG_LEVEL_DEBUG;
     config.basic.log_cb = log_cb;
-    config.basic.on_rule_activate_cb = on_rule_activate_cb;
+    config.basic.on_rule_event_cb = on_rule_event_cb;
 
     // GPIOs
     config.gpios.acquire_cb = acquire_cb;

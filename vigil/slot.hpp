@@ -500,10 +500,24 @@ private:
                 }
                 if (!cache_file_info) // If no cache file info is available, break the loop
                     break;
-                if (auto size = _index_manager.moveAndAddCacheFile(*cache_file_info); size)
+                if (auto result = _index_manager.moveAndAddCacheFile(*cache_file_info); result)
                 {
-                    if (*size > 0)
-                        _write_stats.addNewWriteStat(*size);
+                    if (result->second > 0)
+                        _write_stats.addNewWriteStat(result->second);
+                    if (_ctx.c_api.basic.on_file_event_cb)
+                    {
+                        const auto path_str = result->first.string();
+                        const auto attrs_str
+                            = cache_file_info->event ? WriteEvent::StatusString(cache_file_info->event->status) : "";
+                        const auto file_evt = vg_file_evt_t {
+                            .op_type = VG_FILE_EVT_OP_ADDED,
+                            .path = path_str.c_str(),
+                            .size_bytes = result->second > 0 ? static_cast<size_t>(result->second) : 0,
+                            .attrs = attrs_str,
+                            .timestamp = _ctx.time_stamp,
+                        };
+                        _ctx.c_api.basic.on_file_event_cb(&file_evt);
+                    }
                 }
                 else
                 {
