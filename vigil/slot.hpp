@@ -639,38 +639,37 @@ private:
     void writerThreadTask()
     {
         {
-            const std::unique_lock lock(_ctx.last_evaluation_result_mutex);
-            _ctx.last_evaluation_result.reset();
+            const std::unique_lock lock(_ctx.rule_event_mutex);
+            _ctx.rule_event.reset();
         }
         while (!_stop_token.load(std::memory_order_acquire))
         {
             // If already has a writer, check if it is finished
             if (_writer_task)
             {
-                if (_writer_task->tryFinishWrite())
+                const auto result = _writer_task->operator()();
+                const auto end = _writer_task->endTime();
+                _writer_task.reset();
                 {
-                    const auto end = _writer_task->endTime();
-                    _writer_task.reset();
-                    {
-                        const std::unique_lock lock(_ctx.last_evaluation_result_mutex);
-                        _ctx.last_evaluation_result.reset(); // Clear evaluation result after writer finished
-                    }
+                    const std::unique_lock lock(_ctx.rule_event_mutex);
+                    _ctx.rule_event.reset(); // Clear evaluation result after writer finished
+                }
+                if (result->status != WriteEvent::Status::Interrupted)
+                {
                     do
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         std::this_thread::yield();
-                        if (!isReadyToWrite())
-                            break; // Stop requested or storage is ejected
+                        if (_stop_token.load(std::memory_order_acquire))
+                            return; // Stop requested or storage is ejected
                     }
                     while (std::chrono::steady_clock::now() < end);
                 }
-                std::this_thread::yield();
-                continue; // Continue to next loop
             }
 
             const auto start = std::chrono::steady_clock::now();
             bool start_new_writer = false;
-            std::shared_ptr<EvaluationResult> evaluation_result;
+            std::shared_ptr<WriteEvent> evaluation_result;
 
             // Check if we are asked to stop writing (suspend)
             if (start_new_writer = isReadyToWrite(); !start_new_writer)
@@ -691,11 +690,11 @@ private:
 
             // If no writer is active, check the rule evaluation status if should create one
             {
-                const std::unique_lock lock(_ctx.last_evaluation_result_mutex);
-                if (_ctx.last_evaluation_result)
+                const std::unique_lock lock(_ctx.rule_event_mutex);
+                if (_ctx.rule_event)
                 {
                     start_new_writer = true;
-                    evaluation_result = _ctx.last_evaluation_result;
+                    evaluation_result = _ctx.rule_event;
                 }
             }
             if (!start_new_writer)
@@ -731,8 +730,8 @@ private:
                     default: {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
                             "Unsupported writer type for storage slot with device path ", _dev_path);
-                        const std::unique_lock lock(_ctx.last_evaluation_result_mutex);
-                        _ctx.last_evaluation_result.reset(); // Clear invalid evaluation result
+                        const std::unique_lock lock(_ctx.rule_event_mutex);
+                        _ctx.rule_event.reset(); // Clear invalid evaluation result
                     }
                     break;
                 }

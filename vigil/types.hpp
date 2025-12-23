@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -43,16 +44,27 @@ private:
     std::string _msg;
 };
 
-struct EvaluationResult
+struct WriteEvent
 {
-    std::chrono::steady_clock::time_point timepoint;
-    int64_t timestamp;
+    enum class Status {
+        New,
+        Started,
+        Completed,
+        Failed,
+        Interrupted,
+    };
 
-    EvaluationResult() : timepoint(), timestamp(0) { }
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<Status> status;
+    const std::chrono::steady_clock::time_point timepoint;
+    const int64_t timestamp;
 
-    EvaluationResult(std::chrono::steady_clock::time_point tp, int64_t ts) : timepoint(tp), timestamp(ts) { }
+    WriteEvent() : status(Status::New), timepoint(), timestamp(0) { }
 
-    ~EvaluationResult() = default;
+    WriteEvent(std::chrono::steady_clock::time_point tp, int64_t ts) : status(Status::New), timepoint(tp), timestamp(ts)
+    {
+    }
+
+    ~WriteEvent() = default;
 };
 
 template<typename T>
@@ -568,12 +580,11 @@ struct CacheFileInfo final
     std::filesystem::path path;
     std::string first_level_dir_name;
     std::filesystem::file_time_type creation_time;
-    std::shared_ptr<EvaluationResult> reason;
+    std::shared_ptr<WriteEvent> event;
 
-    CacheFileInfo() : path(), first_level_dir_name(), creation_time(), reason() { }
+    CacheFileInfo() : path(), first_level_dir_name(), creation_time(), event() { }
 
-    CacheFileInfo(std::shared_ptr<EvaluationResult> pr)
-        : path(), first_level_dir_name(), creation_time(), reason(pr) { }
+    CacheFileInfo(std::shared_ptr<WriteEvent> evt) : path(), first_level_dir_name(), creation_time(), event(evt) { }
 
     ~CacheFileInfo() = default;
 };

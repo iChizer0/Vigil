@@ -1,4 +1,5 @@
 #pragma once
+#include <exception>
 #ifndef VIGIL_WRITERS_HPP
 #define VIGIL_WRITERS_HPP
 
@@ -31,19 +32,26 @@ template<typename T>
 class AdaptableWriter
 {
 public:
-    AdaptableWriter(Context &ctx, FileWriterSettingsWithRevision settings, std::shared_ptr<EvaluationResult> reason)
+    AdaptableWriter(Context &ctx, FileWriterSettingsWithRevision settings, std::shared_ptr<WriteEvent> event)
         : _start_time(std::chrono::steady_clock::now()), _ctx(ctx), _settings(std::move(settings)),
-          _reason(std::move(reason))
+          _event(std::move(event))
     {
+        if (!_event)
+            throw Exception("AdaptableWriter initialized with null event");
+        setEventStatus(WriteEvent::Status::Started);
     }
 
     virtual ~AdaptableWriter() noexcept = default;
 
-    bool tryFinishWrite() // Returns false to continue writing, true to finish write
+    const std::shared_ptr<WriteEvent> &operator()() noexcept
     {
         if (!shouldContinueWriting())
-            return true; // Stop requested or storage is ejected
-        return onLoop();
+        {
+            setEventStatus(WriteEvent::Status::Interrupted);
+            return _event;
+        }
+        setEventStatus(waitUntilWriteFinish());
+        return _event;
     }
 
     inline std::chrono::steady_clock::time_point startTime() const noexcept
@@ -72,14 +80,19 @@ public:
         return _settings;
     }
 
-    inline const std::shared_ptr<EvaluationResult> &reason() const noexcept
+    inline void setEventStatus(WriteEvent::Status status) noexcept
     {
-        return _reason;
+        _event->status.store(status, std::memory_order_release);
     }
 
-    virtual bool onLoop() = 0; // Return true to indicate write is complete
+    virtual WriteEvent::Status waitUntilWriteFinish() noexcept = 0; // Return true to indicate write is complete
 
 protected:
+    inline const std::shared_ptr<WriteEvent> &event() const noexcept
+    {
+        return _event;
+    }
+
     inline std::filesystem::path getFilePath() const noexcept
     {
         return static_cast<const T *>(this)->getFilePathImpl();
@@ -89,7 +102,7 @@ private:
     std::chrono::steady_clock::time_point _start_time;
     Context &_ctx;
     FileWriterSettingsWithRevision _settings;
-    std::shared_ptr<EvaluationResult> _reason;
+    std::shared_ptr<WriteEvent> _event;
 };
 
 // - MARK: Slot Adapted Writer
@@ -101,10 +114,13 @@ public:
     template<typename... Args>
     SlotAdaptedWriter(T &slot, Args &&...args)
         : AdaptableWriter<SlotAdaptedWriter<T>>(std::forward<Args>(args)...), _slot(slot),
-          _cache_file_info(this->reason())
+          _cache_file_info(this->event())
     {
         if (!initPathsAndFileName())
+        {
+            this->setEventStatus(WriteEvent::Status::Failed);
             throw Exception("SlotAdaptedWriter failed to initialize cache file paths and names");
+        }
 
         _slot.writerCountRef().fetch_add(1, std::memory_order_acq_rel);
     }
@@ -176,13 +192,16 @@ public:
     ImageWriter(Args &&...args) : T(std::forward<Args>(args)...)
     {
         if (!this->ctxRef().c_api.media.image_capture_cb)
+        {
+            this->setEventStatus(WriteEvent::Status::Failed);
             throw Exception("ImageWriter initialized without image_capture_cb set");
+        }
     }
 
     ~ImageWriter() override = default;
 
 private:
-    bool onLoop() override
+    WriteEvent::Status waitUntilWriteFinish() noexcept override
     {
         const auto ret = this->ctxRef().c_api.media.image_capture_cb(this->getFilePath().c_str(),
             this->settings().second.format.c_str(), this->ctxRef().c_api.media.user_data);
@@ -190,9 +209,9 @@ private:
         {
             VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "ImageWriter failed to capture image to file at path ",
                 this->getFilePath(), ": ", static_cast<int>(ret));
-            return true; // Finish write on error
+            return WriteEvent::Status::Failed;
         }
-        return true; // Finish write after single image capture
+        return WriteEvent::Status::Completed;
     }
 };
 
@@ -208,40 +227,64 @@ public:
           _is_clip_start(true), _is_clip_finish(false)
     {
         if (!this->ctxRef().c_api.media.video_file_create_cb || !this->ctxRef().c_api.media.video_file_finish_cb)
+        {
+            this->setEventStatus(WriteEvent::Status::Failed);
             throw Exception("VideoWriter initialized without video file create/finish callbacks set");
+        }
         if (!this->ctxRef().c_api.media.video_file_write_audio_frame_cb
             || !this->ctxRef().c_api.media.video_file_write_video_frame_cb)
+        {
+            this->setEventStatus(WriteEvent::Status::Failed);
             throw Exception("VideoWriter initialized with audio frame write callback set or without video frame "
                             "write callback set");
+        }
 
-        if (auto ret = this->ctxRef().c_api.media.video_file_create_cb(&_fd, this->getFilePath().c_str(),
-                this->settings().second.format.c_str(), this->ctxRef().c_api.media.user_data);
-            ret != 0)
-            throw Exception("VideoWriter failed to create video file at path " + this->getFilePath().string() + ": "
-                            + std::to_string(static_cast<int>(ret)));
+        startWrite();
     }
 
     ~VideoWriter() override
     {
-        if (_fd >= 0)
-        {
-            if (auto ret = this->ctxRef().c_api.media.video_file_finish_cb(_fd, this->ctxRef().c_api.media.user_data);
-                ret != 0)
-                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to finish video file with fd ", _fd,
-                    ", code: ", static_cast<int>(ret));
-            _fd = -1;
-        }
+        endWrite();
     }
 
 private:
     static inline constexpr const std::chrono::milliseconds kVideoFrameWaitDelay = std::chrono::milliseconds(10);
 
 private:
-    bool onLoop() override
+    void startWrite()
+    {
+        if (auto ret = this->ctxRef().c_api.media.video_file_create_cb(&_fd, this->getFilePath().c_str(),
+                this->settings().second.format.c_str(), this->ctxRef().c_api.media.user_data);
+            ret != 0 || _fd < 0)
+        {
+            this->setEventStatus(WriteEvent::Status::Failed);
+            throw Exception("VideoWriter failed to create video file at path " + this->getFilePath().string() + ": "
+                            + std::to_string(static_cast<int>(ret)));
+        }
+    }
+
+    WriteEvent::Status endWrite() noexcept
+    {
+        if (_fd >= 0)
+        {
+            if (auto ret = this->ctxRef().c_api.media.video_file_finish_cb(_fd, this->ctxRef().c_api.media.user_data);
+                ret != 0)
+            {
+                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to finish video file with fd ", _fd,
+                    ", code: ", static_cast<int>(ret));
+                return WriteEvent::Status::Failed;
+            }
+            _fd = -1;
+        }
+        return WriteEvent::Status::Completed;
+    }
+
+    WriteEvent::Status waitUntilWriteFinish() noexcept override
     {
         MediaFrame frame;
         auto &ctx_media_mutex = this->ctxRef().media_mutex;
         auto &ctx_media_frame_buffer = this->ctxRef().media_frame_buffer;
+
         do
         {
             ctx_media_mutex.lock();
@@ -255,7 +298,7 @@ private:
             if (isClipFinished() && it->isKeyFrame())
             {
                 ctx_media_mutex.unlock();
-                return true; // Finish current clip on next key frame
+                return endWrite(); // Finish current clip on next key frame
             }
             if (_is_clip_start)
             {
@@ -270,10 +313,17 @@ private:
             it->transferTo(frame);
             ctx_media_frame_buffer.erase(it);
             ctx_media_mutex.unlock();
-            break;
+            if (!writeMediaFrame(frame)) [[unlikely]]
+            {
+                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                    "VideoWriter failed to write media frame to file at path ", this->getFilePath());
+                endWrite();
+                return WriteEvent::Status::Failed;
+            }
         }
         while (this->shouldContinueWriting());
-        return !writeMediaFrame(frame);
+
+        return WriteEvent::Status::Interrupted;
     }
 
     inline bool isClipFinished() noexcept
@@ -283,7 +333,7 @@ private:
         return _is_clip_finish;
     }
 
-    inline bool writeMediaFrame(const MediaFrame &media_frame)
+    inline bool writeMediaFrame(const MediaFrame &media_frame) noexcept
     {
         if (!media_frame.frame)
         {

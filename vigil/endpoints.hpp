@@ -498,8 +498,8 @@ public:
 
             // Check if have pending evaluation result
             {
-                const std::unique_lock lock(_ctx->last_evaluation_result_mutex);
-                if (_ctx->last_evaluation_result)
+                const std::unique_lock lock(_ctx->rule_event_mutex);
+                if (_ctx->rule_event)
                 {
                     ret = EBUSY;
                     throw Exception("Pending evaluation result exists, cannot activate HTTP rule");
@@ -578,9 +578,9 @@ private:
         }
         try
         {
-            const std::unique_lock lock(_ctx->last_evaluation_result_mutex);
-            if (!_ctx->last_evaluation_result)
-                _ctx->last_evaluation_result = std::make_shared<EvaluationResult>(_ctx->current_time, _ctx->time_stamp);
+            const std::unique_lock lock(_ctx->rule_event_mutex);
+            if (!_ctx->rule_event)
+                _ctx->rule_event = std::make_shared<WriteEvent>(_ctx->current_time, _ctx->time_stamp);
         }
         catch (std::exception &e)
         {

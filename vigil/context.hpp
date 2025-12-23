@@ -70,8 +70,8 @@ struct Context
 
             // Update last evaluation result to not matched
             {
-                const std::unique_lock lock(last_evaluation_result_mutex);
-                last_evaluation_result.reset();
+                const std::unique_lock lock(rule_event_mutex);
+                rule_event.reset();
             }
 
             return false;
@@ -170,9 +170,9 @@ struct Context
     // Sync inference results queue, updated in enqueueInferenceResult()
     std::mutex inference_mutex;
     std::queue<InferenceResult> inference_queue;
-    // Sync last rule evaluation result, updated in RuleEndpoint::operator()()
-    std::mutex last_evaluation_result_mutex;
-    std::shared_ptr<EvaluationResult> last_evaluation_result;
+    // Sync rule event, updated in RuleEndpoint::operator()()
+    std::mutex rule_event_mutex;
+    std::shared_ptr<WriteEvent> rule_event;
     // Sync video/audio frame buffers, updated in enqueueMediaFrame()
     std::mutex media_mutex;
     std::deque<MediaFrame> media_frame_buffer;
