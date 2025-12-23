@@ -565,17 +565,15 @@ struct FileIndex final
 
 struct CacheFileInfo final
 {
-    std::filesystem::path cache_file_path;
-    std::string target_dir_name;
+    std::filesystem::path path;
+    std::string first_level_dir_name;
     std::filesystem::file_time_type creation_time;
     std::shared_ptr<EvaluationResult> reason;
 
-    CacheFileInfo() : cache_file_path(), target_dir_name(), creation_time(), reason() { }
+    CacheFileInfo() : path(), first_level_dir_name(), creation_time(), reason() { }
 
-    CacheFileInfo(std::shared_ptr<EvaluationResult> er)
-        : cache_file_path(), target_dir_name(), creation_time(), reason(er)
-    {
-    }
+    CacheFileInfo(std::shared_ptr<EvaluationResult> pr)
+        : path(), first_level_dir_name(), creation_time(), reason(pr) { }
 
     ~CacheFileInfo() = default;
 };

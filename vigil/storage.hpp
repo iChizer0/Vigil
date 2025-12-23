@@ -56,8 +56,8 @@ public:
             if (size > 0 && !has_slash_or_dot)
                 _data_dir_name = _ctx.c_api.storage.data_directory_name;
             else
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Invalid data directory name ", _ctx.c_api.storage.data_directory_name,
-                    ", using default name ", kDataDirDefaultName);
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Invalid data directory name ",
+                    _ctx.c_api.storage.data_directory_name, ", using default name ", kDataDirDefaultName);
         }
 
         // Clean relay directory

@@ -266,8 +266,8 @@ int main(int argc, char **argv)
                 if (!createTempCacheFileWithDD(temp_file, bytes))
                     continue;
                 CacheFileInfo cache_file_info {};
-                cache_file_info.cache_file_path = temp_file;
-                cache_file_info.target_dir_name = tokens[1];
+                cache_file_info.path = temp_file;
+                cache_file_info.first_level_dir_name = tokens[1];
                 cache_file_info.creation_time = std::chrono::file_clock::now();
                 if (auto added = manager.moveAndAddCacheFile(cache_file_info))
                     std::cout << "Moved cache file into '" << tokens[1] << "' (" << *added << " bytes)" << std::endl;

@@ -508,20 +508,20 @@ private:
                 else
                 {
                     std::error_code ec;
-                    if (std::filesystem::exists(cache_file_info->cache_file_path, ec))
+                    if (std::filesystem::exists(cache_file_info->path, ec))
                     {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Deferring cache file sync due to move failure for ",
-                            cache_file_info->cache_file_path);
+                            cache_file_info->path);
                         const std::unique_lock lock(_cache_file_sync_mutex);
                         _cache_file_sync_queue.push(std::move(*cache_file_info));
                     }
                     else if (ec)
                     {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Unable to check cache file existence for ",
-                            cache_file_info->cache_file_path, ": ", ec.message());
+                            cache_file_info->path, ": ", ec.message());
                     }
                     else
-                        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Cache file ", cache_file_info->cache_file_path,
+                        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Cache file ", cache_file_info->path,
                             " missing after move failure, skipping resync");
                 }
             }

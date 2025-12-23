@@ -33,18 +33,11 @@ class AdaptableWriter
 public:
     AdaptableWriter(Context &ctx, FileWriterSettingsWithRevision settings, std::shared_ptr<EvaluationResult> reason)
         : _start_time(std::chrono::steady_clock::now()), _ctx(ctx), _settings(std::move(settings)),
-          _cache_file_info(reason)
+          _reason(std::move(reason))
     {
-        if (!initPathsAndFileName())
-            throw Exception("AdaptableWriter failed to initialize paths and file name");
-
-        onConstruction();
     }
 
-    virtual ~AdaptableWriter() noexcept
-    {
-        onDestruction();
-    }
+    virtual ~AdaptableWriter() noexcept = default;
 
     bool tryFinishWrite() // Returns false to continue writing, true to finish write
     {
@@ -79,65 +72,24 @@ public:
         return _settings;
     }
 
-    inline const CacheFileInfo &cacheFileInfo() const noexcept
+    inline const std::shared_ptr<EvaluationResult> &reason() const noexcept
     {
-        return _cache_file_info;
+        return _reason;
     }
 
     virtual bool onLoop() = 0; // Return true to indicate write is complete
 
 protected:
-    inline void onConstruction() noexcept
+    inline std::filesystem::path getFilePath() const noexcept
     {
-        static_cast<T *>(this)->onConstructionImpl();
-    }
-
-    inline void onDestruction() noexcept
-    {
-        static_cast<T *>(this)->onDestructionImpl();
-    }
-
-    inline std::filesystem::path getRecordCachePath() const noexcept
-    {
-        return static_cast<const T *>(this)->getRecordCachePathImpl();
-    }
-
-private:
-    static inline constexpr const char *kFirstLevelDirNameTimeFormat = kStorageFirstLevelDirNameTimeFormat;
-    static inline constexpr const char *kFileNamePrefixTimeFormat = "%H-%M-%S";
-
-    bool initPathsAndFileName()
-    {
-        const auto local_time = LocalTime(std::chrono::system_clock::now());
-        auto tm = local_time.tm();
-        std::stringstream ss;
-        ss << std::put_time(&tm, kFirstLevelDirNameTimeFormat);
-        _cache_file_info.target_dir_name = ss.str();
-
-        const auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
-        _cache_file_info.creation_time = std::chrono::file_clock::from_sys(tp);
-
-        const auto duration = _start_time.time_since_epoch();
-        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
-        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration - seconds);
-        ss << " " << std::put_time(&tm, kFileNamePrefixTimeFormat) << " " << micros.count() << "."
-           << _settings.second.format;
-
-        const auto cache_dir = getRecordCachePath();
-        if (!IndexManager::ensureDirectoryExist(cache_dir, ctxRef()))
-            return false;
-        _cache_file_info.cache_file_path = cache_dir / (std::string(_settings.second.file_name_prefix) + ss.str());
-
-        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "Initialized writer with target directory '",
-            _cache_file_info.target_dir_name, "', cache file path '", _cache_file_info.cache_file_path, "'");
-        return true;
+        return static_cast<const T *>(this)->getFilePathImpl();
     }
 
 private:
     std::chrono::steady_clock::time_point _start_time;
     Context &_ctx;
     FileWriterSettingsWithRevision _settings;
-    CacheFileInfo _cache_file_info;
+    std::shared_ptr<EvaluationResult> _reason;
 };
 
 // - MARK: Slot Adapted Writer
@@ -148,29 +100,27 @@ class SlotAdaptedWriter: public AdaptableWriter<SlotAdaptedWriter<T>>
 public:
     template<typename... Args>
     SlotAdaptedWriter(T &slot, Args &&...args)
-        : AdaptableWriter<SlotAdaptedWriter<T>>(std::forward<Args>(args)...), _slot(slot)
+        : AdaptableWriter<SlotAdaptedWriter<T>>(std::forward<Args>(args)...), _slot(slot),
+          _cache_file_info(this->reason())
     {
+        if (!initPathsAndFileName())
+            throw Exception("SlotAdaptedWriter failed to initialize cache file paths and names");
+
+        _slot.writerCountRef().fetch_add(1, std::memory_order_acq_rel);
     }
 
-    virtual ~SlotAdaptedWriter() noexcept = default;
+    virtual ~SlotAdaptedWriter() noexcept
+    {
+        _slot.addToCacheFileSyncQueue(_cache_file_info);
+        _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
+    }
 
 protected:
     friend AdaptableWriter<SlotAdaptedWriter<T>>;
 
-    inline void onConstructionImpl() noexcept
+    inline std::filesystem::path getFilePathImpl() const noexcept
     {
-        _slot.writerCountRef().fetch_add(1, std::memory_order_acq_rel);
-    }
-
-    inline void onDestructionImpl() noexcept
-    {
-        _slot.addToCacheFileSyncQueue(this->cacheFileInfo());
-        _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
-    }
-
-    inline std::filesystem::path getRecordCachePathImpl() const noexcept
-    {
-        return _slot.getRecordCachePath();
+        return _cache_file_info.path;
     }
 
     inline bool shouldContinueWritingImpl() const noexcept
@@ -180,7 +130,40 @@ protected:
     }
 
 private:
+    bool initPathsAndFileName()
+    {
+        const auto local_time = LocalTime(std::chrono::system_clock::now());
+        auto tm = local_time.tm();
+        std::stringstream ss;
+        ss << std::put_time(&tm, kFirstLevelDirNameTimeFormat);
+        _cache_file_info.first_level_dir_name = ss.str();
+
+        const auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+        _cache_file_info.creation_time = std::chrono::file_clock::from_sys(tp);
+
+        const auto duration = this->startTime().time_since_epoch();
+        const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
+        const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration - seconds);
+        ss << " " << std::put_time(&tm, kFileNamePrefixTimeFormat) << " " << micros.count() << "."
+           << this->settings().second.format;
+
+        const auto cache_dir = _slot.getRecordCachePath();
+        if (!IndexManager::ensureDirectoryExist(cache_dir, this->ctxRef()))
+            return false;
+        _cache_file_info.path = cache_dir / (std::string(this->settings().second.file_name_prefix) + ss.str());
+
+        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "Initialized writer with 1st level directory '",
+            _cache_file_info.first_level_dir_name, "', cache file path '", _cache_file_info.path, "'");
+        return true;
+    }
+
+private:
+    static inline constexpr const char *kFirstLevelDirNameTimeFormat = kStorageFirstLevelDirNameTimeFormat;
+    static inline constexpr const char *kFileNamePrefixTimeFormat = "%H-%M-%S";
+
+private:
     T &_slot;
+    CacheFileInfo _cache_file_info;
 };
 
 // - MARK: Image Writer
@@ -201,12 +184,12 @@ public:
 private:
     bool onLoop() override
     {
-        const auto ret = this->ctxRef().c_api.media.image_capture_cb(this->cacheFileInfo().cache_file_path.c_str(),
+        const auto ret = this->ctxRef().c_api.media.image_capture_cb(this->getFilePath().c_str(),
             this->settings().second.format.c_str(), this->ctxRef().c_api.media.user_data);
         if (ret != 0)
         {
             VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "ImageWriter failed to capture image to file at path ",
-                this->cacheFileInfo().cache_file_path, ": ", static_cast<int>(ret));
+                this->getFilePath(), ": ", static_cast<int>(ret));
             return true; // Finish write on error
         }
         return true; // Finish write after single image capture
@@ -231,12 +214,10 @@ public:
             throw Exception("VideoWriter initialized with audio frame write callback set or without video frame "
                             "write callback set");
 
-        if (auto ret
-            = this->ctxRef().c_api.media.video_file_create_cb(&_fd, this->cacheFileInfo().cache_file_path.c_str(),
+        if (auto ret = this->ctxRef().c_api.media.video_file_create_cb(&_fd, this->getFilePath().c_str(),
                 this->settings().second.format.c_str(), this->ctxRef().c_api.media.user_data);
             ret != 0)
-            throw Exception("VideoWriter failed to create video file at path "
-                            + this->cacheFileInfo().cache_file_path.string() + ": "
+            throw Exception("VideoWriter failed to create video file at path " + this->getFilePath().string() + ": "
                             + std::to_string(static_cast<int>(ret)));
     }
 

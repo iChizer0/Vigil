@@ -137,16 +137,18 @@ public:
 
     std::optional<FileSize> moveAndAddCacheFile(const CacheFileInfo &cache_file_info) noexcept
     {
-        if (cache_file_info.cache_file_path.empty() || cache_file_info.target_dir_name.empty())
+        if (cache_file_info.path.empty() || cache_file_info.first_level_dir_name.empty())
             return std::nullopt;
         std::error_code ec;
         // Ensure target directory exists
-        const auto target_dir_path = _root_path / cache_file_info.target_dir_name;
-        const auto target_file_path = target_dir_path / cache_file_info.cache_file_path.filename();
+        const auto target_dir_path = _root_path / cache_file_info.first_level_dir_name;
+        const auto target_file_path = target_dir_path / cache_file_info.path.filename();
         {
             const std::unique_lock lock(_1st_level_mutex);
-            auto it = std::find_if(_1st_level_stats.begin(), _1st_level_stats.end(),
-                [&cache_file_info](const auto &pair) { return pair.first.name == cache_file_info.target_dir_name; });
+            auto it
+                = std::find_if(_1st_level_stats.begin(), _1st_level_stats.end(), [&cache_file_info](const auto &pair) {
+                      return pair.first.name == cache_file_info.first_level_dir_name;
+                  });
             {
                 const std::unique_lock lock(_fs_mutex);
                 if (it == _1st_level_stats.end())
@@ -169,19 +171,19 @@ public:
                     }
                     bool success = false;
                     std::tie(it, success) = _1st_level_stats.insert_or_assign(
-                        FileIndex(cache_file_info.target_dir_name, cache_file_info.creation_time), *dir_size);
+                        FileIndex(cache_file_info.first_level_dir_name, cache_file_info.creation_time), *dir_size);
                     if (it == _1st_level_stats.end() || !success)
                     {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
-                            "Failed to add new directory entry to index: ", cache_file_info.target_dir_name);
+                            "Failed to add new directory entry to index: ", cache_file_info.first_level_dir_name);
                         return std::nullopt;
                     }
                 }
-                std::filesystem::rename(cache_file_info.cache_file_path, target_file_path, ec);
+                std::filesystem::rename(cache_file_info.path, target_file_path, ec);
                 if (ec)
                 {
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to move file from ", cache_file_info.cache_file_path,
-                        " to ", target_file_path, ": ", ec.message());
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to move file from ", cache_file_info.path, " to ",
+                        target_file_path, ": ", ec.message());
                     return std::nullopt;
                 }
                 _fs_sync_revision.fetch_add(1, std::memory_order_release);
