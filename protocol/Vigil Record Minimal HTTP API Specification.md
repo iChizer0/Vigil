@@ -1,8 +1,8 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2025-12-11
-Version: 1.2.0
+Revised: 2025-12-24
+Version: 1.3.0
 
 ## Rule API
 
@@ -20,10 +20,10 @@ Get or set the global rule enablement status.
 {
     "bRuleEnabled": true, // Boolean, enable or disable all rules
     "dWriterConfig": {
-        "sFormat": "mp4", // String, "mp4", "jpg", "raw"
-        "iIntervalMs": 0 // Integer, interval for image capture, 0 for video
+        "sFormat": "mp4", // String, supported: "mp4", "jpg", "raw" (case-sensitive)
+        "iIntervalMs": 0 // Integer, image capture interval in ms; 0 keeps continuous video
     },
-    "code": 0 // Integer, 0 on success, >0 on error
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
 ```
 
@@ -56,7 +56,7 @@ Get or set the schedule rule configuration.
         }
         // ... More time ranges
     ],
-    "code": 0
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
 ```
 
@@ -92,7 +92,7 @@ The payload depends on the `sCurrentSelected` field.
             ]
         }
     ],
-    "code": 0
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
 ```
 
@@ -104,7 +104,7 @@ The payload depends on the `sCurrentSelected` field.
     "dTimer": {
         "iIntervalSeconds": 60 // Integer, trigger interval in seconds
     },
-    "code": 0
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
 ```
 
@@ -114,12 +114,12 @@ The payload depends on the `sCurrentSelected` field.
 {
     "sCurrentSelected": "GPIO",
     "dGPIO": {
-        "sName": "GPIO_01", // String, GPIO pin name as defined in system config
-        "sInitialLevel": "low", // String, "high", "low"
-        "sSignal": "high", // String, "high", "low", "rising", "falling"
-        "iDebounceDurationMs": 100 // Integer, debounce duration in milliseconds
+        "sName": "GPIO_01", // String, GPIO pin name (or provide "iNumber" instead)
+        "sMode": "Default", // String, "Default", "Floating", "PullUp", "PullDown"
+        "sSignal": "High", // String, "High", "Low", "Rising", "Falling"
+        "iDebounceDurationMs": 100 // Integer, must be >= pin's minimum debounce time
     },
-    "code": 0
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
 ```
 
@@ -130,10 +130,23 @@ The payload depends on the `sCurrentSelected` field.
     "sCurrentSelected": "TTY",
     "dTTY": {
         "sName": "ttyS0", // String, TTY name as defined in system config
-        "sCommand": "RECORD" // String, command string to trigger recording
+        "sCommand": "RECORD" // String, non-empty command string to trigger recording
     },
-    "code": 0
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
+
+```
+
+#### HTTP Rule
+
+The HTTP rule requires no additional configuration; select it to enable external trigger via the activation API.
+
+```json
+{
+    "sCurrentSelected": "HTTP",
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+}
+```
 ```
 
 ### Rule Info
@@ -149,19 +162,39 @@ Get the available hardware resources for rules.
 ```json
 {
     "dAvailableGPIOs": {
-        "GPIO_01": {
+        "1": {
             "iNum": 1, // Integer, GPIO number
-            "bActiveHigh": true // Boolean, active high or low
+            "sName": "GPIO_01", // String|null, name from system config
+            "sMode": "Default", // String, current mode
+            "sLevel": "High" // String|null, current level if callback provided
         }
     },
     "dAvailableTTYs": {
         "ttyS0": {
-            "sFIFOPath": "/tmp/ttyS0", // String, path to FIFO
+            "sSocketPath": "/tmp/ttyS0.sock", // String, Unix socket path
             "iBufferSize": 1024 // Integer, buffer size in bytes
         }
     },
-    "code": 0
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
+
+```
+
+### HTTP Rule Activation
+
+Trigger the currently selected HTTP rule (no payload required).
+
+**Path:** `.../vigil/rule/http_rule/activate`
+
+**Method:** `POST`
+
+**Response Body:**
+
+```json
+{
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+}
+```
 ```
 
 ## Storage API
@@ -178,8 +211,8 @@ Get or set the storage configuration.
 
 ```json
 {
-    "sTargetEnabledSlotDevPath": "/dev/sda1", // String, device path to enable; empty to disable all
-    "code": 0
+    "sTargetEnabledSlotDevPath": "/dev/sda1", // String, device path to enable; empty string disables all
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
 ```
 
@@ -201,9 +234,9 @@ Get the current status of all storage slots.
             "sMountPath": "/mnt/sda1", // String
             "bRemovable": true, // Boolean
             "bInternal": false, // Boolean
-            "sLabel": "MyDrive", // String
-            "sUUID": "550e8400-e29b-41d4-a716-446655440000", // String
-            "sType": "ext4", // String
+            "sLabel": "MyDrive", // String|null
+            "sUUID": "550e8400-e29b-41d4-a716-446655440000", // String|null
+            "sType": "ext4", // String|null
             "bEnabled": true, // Boolean
             "bWriting": false, // Boolean
             "eState": 1, // Integer, SlotState enum value (1: Error, 2: NotFormattedOrFormatUnsupported, 3: Formatting, 4: NotMounted, 5: Mounted, 6: Configured, 7: Indexing, 8: Ready)
@@ -211,14 +244,14 @@ Get the current status of all storage slots.
             "iStatsSizeBytes": 1000000000, // Integer, total size
             "iStatsFreeBytes": 500000000, // Integer, free space
             "iQuotaLimitBytes": 100000000, // Integer
-            "iQuotaUsedBytes": 10000000, // Integer
+            "iQuotaUsedBytes": 10000000, // Integer|null if unknown
             "bQuotaRotate": true // Boolean
         }
     ],
     "sDataDirName": "DCIM", // String
     "sCurrentEnabledSlotDevPath": "/dev/sda1", // String, currently enabled slot
     "sTargetEnabledSlotDevPath": "/dev/sda1", // String, target slot from config
-    "code": 0
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
 ```
 
@@ -234,14 +267,14 @@ Perform an action on the storage system.
 
 ```json
 {
-    "sAction": "free_up", // String, "format", "free_up", "eject", "config", "relay", "relay_status", "unrelay", "remove_files_or_directories"
+    "sAction": "FreeUp", // String, one of: "Format", "FreeUp", "Eject", "Config", "Relay", "RelayStatus", "Unrelay", "RemoveFilesOrDirectories"
     "sSlotDevPath": "/dev/sda1", // String, device path of the slot
-    "dSlotConfig": { // Optional, required only for "config" action
+    "dSlotConfig": { // Required only for "Config" action
         "iQuotaLimitBytes": 1073741824, // Integer
         "bQuotaRotate": true // Boolean
     },
-    "lFilesOrDirectoriesToRemove": [ // Optional, required only for "remove_files_or_directories" action
-        "/DCIM/20251016/event.mp4"
+    "lFilesOrDirectoriesToRemove": [ // Required only for "RemoveFilesOrDirectories" action; use paths relative to the data directory
+        "DCIM/20251016/event.mp4"
     ]
 }
 ```
@@ -250,32 +283,32 @@ Perform an action on the storage system.
 
 The response depends on the `sAction`.
 
-For `relay` and `relay_status`:
+For `Relay` and `RelayStatus`:
 ```json
 {
     "dRelayStatus": {
         "iRelayTimeoutRemain": 25,
-        "iRelayTimeout": 30,
+        "iRelayTimeout": 300,
         "sRelayDirectory": "550e8400-e29b-41d4-a716-446655440000"
     },
-    "code": 0
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
 ```
 
-For `remove_files_or_directories`:
+For `RemoveFilesOrDirectories`:
 ```json
 {
     "lRemovedFilesOrDirectories": [
         "/DCIM/20251016/event.mp4"
     ],
-    "code": 0
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
 ```
 
 For other actions:
 ```json
 {
-    "code": 0
+    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
 }
 ```
 
@@ -296,17 +329,17 @@ To access files, a client must first request a `relay` action via the Storage Ac
 `.../vigil/relay/550e8400-e29b-41d4-a716-446655440000/DCIM/20251016/event.mp4`
 
 **Notes:**
-- The relay directory is temporary and will timeout after a period of inactivity (default 30s).
+- The relay directory is temporary and will timeout after a period of inactivity (default 300s).
 - Accessing the relay directory refreshes the timeout.
-- Use the `unrelay` action to explicitly close the relay.
+- Use the `Unrelay` action to explicitly close the relay.
 
 ## Error Handling
 
-All endpoints return a `code` field (0 on success). When `code` is non-zero, the value is `|errno| + offset` and a `message` string may be included.
+All endpoints return a `code` field (0 on success). When `code` is non-zero, the value is `30000 + |errno|` and a `message` string may be included.
 
 ```json
 {
-    "code": 22, // Integer, 0 on success; error values are |errno| + offset
+    "code": 30022, // Integer, 0 on success; error values are 30000 + |errno|
     "message": "Invalid argument" // String, error description (present only on failure)
 }
 ```
