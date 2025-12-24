@@ -3,6 +3,7 @@
 #define VIGIL_STATUS_HPP
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -108,37 +109,19 @@ struct GPIOPinStatus
 
     GPIOPinStatus(const vg_config_gpio_pin_t &p) : pin(&p) { }
 
-    std::string name() const noexcept
+    std::string id() const noexcept
     {
-        return pin->name ? std::string(pin->name) : std::to_string(pin->num);
+        return std::to_string(pin->num);
     }
 
-    void to(nlohmann::json &j, const Context &ctx, bool level_only) const
+    void to(nlohmann::json &j, const Context &ctx) const
     {
-        if (ctx.c_api.gpios.get_level_cb)
-        {
-            switch (ctx.c_api.gpios.get_level_cb(pin->num))
-            {
-                case VG_GPIO_PIN_LVL_HIGH:
-                    j["sCurrentLevel"] = "HIGH";
-                    break;
-                case VG_GPIO_PIN_LVL_LOW:
-                    j["sCurrentLevel"] = "LOW";
-                    break;
-                default:
-                    j["sCurrentLevel"] = "NONE";
-                    break;
-            }
-        }
-        if (level_only)
-            return;
-        {
-            j["iNum"] = pin->num;
-            j["sDirection"] = pin->direction == VG_GPIO_PIN_DIR_IN ? "IN" : "OUT";
-            j["bActiveHigh"] = pin->active_high;
-            if (pin->direction == VG_GPIO_PIN_DIR_IN)
-                j["iDebounceMsMin"] = pin->debounce_ms_min;
-        }
+        j["iNum"] = pin->num;
+        j["sName"] = pin->name ? std::string(pin->name) : nullptr;
+        j["sMode"] = GPIOHelpers::ModeToString(pin->mode);
+        j["sLevel"] = ctx.c_api.gpios.sync_level_cb
+                          ? GPIOHelpers::LevelToString(ctx.c_api.gpios.sync_level_cb(pin->num))
+                          : std::optional<std::string_view>();
     }
 };
 

@@ -165,52 +165,6 @@ private:
     mutable std::mutex _mutex;
 };
 
-// - MARK: GPIO Endpoint
-
-class GPIOEndpoint final
-{
-public:
-    GPIOEndpoint(std::shared_ptr<Context> ctx) : _ctx(std::move(ctx))
-    {
-        if (!_ctx)
-            throw Exception("Context pointer cannot be null in GPIOEndpoint");
-    }
-
-    ~GPIOEndpoint() = default;
-
-    nlohmann::json getAvailableGPIOs() const noexcept
-    {
-        auto res_j = nlohmann::json::object();
-        vg_sta_e ret = 0;
-
-        try
-        {
-            nlohmann::json gpios_obj = nlohmann::json::object();
-            if (_ctx->c_api.gpios.pins && _ctx->c_api.gpios.len > 0)
-            {
-                for (size_t i = 0; i < _ctx->c_api.gpios.len; ++i)
-                {
-                    const auto &pin = _ctx->c_api.gpios.pins[i];
-                    const auto pin_status = GPIOPinStatus(pin);
-                    pin_status.to(gpios_obj[pin_status.name()], *_ctx, false);
-                }
-            }
-        }
-        catch (std::exception &e)
-        {
-            res_j.clear();
-            ret = ret != 0 ? ret : ENOENT;
-            res_j["message"] = e.what();
-        }
-        res_j["code"] = static_cast<int>(ret == 0 ? 0 : (kEndpointErrorBase + std::abs(ret)));
-
-        return res_j;
-    }
-
-private:
-    mutable std::shared_ptr<Context> _ctx;
-};
-
 // - MARK: Rule Endpoint
 
 class RuleEndpoint final
@@ -507,11 +461,8 @@ public:
                 {
                     for (size_t i = 0; i < _ctx->c_api.gpios.len; ++i)
                     {
-                        const auto &pin = _ctx->c_api.gpios.pins[i];
-                        if (pin.direction != VG_GPIO_PIN_DIR_IN)
-                            continue;
-                        const auto pin_status = GPIOPinStatus(pin);
-                        pin_status.to(gpios_obj[pin_status.name()], *_ctx, false);
+                        const auto pin_status = GPIOPinStatus(_ctx->c_api.gpios.pins[i]);
+                        pin_status.to(gpios_obj[pin_status.id()], *_ctx);
                     }
                 }
                 res_j["dAvailableGPIOs"] = gpios_obj;

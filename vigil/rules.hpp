@@ -299,20 +299,19 @@ class GPIORule final: public BaseRule
 {
 public:
     GPIORule(const GPIORuleConfig &cfg, const Context &ctx)
-        : BaseRule(VG_RULE_TYPE_GPIO, 10), _pin_number(cfg.pin_number), _level(cfg.level), _event(cfg.event),
-          _release_cb(ctx.c_api.gpios.release_cb)
+        : BaseRule(VG_RULE_TYPE_GPIO, 10), _pin_number(cfg.pin_number), _mode(cfg.mode), _level(cfg.level),
+          _event(cfg.event), _acquire_cb(ctx.c_api.gpios.acquire_cb), _release_cb(ctx.c_api.gpios.release_cb)
     {
-        if (!ctx.c_api.gpios.acquire_cb)
+        if (!_acquire_cb)
             throw Exception("No GPIO acquire callback provided in C API while initializing GPIO rule");
         if (!_release_cb)
             throw Exception("No GPIO release callback provided in C API while initializing GPIO rule");
-        if (!ctx.c_api.gpios.get_level_cb && !ctx.c_api.gpios.sync_event_cb)
+        if (!ctx.c_api.gpios.sync_level_cb && !ctx.c_api.gpios.sync_event_cb)
             throw Exception("No GPIO sync level or last event callback provided in C API while initializing GPIO rule");
 
-        if (auto sta = ctx.c_api.gpios.acquire_cb(cfg.pin_number, cfg.initial_level, cfg.debounce_durations_ms);
-            sta != 0)
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to acquire GPIO pin ", cfg.pin_number, ": status ",
-                static_cast<int>(sta));
+        if (auto ret = _acquire_cb(_pin_number, _mode, cfg.debounce_durations_ms); ret != 0)
+            throw Exception("Failed to acquire GPIO pin number " + std::to_string(_pin_number)
+                            + " while initializing GPIO rule, error code: " + std::to_string(ret));
 
         VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Initialized GPIO rule for pin number: ", _pin_number);
     }
@@ -327,15 +326,17 @@ public:
         if (_event != VG_GPIO_PIN_EVT_NONE)
             return ctx.c_api.gpios.sync_event_cb(_pin_number) == _event;
         else if (_level != VG_GPIO_PIN_LVL_NONE)
-            return ctx.c_api.gpios.get_level_cb(_pin_number) == _level;
+            return ctx.c_api.gpios.sync_level_cb(_pin_number) == _level;
         return false;
     }
 
 private:
     int _pin_number;
+    vg_gpio_pin_mod_e _mode;
     vg_gpio_pin_lvl_e _level;
     vg_gpio_pin_evt_e _event;
 
+    vg_sta_e (*_acquire_cb)(int pin, vg_gpio_pin_mod_e mode, size_t debounce_ms);
     void (*_release_cb)(int pin);
 };
 

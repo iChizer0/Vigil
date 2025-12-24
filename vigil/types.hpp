@@ -16,7 +16,9 @@
 #include <filesystem>
 #include <iomanip>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -870,6 +872,86 @@ struct FileWriterSettings
 };
 
 using FileWriterSettingsWithRevision = std::pair<size_t, FileWriterSettings>;
+
+struct GPIOHelpers final
+{
+    static inline std::optional<std::string_view> ModeToString(vg_gpio_pin_mod_e mode) noexcept
+    {
+        switch (mode)
+        {
+            case VG_GPIO_PIN_MODE_DEFAULT:
+                return "Default";
+            case VG_GPIO_PIN_MODE_INP_FLOATING:
+                return "Floating";
+            case VG_GPIO_PIN_MODE_INP_PULLUP:
+                return "PullUp";
+            case VG_GPIO_PIN_MODE_INP_PULLDOWN:
+                return "PullDown";
+            default:
+                return std::nullopt;
+        }
+    }
+
+    static inline std::optional<vg_gpio_pin_mod_e> StringToMode(std::string_view mode_str) noexcept
+    {
+        if (mode_str == "Default")
+            return VG_GPIO_PIN_MODE_DEFAULT;
+        else if (mode_str == "Floating")
+            return VG_GPIO_PIN_MODE_INP_FLOATING;
+        else if (mode_str == "PullUp")
+            return VG_GPIO_PIN_MODE_INP_PULLUP;
+        else if (mode_str == "PullDown")
+            return VG_GPIO_PIN_MODE_INP_PULLDOWN;
+        else
+            return std::nullopt;
+    }
+
+    static inline std::optional<std::string_view> LevelToString(vg_gpio_pin_lvl_e level) noexcept
+    {
+        switch (level)
+        {
+            case VG_GPIO_PIN_LVL_LOW:
+                return "Low";
+            case VG_GPIO_PIN_LVL_HIGH:
+                return "High";
+            default:
+                return std::nullopt;
+        }
+    }
+
+    static inline std::optional<vg_gpio_pin_lvl_e> StringToLevel(std::string_view level_str) noexcept
+    {
+        if (level_str == "Low")
+            return VG_GPIO_PIN_LVL_LOW;
+        else if (level_str == "High")
+            return VG_GPIO_PIN_LVL_HIGH;
+        else
+            return std::nullopt;
+    }
+
+    static inline std::optional<std::string_view> EventToString(vg_gpio_pin_evt_e event) noexcept
+    {
+        switch (event)
+        {
+            case VG_GPIO_PIN_EVT_RISING:
+                return "Rising";
+            case VG_GPIO_PIN_EVT_FALLING:
+                return "Falling";
+            default:
+                return std::nullopt;
+        }
+    }
+
+    static inline std::optional<vg_gpio_pin_evt_e> StringToEvent(std::string_view event_str) noexcept
+    {
+        if (event_str == "Rising")
+            return VG_GPIO_PIN_EVT_RISING;
+        else if (event_str == "Falling")
+            return VG_GPIO_PIN_EVT_FALLING;
+        else
+            return std::nullopt;
+    }
+};
 
 } // namespace vigil::types
 

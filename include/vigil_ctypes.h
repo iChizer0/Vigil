@@ -115,6 +115,13 @@ typedef struct vg_config_basic_t
     const char *config_directory;                            /**< Filesystem path to the configuration root. */
 } vg_config_basic_t;
 
+typedef enum vg_gpio_pin_mod_e {
+    VG_GPIO_PIN_MODE_DEFAULT = -1,
+    VG_GPIO_PIN_MODE_INP_FLOATING = 0,
+    VG_GPIO_PIN_MODE_INP_PULLUP = 1,
+    VG_GPIO_PIN_MODE_INP_PULLDOWN = 2,
+} vg_gpio_pin_mod_e;
+
 typedef enum vg_gpio_pin_lvl_e {
     VG_GPIO_PIN_LVL_NONE = -1,
     VG_GPIO_PIN_LVL_LOW = 0,
@@ -127,11 +134,6 @@ typedef enum vg_gpio_pin_evt_e {
     VG_GPIO_PIN_EVT_RISING = 2
 } vg_gpio_pin_evt_e;
 
-typedef enum vg_gpio_pin_dir_e {
-    VG_GPIO_PIN_DIR_IN = 0,
-    VG_GPIO_PIN_DIR_OUT = 1,
-} vg_gpio_pin_dir_e;
-
 /**
  * @brief Configuration for an individual GPIO pin.
  *
@@ -139,21 +141,19 @@ typedef enum vg_gpio_pin_dir_e {
  */
 typedef struct vg_config_gpio_pin_t
 {
-    int num;                     /**< Hardware pin identifier or logical number. */
-    const char *name;            /**< Human-readable label. */
-    vg_gpio_pin_dir_e direction; /**< Pin direction: input or output. */
-    bool active_high;            /**< True when the pin defaults to high. */
-    size_t debounce_ms_min;      /**< Minimum debounce duration in milliseconds (inputs only). */
+    int num;                /**< Hardware pin identifier or logical number. */
+    const char *name;       /**< Human-readable label. */
+    vg_gpio_pin_mod_e mode; /**< Default mode for the GPIO pin. */
+    size_t debounce_ms_min; /**< Minimum debounce duration in milliseconds. */
 } vg_config_gpio_pin_t;
 
 typedef struct vg_config_gpios_t
 {
-    vg_sta_e (*acquire_cb)(int pin, vg_gpio_pin_lvl_e initial_level,
-        size_t debounce_time_ms);                /**< Callback to init a GPIO pin for use. */
+    vg_sta_e (
+        *acquire_cb)(int pin, vg_gpio_pin_mod_e mode, size_t debounce_ms); /**< Callback to init a GPIO pin for use. */
     void (*release_cb)(int pin);                 /**< Callback to release a previously used GPIO pin. */
     vg_gpio_pin_evt_e (*sync_event_cb)(int pin); /**< Callback to sync the last event of a GPIO pin. */
-    vg_gpio_pin_lvl_e (*get_level_cb)(int pin);  /**< Callback to read the current level of a GPIO pin. */
-    vg_sta_e (*set_level_cb)(int pin, vg_gpio_pin_lvl_e level); /**< Callback to set the level of an output GPIO pin. */
+    vg_gpio_pin_lvl_e (*sync_level_cb)(int pin); /**< Callback to read the current level of a GPIO pin. */
     vg_config_gpio_pin_t *pins;
     size_t len;
 } vg_config_gpios_t;

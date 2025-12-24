@@ -1,4 +1,5 @@
 #pragma once
+#include "vigil_ctypes.h"
 #ifndef VIGIL_CONFIGS_HPP
 #define VIGIL_CONFIGS_HPP
 
@@ -142,23 +143,30 @@ struct TimerRuleConfig
     }
 };
 
-struct GPIORuleConfig
+struct GPIOPinConfig
 {
-    std::string pin_name;
-    int pin_number;
-    vg_gpio_pin_lvl_e initial_level;
-    vg_gpio_pin_lvl_e level;
-    vg_gpio_pin_evt_e event;
-    size_t debounce_durations_ms;
+    const vg_config_gpio_pin_t *pin;
 
-    GPIORuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
+    GPIOPinConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]]) : pin(nullptr)
     {
-        size_t debounce_ms_min = 0;
+        if (ctx.c_api.gpios.pins == nullptr || ctx.c_api.gpios.len == 0)
+            throw Exception("C API GPIO configuration is empty while parsing GPIO pin config");
+
+        if (j.contains("iNumber"))
         {
-            j.at("sName").get_to(pin_name);
-            if (ctx.c_api.gpios.pins == nullptr || ctx.c_api.gpios.len == 0)
-                throw Exception("C API GPIO configuration is empty while parsing GPIO rule");
-            vg_config_gpio_pin_t *pin = nullptr;
+            const auto pin_number = j.at("iNumber").get<int>();
+            for (size_t i = 0; i < ctx.c_api.gpios.len; ++i)
+            {
+                if (ctx.c_api.gpios.pins[i].num == pin_number)
+                {
+                    pin = &ctx.c_api.gpios.pins[i];
+                    break;
+                }
+            }
+        }
+        else if (j.contains("sName"))
+        {
+            const auto pin_name = j.at("sName").get<std::string>();
             for (size_t i = 0; i < ctx.c_api.gpios.len; ++i)
             {
                 if (ctx.c_api.gpios.pins[i].name && pin_name == ctx.c_api.gpios.pins[i].name)
@@ -167,43 +175,50 @@ struct GPIORuleConfig
                     break;
                 }
             }
-            if (!pin)
+        }
+
+        if (!pin)
+            throw Exception("Failed to find GPIO pin in C API while parsing GPIO pin config");
+    }
+};
+
+struct GPIORuleConfig
+{
+    std::string pin_name;
+    int pin_number;
+    vg_gpio_pin_mod_e mode;
+    vg_gpio_pin_lvl_e level;
+    vg_gpio_pin_evt_e event;
+    size_t debounce_durations_ms;
+
+    GPIORuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
+    {
+        size_t debounce_ms_min = 0;
+        {
+            const auto gpio_pin_cfg = GPIOPinConfig(j, ctx);
+            if (!gpio_pin_cfg.pin)
                 throw Exception("Failed to find GPIO with name '" + pin_name + "' in C API while parsing GPIO rule");
-            if (pin->direction != VG_GPIO_PIN_DIR_IN)
-                throw Exception("GPIO '" + pin_name + "' is not configured as input in C API while parsing GPIO rule");
-            pin_number = pin->num;
-            debounce_ms_min = pin->debounce_ms_min;
+            pin_number = gpio_pin_cfg.pin->num;
+            debounce_ms_min = gpio_pin_cfg.pin->debounce_ms_min;
         }
         {
-            auto initial_level_str = j.at("sInitialLevel").get<std::string>();
-            if (initial_level_str == "high")
-                initial_level = VG_GPIO_PIN_LVL_HIGH;
-            else if (initial_level_str == "low")
-                initial_level = VG_GPIO_PIN_LVL_LOW;
+            const auto mode_str = j.at("sMode").get<std::string>();
+            if (auto mode_opt = GPIOHelpers::StringToMode(mode_str); mode_opt.has_value())
+                mode = mode_opt.value();
             else
-                throw Exception("Invalid initial level string '" + initial_level_str + "' while parsing GPIO rule");
+                throw Exception("Invalid mode string '" + mode_str + "' while parsing GPIO rule");
         }
         {
-            auto signal_str = j.at("sSignal").get<std::string>();
-            if (signal_str == "high")
+            const auto signal_str = j.at("sSignal").get<std::string>();
+            if (auto level_opt = GPIOHelpers::StringToLevel(signal_str); level_opt.has_value())
             {
-                level = VG_GPIO_PIN_LVL_HIGH;
+                level = level_opt.value();
                 event = VG_GPIO_PIN_EVT_NONE;
             }
-            else if (signal_str == "low")
-            {
-                level = VG_GPIO_PIN_LVL_LOW;
-                event = VG_GPIO_PIN_EVT_NONE;
-            }
-            else if (signal_str == "rising")
+            else if (auto event_opt = GPIOHelpers::StringToEvent(signal_str); event_opt.has_value())
             {
                 level = VG_GPIO_PIN_LVL_NONE;
-                event = VG_GPIO_PIN_EVT_RISING;
-            }
-            else if (signal_str == "falling")
-            {
-                level = VG_GPIO_PIN_LVL_NONE;
-                event = VG_GPIO_PIN_EVT_FALLING;
+                event = event_opt.value();
             }
             else
                 throw Exception("Invalid signal string '" + signal_str + "' while parsing GPIO rule");
@@ -221,41 +236,23 @@ struct GPIORuleConfig
     {
         j["sName"] = pin_name;
         {
-            std::string_view signal_str = GPIOLevelToString(level);
-            switch (event)
-            {
-                case VG_GPIO_PIN_EVT_RISING:
-                    signal_str = "rising";
-                    break;
-                case VG_GPIO_PIN_EVT_FALLING:
-                    signal_str = "falling";
-                    break;
-                default:
-                    break;
-            }
-            j["sInitialLevel"] = GPIOLevelToString(initial_level);
-            j["sSignal"] = signal_str;
+            j["sMode"] = GPIOHelpers::ModeToString(mode);
+            j["sSignal"] = [&]() -> std::optional<std::string_view> {
+                if (auto level_str = GPIOHelpers::LevelToString(level); level_str.has_value())
+                    return level_str;
+                else if (auto event_str = GPIOHelpers::EventToString(event); event_str.has_value())
+                    return event_str;
+                else
+                    return std::nullopt;
+            }();
         }
         j["iDebounceDurationMs"] = debounce_durations_ms;
     }
 
     bool operator==(const GPIORuleConfig &other) const noexcept
     {
-        return pin_name == other.pin_name && pin_number == other.pin_number && initial_level == other.initial_level
+        return pin_name == other.pin_name && pin_number == other.pin_number && mode == other.mode
                && level == other.level && event == other.event && debounce_durations_ms == other.debounce_durations_ms;
-    }
-
-    static std::string_view GPIOLevelToString(vg_gpio_pin_lvl_e level) noexcept
-    {
-        switch (level)
-        {
-            case VG_GPIO_PIN_LVL_HIGH:
-                return "high";
-            case VG_GPIO_PIN_LVL_LOW:
-                return "low";
-            default:
-                return "none";
-        }
     }
 };
 
@@ -476,21 +473,21 @@ struct StorageControlConfig
     StorageControlConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
         using namespace std::string_literals;
-        if (auto action_str = j.at("sAction").get<std::string>(); action_str == "format")
+        if (auto action_str = j.at("sAction").get<std::string>(); action_str == "Format")
             action = ActionType::FormatSlot;
-        else if (action_str == "free_up")
+        else if (action_str == "FreeUp")
             action = ActionType::FreeUpSlot;
-        else if (action_str == "eject")
+        else if (action_str == "Eject")
             action = ActionType::EjectSlot;
-        else if (action_str == "config")
+        else if (action_str == "Config")
             action = ActionType::ConfigSlot;
-        else if (action_str == "relay")
+        else if (action_str == "Relay")
             action = ActionType::RelaySlot;
-        else if (action_str == "relay_status")
+        else if (action_str == "RelayStatus")
             action = ActionType::RelayStatusSlot;
-        else if (action_str == "unrelay")
+        else if (action_str == "Unrelay")
             action = ActionType::UnrelaySlot;
-        else if (action_str == "remove_files_or_directories")
+        else if (action_str == "RemoveFilesOrDirectories")
             action = ActionType::RemoveFilesOrDirectories;
         else
             throw Exception("Invalid storage action string '"s + action_str + "'"s);
