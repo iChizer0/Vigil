@@ -358,13 +358,14 @@ public:
 
     ~TTYRule()
     {
-        if (_fd >= 0)
-            close(_fd);
+        closeSocket();
     }
 
     bool operator()(const Context &ctx) const noexcept override
     {
-        while (_fd >= 0)
+        if (!isSocketOpen())
+            openSocket(ctx);
+        while (isSocketOpen())
         {
             ssize_t bytes_read = ::read(_fd, _buffer.data() + _subcmd_len, _buffer.size() - _subcmd_len);
             if (bytes_read == -1)
@@ -415,7 +416,12 @@ public:
     }
 
 private:
-    void openSocket(const Context &ctx) noexcept
+    inline bool isSocketOpen() const noexcept
+    {
+        return _fd >= 0;
+    }
+
+    void openSocket(const Context &ctx) const noexcept
     {
         _fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
         if (_fd < 0)
@@ -430,8 +436,7 @@ private:
         if (_socket_path.size() >= sizeof(addr.sun_path))
         {
             VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Unix socket path too long for TTY: '", _socket_path, "'");
-            close(_fd);
-            _fd = -1;
+            closeSocket();
             return;
         }
         std::strncpy(addr.sun_path, _socket_path.c_str(), sizeof(addr.sun_path) - 1);
@@ -441,8 +446,7 @@ private:
             const auto err = errno;
             VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to connect Unix socket at '", _socket_path,
                 "': ", strerror(err));
-            close(_fd);
-            _fd = -1;
+            closeSocket();
             return;
         }
 
@@ -452,13 +456,21 @@ private:
         {
             VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to set non-blocking flags for Unix socket at '", _socket_path,
                 "': ", strerror(errno), ", code: ", ret);
-            close(_fd);
-            _fd = -1;
+            closeSocket();
             return;
         }
 
         VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Connected to Unix socket at '", _socket_path, "' with fd ", _fd,
             ", flags set to:", flags);
+    }
+
+    void closeSocket() const noexcept
+    {
+        if (_fd >= 0)
+        {
+            ::close(_fd);
+            _fd = -1;
+        }
     }
 
 private:
