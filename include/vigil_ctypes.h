@@ -165,9 +165,9 @@ typedef struct vg_config_gpios_t
  */
 typedef struct vg_config_tty_t
 {
-    const char *name;      /**< Identifier displayed in logs and diagnostics. */
-    const char *fifo_path; /**< Filesystem path to the Unix named pipe (FIFO). */
-    size_t buffer_size;    /**< Size of the internal read/write buffer for the TTY. */
+    const char *name;        /**< Identifier displayed in logs and diagnostics. */
+    const char *socket_path; /**< Filesystem path to the Unix socket. */
+    size_t buffer_size;      /**< Size of the internal read/write buffer for the TTY. */
 } vg_config_tty_t;
 
 typedef struct vg_config_ttys_t

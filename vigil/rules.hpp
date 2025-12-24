@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -16,6 +17,8 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "configs.hpp"
@@ -340,13 +343,14 @@ class TTYRule final: public BaseRule
 {
 public:
     TTYRule(const TTYRuleConfig &cfg, const Context &ctx) noexcept
-        : BaseRule(VG_RULE_TYPE_TTY, 0), _fifo_path(cfg.fifo_path), _cmd(cfg.cmd), _searcher(_cmd.begin(), _cmd.end()),
-          _fd(-1), _subcmd_len(_cmd.length() ? _cmd.length() - 1 : 0), _buffer(cfg.buffer_size + _subcmd_len), _found(0)
+        : BaseRule(VG_RULE_TYPE_TTY, 0), _socket_path(cfg.socket_path), _cmd(cfg.cmd),
+          _searcher(_cmd.begin(), _cmd.end()), _fd(-1), _subcmd_len(_cmd.length() ? _cmd.length() - 1 : 0),
+          _buffer(cfg.buffer_size + _subcmd_len), _found(0)
     {
         if (_cmd.empty())
             VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Initializing TTY rule with empty command string");
 
-        openPipe(ctx);
+        openSocket(ctx);
 
         VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Initialized TTY rule with command: '", cfg.cmd, "', fd: ", _fd,
             ", buffer_size: ", cfg.buffer_size);
@@ -354,22 +358,22 @@ public:
 
     ~TTYRule()
     {
-        if (_fd > 0)
+        if (_fd >= 0)
             close(_fd);
     }
 
     bool operator()(const Context &ctx) const noexcept override
     {
-        while (_fd > 0)
+        while (_fd >= 0)
         {
-            ssize_t bytes_read = read(_fd, _buffer.data() + _subcmd_len, _buffer.size() - _subcmd_len);
+            ssize_t bytes_read = ::read(_fd, _buffer.data() + _subcmd_len, _buffer.size() - _subcmd_len);
             if (bytes_read == -1)
             {
                 const auto err = errno;
                 if (err == EAGAIN || err == EWOULDBLOCK)
                     break;
 
-                VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Error reading from TTY socket_fd ", _fd, ": ", strerror(err));
+                VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Error reading from TTY socket fd ", _fd, ": ", strerror(err));
                 break;
             }
             else if (bytes_read == 0)
@@ -411,31 +415,54 @@ public:
     }
 
 private:
-    void openPipe(const Context &ctx) noexcept
+    void openSocket(const Context &ctx) noexcept
     {
-        _fd = open(_fifo_path.c_str(), O_RDONLY | O_NONBLOCK);
+        _fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
         if (_fd < 0)
         {
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open FIFO at path '", _fifo_path, "': ", strerror(errno),
-                ", fd: ", _fd);
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create Unix socket for TTY '", _socket_path,
+                "': ", strerror(errno));
             return;
         }
+
+        sockaddr_un addr {};
+        addr.sun_family = AF_UNIX;
+        if (_socket_path.size() >= sizeof(addr.sun_path))
+        {
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Unix socket path too long for TTY: '", _socket_path, "'");
+            close(_fd);
+            _fd = -1;
+            return;
+        }
+        std::strncpy(addr.sun_path, _socket_path.c_str(), sizeof(addr.sun_path) - 1);
+
+        if (::connect(_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
+        {
+            const auto err = errno;
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to connect Unix socket at '", _socket_path,
+                "': ", strerror(err));
+            close(_fd);
+            _fd = -1;
+            return;
+        }
+
         auto flags = fcntl(_fd, F_GETFL, 0);
         auto ret = fcntl(_fd, F_SETFL, flags | O_NONBLOCK);
         if (ret < 0)
         {
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to set flags for FIFO at path '", _fifo_path,
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to set non-blocking flags for Unix socket at '", _socket_path,
                 "': ", strerror(errno), ", code: ", ret);
             close(_fd);
             _fd = -1;
             return;
         }
-        VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Opened FIFO at path '", _fifo_path, "' with fd ", _fd,
+
+        VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Connected to Unix socket at '", _socket_path, "' with fd ", _fd,
             ", flags set to:", flags);
     }
 
 private:
-    std::string _fifo_path;
+    std::string _socket_path;
     std::string _cmd;
     std::boyer_moore_horspool_searcher<std::string::const_iterator> _searcher;
     mutable int _fd;

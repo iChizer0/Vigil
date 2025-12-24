@@ -262,7 +262,7 @@ struct GPIORuleConfig
 struct TTYRuleConfig
 {
     std::string name;
-    std::string fifo_path;
+    std::string socket_path;
     std::string cmd;
     size_t buffer_size;
 
@@ -274,12 +274,12 @@ struct TTYRuleConfig
             {
                 if (ctx.c_api.ttys.ttys[i].name && name == ctx.c_api.ttys.ttys[i].name)
                 {
-                    fifo_path = ctx.c_api.ttys.ttys[i].fifo_path;
+                    socket_path = ctx.c_api.ttys.ttys[i].socket_path;
                     buffer_size = ctx.c_api.ttys.ttys[i].buffer_size;
                     break;
                 }
             }
-            if (fifo_path.empty())
+            if (socket_path.empty())
                 throw Exception("Failed to find TTY with name '" + name + "' in C API while parsing TTY rule");
             if (buffer_size == 0)
                 throw Exception("TTY '" + name + "' has zero buffer size in C API while parsing TTY rule");
@@ -299,7 +299,7 @@ struct TTYRuleConfig
 
     bool operator==(const TTYRuleConfig &other) const noexcept
     {
-        return name == other.name && fifo_path == other.fifo_path && cmd == other.cmd
+        return name == other.name && socket_path == other.socket_path && cmd == other.cmd
                && buffer_size == other.buffer_size;
     }
 };

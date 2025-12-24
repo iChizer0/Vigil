@@ -496,7 +496,7 @@ public:
                     {
                         const auto &tty = _ctx->c_api.ttys.ttys[i];
                         ttys_obj[tty.name ? std::string(tty.name) : std::to_string(i)] = {
-                            { "sFIFOPath", tty.fifo_path ? std::string(tty.fifo_path) : "" },
+                            { "sSocketPath", tty.socket_path ? std::string(tty.socket_path) : "" },
                             { "iBufferSize", static_cast<int>(tty.buffer_size) },
                         };
                     }

@@ -23,7 +23,7 @@ extern "C" {
  *
  * @param config Mutable configuration structure describing host callbacks.
  * @return vg_sta_e 0 on success, otherwise an error code.
- * @note May launch child threads for media processing and HTTP serving, and the FIFO path used for TTY should be
+ * @note May launch child threads for media processing and HTTP serving, and the Unix socket path used for TTY should be
  * created by the caller.
  */
 vg_sta_e vg_service_init(vg_config_t *config);
