@@ -143,7 +143,7 @@ typedef struct vg_config_gpio_pin_t
     const char *name;            /**< Human-readable label. */
     vg_gpio_pin_dir_e direction; /**< Pin direction: input or output. */
     bool active_high;            /**< True when the pin defaults to high. */
-    size_t debounce_ms_min;      /**< Minimum debounce duration in milliseconds. */
+    size_t debounce_ms_min;      /**< Minimum debounce duration in milliseconds (inputs only). */
 } vg_config_gpio_pin_t;
 
 typedef struct vg_config_gpios_t

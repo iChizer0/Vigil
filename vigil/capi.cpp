@@ -423,7 +423,7 @@ vg_sta_e vg_http_api_rule_record_config_post(const vg_http_api_request_t *reques
     }
 }
 
-vg_sta_e vg_http_api_rule_control_http_rule_activate_post(const vg_http_api_request_t *request,
+vg_sta_e vg_http_api_rule_http_rule_activate_post(const vg_http_api_request_t *request,
     vg_http_api_response_t *response)
 {
     if (!request || !response || response->free_cb || response->body)
@@ -436,7 +436,7 @@ vg_sta_e vg_http_api_rule_control_http_rule_activate_post(const vg_http_api_requ
     try
     {
         auto req_j = vg_http_api_request_2_json(*request);
-        auto res_j = vigil_instance->ruleEndpoint().controlHTTPRuleActivate(req_j);
+        auto res_j = vigil_instance->ruleEndpoint().doHTTPRuleActivate(req_j);
         return vg_http_api_json_2_response(res_j, *response);
     }
     catch (const std::exception &e)
