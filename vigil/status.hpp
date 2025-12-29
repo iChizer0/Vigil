@@ -105,22 +105,32 @@ struct StorageStatus
 
 struct GPIOPinStatus
 {
-    const vg_config_gpio_pin_t *pin;
+    vg_config_gpio_pin_t pin;
 
-    GPIOPinStatus(const vg_config_gpio_pin_t &p) : pin(&p) { }
+    GPIOPinStatus(const vg_config_gpio_pin_t &p) : pin(p) { }
 
     std::string id() const noexcept
     {
-        return std::to_string(pin->num);
+        return std::to_string(pin.num);
     }
 
     void to(nlohmann::json &j, const Context &ctx) const
     {
-        j["iNum"] = pin->num;
-        j["sName"] = pin->name ? std::string(pin->name) : nullptr;
-        j["sMode"] = GPIOHelpers::ModeToString(pin->mode);
-        j["sLevel"] = ctx.c_api.gpios.sync_level_cb
-                          ? GPIOHelpers::LevelToString(ctx.c_api.gpios.sync_level_cb(pin->num))
+        j["iNum"] = pin.num;
+        j["sName"] = pin.name;
+        j["sState"] = GPIOHelpers::StateToString(pin.state);
+        {
+            auto capabilities_arr = nlohmann::json::array();
+            if (pin.capabilities & VG_GPIO_PIN_MODE_INP_FLOATING)
+                capabilities_arr.push_back("Floating");
+            if (pin.capabilities & VG_GPIO_PIN_MODE_INP_PULLUP)
+                capabilities_arr.push_back("PullUp");
+            if (pin.capabilities & VG_GPIO_PIN_MODE_INP_PULLDOWN)
+                capabilities_arr.push_back("PullDown");
+            j["lCapabilities"] = capabilities_arr;
+        }
+        j["sLevel"] = (!(pin.state & VG_GPIO_PIN_MODE_DISABLED) && ctx.c_api.gpios.sync_level_cb)
+                          ? GPIOHelpers::LevelToString(ctx.c_api.gpios.sync_level_cb(pin.num))
                           : std::optional<std::string_view>();
     }
 };

@@ -1,9 +1,9 @@
 #pragma once
-#include "vigil_ctypes.h"
 #ifndef VIGIL_CONFIGS_HPP
 #define VIGIL_CONFIGS_HPP
 
 #include <chrono>
+#include <new>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -149,36 +149,57 @@ struct GPIOPinConfig
 
     GPIOPinConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]]) : pin(nullptr)
     {
-        if (ctx.c_api.gpios.pins == nullptr || ctx.c_api.gpios.len == 0)
-            throw Exception("C API GPIO configuration is empty while parsing GPIO pin config");
+        if (ctx.c_api.gpios.available_cb == nullptr)
+            throw Exception("C API GPIO available callback is null while parsing GPIO pin config");
 
-        if (j.contains("iNumber"))
+        vg_config_gpio_pins_t available_pins;
+        if (ctx.c_api.gpios.available_cb(&available_pins) != 0)
+            throw Exception("Failed to get available GPIO pins from C API while parsing GPIO pin config");
+
+        if (available_pins.pins && available_pins.len > 0)
         {
-            const auto pin_number = j.at("iNumber").get<int>();
-            for (size_t i = 0; i < ctx.c_api.gpios.len; ++i)
+            if (j.contains("iNum"))
             {
-                if (ctx.c_api.gpios.pins[i].num == pin_number)
+                const auto pin_number = j.at("iNum").get<int>();
+                for (size_t i = 0; i < available_pins.len; ++i)
                 {
-                    pin = &ctx.c_api.gpios.pins[i];
-                    break;
+                    if (available_pins.pins[i].num == pin_number)
+                    {
+                        pin = new (std::nothrow) vg_config_gpio_pin_t { available_pins.pins[i] };
+                        break;
+                    }
+                }
+            }
+            else if (j.contains("sName"))
+            {
+                const auto pin_name = j.at("sName").get<std::string>();
+                for (size_t i = 0; i < available_pins.len; ++i)
+                {
+                    if (pin_name == available_pins.pins[i].name)
+                    {
+                        pin = new (std::nothrow) vg_config_gpio_pin_t { available_pins.pins[i] };
+                        break;
+                    }
                 }
             }
         }
-        else if (j.contains("sName"))
-        {
-            const auto pin_name = j.at("sName").get<std::string>();
-            for (size_t i = 0; i < ctx.c_api.gpios.len; ++i)
-            {
-                if (ctx.c_api.gpios.pins[i].name && pin_name == ctx.c_api.gpios.pins[i].name)
-                {
-                    pin = &ctx.c_api.gpios.pins[i];
-                    break;
-                }
-            }
-        }
+
+        if (available_pins.free_cb)
+            available_pins.free_cb(available_pins.pins);
+        else
+            VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "No free_cb provided for available GPIO pins");
 
         if (!pin)
             throw Exception("Failed to find GPIO pin in C API while parsing GPIO pin config");
+    }
+
+    ~GPIOPinConfig() noexcept
+    {
+        if (pin)
+        {
+            delete pin;
+            pin = nullptr;
+        }
     }
 };
 
@@ -186,7 +207,7 @@ struct GPIORuleConfig
 {
     std::string pin_name;
     int pin_number;
-    vg_gpio_pin_mod_e mode;
+    vg_gpio_pin_mod_e state;
     vg_gpio_pin_lvl_e level;
     vg_gpio_pin_evt_e event;
     size_t debounce_durations_ms;
@@ -202,11 +223,11 @@ struct GPIORuleConfig
             debounce_ms_min = gpio_pin_cfg.pin->debounce_ms_min;
         }
         {
-            const auto mode_str = j.at("sMode").get<std::string>();
-            if (auto mode_opt = GPIOHelpers::StringToMode(mode_str); mode_opt.has_value())
-                mode = mode_opt.value();
+            const auto state_str = j.at("sState").get<std::string>();
+            if (auto state_opt = GPIOHelpers::StringToState(state_str); state_opt.has_value())
+                state = state_opt.value();
             else
-                throw Exception("Invalid mode string '" + mode_str + "' while parsing GPIO rule");
+                throw Exception("Invalid state string '" + state_str + "' while parsing GPIO rule");
         }
         {
             const auto signal_str = j.at("sSignal").get<std::string>();
@@ -236,7 +257,7 @@ struct GPIORuleConfig
     {
         j["sName"] = pin_name;
         {
-            j["sMode"] = GPIOHelpers::ModeToString(mode);
+            j["sState"] = GPIOHelpers::StateToString(state);
             j["sSignal"] = [&]() -> std::optional<std::string_view> {
                 if (auto level_str = GPIOHelpers::LevelToString(level); level_str.has_value())
                     return level_str;
@@ -251,7 +272,7 @@ struct GPIORuleConfig
 
     bool operator==(const GPIORuleConfig &other) const noexcept
     {
-        return pin_name == other.pin_name && pin_number == other.pin_number && mode == other.mode
+        return pin_name == other.pin_name && pin_number == other.pin_number && state == other.state
                && level == other.level && event == other.event && debounce_durations_ms == other.debounce_durations_ms;
     }
 };

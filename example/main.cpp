@@ -7,9 +7,6 @@
 
 #include "vigil_capi.h"
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-
 static std::mutex log_mutex;
 
 // Dummy callbacks
@@ -53,6 +50,19 @@ vg_sta_e acquire_cb(int pin, vg_gpio_pin_mod_e mode, size_t debounce_time_ms)
     return 0;
 }
 
+vg_sta_e available_gpios_cb(vg_config_gpio_pins_t *pins)
+{
+    if (pins == nullptr)
+    {
+        return -1;
+    }
+
+    pins->free_cb = nullptr;
+    pins->pins = nullptr;
+    pins->len = 0;
+    return 0;
+}
+
 void release_cb(int pin)
 {
     std::cout << "Release pin " << pin << std::endl;
@@ -60,16 +70,20 @@ void release_cb(int pin)
 
 vg_gpio_pin_lvl_e sync_level_cb(int pin)
 {
+    (void)pin;
     return VG_GPIO_PIN_LVL_LOW;
 }
 
 vg_gpio_pin_evt_e sync_event_cb(int pin)
 {
+    (void)pin;
     return VG_GPIO_PIN_EVT_NONE;
 }
 
 vg_sta_e video_file_create_cb(int *fd, const char *filepath, const char *format, void *user_data)
 {
+    (void)user_data;
+    (void)format;
     std::cout << "Create video file: " << filepath << std::endl;
     *fd = 100; // Dummy FD
     return 0;
@@ -77,24 +91,33 @@ vg_sta_e video_file_create_cb(int *fd, const char *filepath, const char *format,
 
 vg_sta_e video_file_finish_cb(int fd, void *user_data)
 {
+    (void)fd;
+    (void)user_data;
     std::cout << "Finish video file FD: " << fd << std::endl;
     return 0;
 }
 
 vg_sta_e video_file_write_video_frame_cb(int fd, const vg_video_frame_t *frame, void *user_data)
 {
+    (void)fd;
+    (void)frame;
+    (void)user_data;
     // std::cout << "Write video frame to FD: " << fd << std::endl;
     return 0;
 }
 
 vg_sta_e video_file_write_audio_frame_cb(int fd, const vg_audio_frame_t *frame, void *user_data)
 {
+    (void)fd;
+    (void)frame;
+    (void)user_data;
     // std::cout << "Write audio frame to FD: " << fd << std::endl;
     return 0;
 }
 
 vg_sta_e image_capture_cb(const char *filepath, const char *format, void *user_data)
 {
+    (void)user_data;
     std::cout << "Image capture requested for file: " << filepath << " with format: " << format << std::endl;
     return 0;
 }
@@ -111,10 +134,9 @@ void on_unmount_cb(const char *dev, const char *mount_path)
 
 bool is_hidden_device_cb(const char *dev)
 {
+    (void)dev;
     return false;
 }
-
-#pragma GCC diagnostic pop
 
 int main()
 {
@@ -127,12 +149,11 @@ int main()
     config.basic.on_rule_event_cb = on_rule_event_cb;
 
     // GPIOs
+    config.gpios.available_cb = available_gpios_cb;
     config.gpios.acquire_cb = acquire_cb;
     config.gpios.release_cb = release_cb;
     config.gpios.sync_level_cb = sync_level_cb;
     config.gpios.sync_event_cb = sync_event_cb;
-    config.gpios.len = 0;
-    config.gpios.pins = nullptr;
 
     // TTYs
     config.ttys.len = 0;
@@ -153,7 +174,6 @@ int main()
     config.storage.relay_directory_path = "relay";
     config.storage.on_mount_cb = on_mount_cb;
     config.storage.on_unmount_cb = on_unmount_cb;
-    config.storage.is_hidden_device_cb = is_hidden_device_cb;
     config.storage.is_hidden_device_cb = is_hidden_device_cb;
 
     std::cout << "Initializing Vigil Service..." << std::endl;

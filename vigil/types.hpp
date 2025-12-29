@@ -875,12 +875,12 @@ using FileWriterSettingsWithRevision = std::pair<size_t, FileWriterSettings>;
 
 struct GPIOHelpers final
 {
-    static inline std::optional<std::string_view> ModeToString(vg_gpio_pin_mod_e mode) noexcept
+    static inline std::optional<std::string_view> StateToString(vg_gpio_pin_mod_e state) noexcept
     {
-        switch (mode)
+        switch (state)
         {
-            case VG_GPIO_PIN_MODE_DEFAULT:
-                return "Default";
+            case VG_GPIO_PIN_MODE_DISABLED:
+                return "Disabled";
             case VG_GPIO_PIN_MODE_INP_FLOATING:
                 return "Floating";
             case VG_GPIO_PIN_MODE_INP_PULLUP:
@@ -892,15 +892,15 @@ struct GPIOHelpers final
         }
     }
 
-    static inline std::optional<vg_gpio_pin_mod_e> StringToMode(std::string_view mode_str) noexcept
+    static inline std::optional<vg_gpio_pin_mod_e> StringToState(std::string_view state_str) noexcept
     {
-        if (mode_str == "Default")
-            return VG_GPIO_PIN_MODE_DEFAULT;
-        else if (mode_str == "Floating")
+        if (state_str == "Disabled")
+            return VG_GPIO_PIN_MODE_DISABLED;
+        else if (state_str == "Floating")
             return VG_GPIO_PIN_MODE_INP_FLOATING;
-        else if (mode_str == "PullUp")
+        else if (state_str == "PullUp")
             return VG_GPIO_PIN_MODE_INP_PULLUP;
-        else if (mode_str == "PullDown")
+        else if (state_str == "PullDown")
             return VG_GPIO_PIN_MODE_INP_PULLDOWN;
         else
             return std::nullopt;

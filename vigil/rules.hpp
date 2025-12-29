@@ -299,7 +299,7 @@ class GPIORule final: public BaseRule
 {
 public:
     GPIORule(const GPIORuleConfig &cfg, const Context &ctx)
-        : BaseRule(VG_RULE_TYPE_GPIO, 10), _pin_number(cfg.pin_number), _mode(cfg.mode), _level(cfg.level),
+        : BaseRule(VG_RULE_TYPE_GPIO, 10), _pin_number(cfg.pin_number), _state(cfg.state), _level(cfg.level),
           _event(cfg.event), _acquire_cb(ctx.c_api.gpios.acquire_cb), _release_cb(ctx.c_api.gpios.release_cb)
     {
         if (!_acquire_cb)
@@ -309,7 +309,7 @@ public:
         if (!ctx.c_api.gpios.sync_level_cb && !ctx.c_api.gpios.sync_event_cb)
             throw Exception("No GPIO sync level or last event callback provided in C API while initializing GPIO rule");
 
-        if (auto ret = _acquire_cb(_pin_number, _mode, cfg.debounce_durations_ms); ret != 0)
+        if (auto ret = _acquire_cb(_pin_number, _state, cfg.debounce_durations_ms); ret != 0)
             throw Exception("Failed to acquire GPIO pin number " + std::to_string(_pin_number)
                             + " while initializing GPIO rule, error code: " + std::to_string(ret));
 
@@ -332,7 +332,7 @@ public:
 
 private:
     int _pin_number;
-    vg_gpio_pin_mod_e _mode;
+    vg_gpio_pin_mod_e _state;
     vg_gpio_pin_lvl_e _level;
     vg_gpio_pin_evt_e _event;
 

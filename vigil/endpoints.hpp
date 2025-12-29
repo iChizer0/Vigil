@@ -457,13 +457,23 @@ public:
             }
             {
                 auto gpios_obj = nlohmann::json::object();
-                if (_ctx->c_api.gpios.pins && _ctx->c_api.gpios.len > 0)
+                if (_ctx->c_api.gpios.available_cb)
                 {
-                    for (size_t i = 0; i < _ctx->c_api.gpios.len; ++i)
+                    vg_config_gpio_pins_t available_pins;
+                    if (_ctx->c_api.gpios.available_cb(&available_pins) == 0 && available_pins.pins
+                        && available_pins.len > 0)
                     {
-                        const auto pin_status = GPIOPinStatus(_ctx->c_api.gpios.pins[i]);
-                        pin_status.to(gpios_obj[pin_status.id()], *_ctx);
+                        for (size_t i = 0; i < available_pins.len; ++i)
+                        {
+                            const auto &pin = available_pins.pins[i];
+                            GPIOPinStatus gpio_status(pin);
+                            gpio_status.to(gpios_obj[gpio_status.id()], *_ctx);
+                        }
                     }
+                    if (available_pins.free_cb)
+                        available_pins.free_cb(available_pins.pins);
+                    else
+                        VG_LOG(_ctx->log, VG_LOG_LEVEL_WARN, "No free_cb provided for available GPIO pins");
                 }
                 res_j["dAvailableGPIOs"] = gpios_obj;
             }
