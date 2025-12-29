@@ -110,9 +110,9 @@ typedef struct vg_config_basic_t
 {
     vg_log_level_e log_level; /**< Minimum log severity that should be emitted. */
     vg_sta_e (*log_cb)(vg_log_level_e level, const char *msg, size_t bytes_len); /**< Optional logging callback. */
-    void (*on_rule_event_cb)(const vg_rule_evt_t *stats);    /**< Optional callback invoked when a rule is activated. */
-    void (*on_file_event_cb)(const vg_file_evt_t *file_evt); /**< Optional callback invoked on file events. */
-    const char *config_directory;                            /**< Filesystem path to the configuration root. */
+    void (*on_rule_event_cb)(const vg_rule_evt_t *evt); /**< Optional callback invoked when a rule is activated. */
+    void (*on_file_event_cb)(const vg_file_evt_t *evt); /**< Optional callback invoked on file events. */
+    const char *config_directory;                       /**< Filesystem path to the configuration root. */
 } vg_config_basic_t;
 
 typedef enum vg_gpio_pin_mod_e {
@@ -168,8 +168,8 @@ typedef struct vg_config_gpios_t
     vg_sta_e (
         *acquire_cb)(int pin, vg_gpio_pin_mod_e state, size_t debounce_ms); /**< Callback to init a GPIO pin for use. */
     void (*release_cb)(int pin);                 /**< Callback to release a previously used GPIO pin. */
-    vg_gpio_pin_evt_e (*sync_event_cb)(int pin); /**< Callback to sync the last event of a GPIO pin. */
     vg_gpio_pin_lvl_e (*sync_level_cb)(int pin); /**< Callback to read the current level of a GPIO pin. */
+    vg_gpio_pin_evt_e (*sync_event_cb)(int pin); /**< Callback to sync the last event of a GPIO pin. */
 } vg_config_gpios_t;
 
 /**
