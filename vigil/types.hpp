@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #ifndef VIGIL_TYPES_HPP
 #define VIGIL_TYPES_HPP
 
@@ -389,7 +390,8 @@ public:
             float inv_slope = static_cast<float>(end_pt.x - start_pt.x) / static_cast<float>(end_pt.y - start_pt.y);
             float x_at_start = static_cast<float>(start_pt.x) + (y_start - start_pt.y) * inv_slope;
 
-            edge_table[y_start].push_back({ .y_max = y_end, .x = x_at_start, .inv_slope = inv_slope });
+            edge_table[y_start].push_back(
+                { .y_max = static_cast<int>(y_end), .x = x_at_start, .inv_slope = inv_slope });
 
             min_y = std::min(min_y, y_start);
             max_y = std::max(max_y, y_end);
@@ -397,7 +399,7 @@ public:
 
         std::vector<Edge> active_edges;
 
-        for (int y = min_y; y < max_y; ++y)
+        for (int y = min_y; y < static_cast<int>(max_y); ++y)
         {
             // Add new edges from the edge table to the active list
             if (!edge_table[y].empty())
@@ -545,6 +547,31 @@ public:
             inter += std::popcount(v);
         }
         return static_cast<float>(inter) / static_cast<float>(_area);
+    }
+
+    std::string encoded() const
+    {
+        // For debugging, format int_str(height),int_str(width),hex_str(data_bytes...)
+        std::string result;
+        result.reserve(32 + _data.size() * native_bytes::value * 2);
+
+        result += std::to_string(height::value);
+        result += ',';
+        result += std::to_string(width::value);
+        result += ',';
+
+        static constexpr char hex_chars[] = "0123456789abcdef";
+        for (const auto &word: _data)
+        {
+            for (size_t i = 0; i < native_bytes::value; ++i)
+            {
+                uint8_t byte = static_cast<uint8_t>((word >> (i * 8)) & 0xFF);
+                result += hex_chars[(byte >> 4) & 0x0F];
+                result += hex_chars[byte & 0x0F];
+            }
+        }
+
+        return result;
     }
 
 private:

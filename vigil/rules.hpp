@@ -124,6 +124,11 @@ public:
             "' with active_times_min: ", _active_times_min, ", confidence_filter: [", _conf_rg.lb(), ", ",
             _conf_rg.ub(), "], class_filter size: ", _cls_set.size(),
             ", region_filter size: ", cfg.region_filter.size(), ", mask initialized: ", (_msk_rng ? "yes" : "no"));
+        if constexpr (VG_LOG_LEVEL == vg_log_level_e::VG_LOG_LEVEL_DEBUG)
+        {
+            VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Inference rule '", _id,
+                "' region mask: ", _msk_rng ? _msk_rng->encoded() : std::string("none"));
+        }
 
         _sub_ref.fetch_add(1, std::memory_order_relaxed);
     }
