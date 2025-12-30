@@ -188,7 +188,7 @@ private:
         const auto cache_dir = _slot.getRecordCachePath();
         if (!IndexManager::ensureDirectoryExist(cache_dir, this->ctxRef()))
             return false;
-        std::string fmt = this->settings().second.file_name_prefix;
+        auto fmt = std::string(this->settings().second.file_name_prefix);
         std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
         _cache_file_info.path = cache_dir / (fmt + ss.str());
 
