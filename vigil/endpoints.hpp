@@ -473,7 +473,7 @@ public:
                     if (available_pins.free_cb)
                         available_pins.free_cb(available_pins.pins);
                     else
-                        VG_LOG(_ctx->log, VG_LOG_LEVEL_WARN, "No free_cb provided for available GPIO pins");
+                        VG_LOG(_ctx->log, VG_LOG_LEVEL_DEBUG, "No free_cb provided for available GPIO pins");
                 }
                 res_j["dAvailableGPIOs"] = gpios_obj;
             }

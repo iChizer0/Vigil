@@ -187,7 +187,7 @@ struct GPIOPinConfig
         if (available_pins.free_cb)
             available_pins.free_cb(available_pins.pins);
         else
-            VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "No free_cb provided for available GPIO pins");
+            VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "No free_cb provided for available GPIO pins");
 
         if (!pin)
             throw Exception("Failed to find GPIO pin in C API while parsing GPIO pin config");
