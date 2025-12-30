@@ -236,9 +236,9 @@ public:
         {
             res_j.clear();
             ret = ret != 0 ? ret : EINVAL;
-            res_j["code"] = static_cast<int>(ret == 0 ? 0 : (kEndpointErrorBase + std::abs(ret)));
             res_j["message"] = e.what();
         }
+        res_j["code"] = static_cast<int>(ret == 0 ? 0 : (kEndpointErrorBase + std::abs(ret)));
 
         return res_j;
     }
@@ -408,8 +408,7 @@ public:
                     }
                 },
                 _record_rule_config_variant);
-            res_j["sCurrentSelected"]
-                = BaseRule::TypeString(_record_rule ? _record_rule->type() : VG_RULE_TYPE_UNKNOWN);
+            res_j["sCurrentSelected"] = _record_rule ? BaseRule::TypeString(_record_rule->type()) : "";
         }
         catch (const std::exception &e)
         {

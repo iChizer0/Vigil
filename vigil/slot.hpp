@@ -1230,7 +1230,8 @@ private:
     // - MARK: Slot Constants
 
 private:
-    static inline const std::unordered_set<std::string_view> kSupportedFileSystemTypes = { "fat", "vfat", "exfat" };
+    static inline const std::unordered_set<std::string_view> kSupportedFileSystemTypes
+        = { "ext4", "fat", "vfat", "exfat" };
     static inline constexpr const std::chrono::milliseconds kManagerProbeInterval = std::chrono::milliseconds(500);
     static inline constexpr const std::chrono::seconds kManagerRecoverDelay = std::chrono::seconds(3);
     static inline constexpr const std::chrono::minutes kManagerEstimatedWriteBytesPeriod = std::chrono::minutes(30);

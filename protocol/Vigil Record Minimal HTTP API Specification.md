@@ -41,7 +41,7 @@ Get the information about the rule system.
 {
     "dRuleEvent": {
         "dRuleEvent": { // Optional, present only if an event exists
-            "sStatus": "IDLE", // String, write event status
+            "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"
             "iTimestamp": 1735574400 // Integer, Unix timestamp
         },
         "dRuleEventOwner": {
@@ -158,7 +158,7 @@ The payload depends on the `sCurrentSelected` field.
         "sName": "GPIO_01", // String, GPIO pin name (or provide "iNum" instead)
         "sState": "FLOATING", // String, "DISABLED", "FLOATING", "PULL_UP", "PULL_DOWN"
         "sSignal": "HIGH", // String, "HIGH", "LOW", "RISING", "FALLING"
-        "iDebounceDurationMs": 100 // Integer, must be >= pin's minimum debounce time
+        "iDebounceDurationMs": 100 // Integer, must be >= 0
     },
     "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
