@@ -214,13 +214,11 @@ struct GPIORuleConfig
 
     GPIORuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
-        size_t debounce_ms_min = 0;
         {
             const auto gpio_pin_cfg = GPIOPinConfig(j, ctx);
             if (!gpio_pin_cfg.pin)
                 throw Exception("Failed to find GPIO with name '" + pin_name + "' in C API while parsing GPIO rule");
             pin_number = gpio_pin_cfg.pin->num;
-            debounce_ms_min = gpio_pin_cfg.pin->debounce_ms_min;
         }
         {
             const auto state_str = j.at("sState").get<std::string>();
@@ -244,13 +242,7 @@ struct GPIORuleConfig
             else
                 throw Exception("Invalid signal string '" + signal_str + "' while parsing GPIO rule");
         }
-        {
-            j.at("iDebounceDurationMs").get_to(debounce_durations_ms);
-            if (debounce_durations_ms < debounce_ms_min)
-                throw Exception("Debounce duration " + std::to_string(debounce_durations_ms)
-                                + " ms is less than minimum " + std::to_string(debounce_ms_min) + " ms for GPIO '"
-                                + pin_name + "' while parsing GPIO rule");
-        }
+        j.at("iDebounceDurationMs").get_to(debounce_durations_ms);
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const

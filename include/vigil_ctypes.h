@@ -147,7 +147,6 @@ typedef struct vg_config_gpio_pin_t
     char name[VG_GPIO_PIN_NAME_MAX_LEN]; /**< Human-readable label, null-terminated. */
     vg_gpio_pin_mod_e state;             /**< Current state for the GPIO pin. */
     vg_gpio_pin_mod_e capabilities;      /**< Supported modes for the GPIO pin. */
-    size_t debounce_ms_min;              /**< Minimum debounce duration in milliseconds. */
 } vg_config_gpio_pin_t;
 
 /**
