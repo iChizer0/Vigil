@@ -45,37 +45,37 @@ public:
         switch (type)
         {
             case VG_RULE_TYPE_INFERENCE:
-                return "Inference";
+                return "INFERENCE";
             case VG_RULE_TYPE_INFERENCE_SET:
-                return "InferenceSet";
+                return "INFERENCE_SET";
             case VG_RULE_TYPE_TIMER:
-                return "Timer";
+                return "TIMER";
             case VG_RULE_TYPE_GPIO:
                 return "GPIO";
             case VG_RULE_TYPE_TTY:
                 return "TTY";
             case VG_RULE_TYPE_SCHEDULE:
-                return "Schedule";
+                return "SCHEDULE";
             case VG_RULE_TYPE_HTTP:
                 return "HTTP";
             default:
-                return "Unknown";
+                return "UNKNOWN";
         }
     }
 
     static vg_rule_type_e TypeFromString(const std::string &type_str) noexcept
     {
-        if (type_str == "Inference")
+        if (type_str == "INFERENCE")
             return VG_RULE_TYPE_INFERENCE;
-        else if (type_str == "InferenceSet")
+        else if (type_str == "INFERENCE_SET")
             return VG_RULE_TYPE_INFERENCE_SET;
-        else if (type_str == "Timer")
+        else if (type_str == "TIMER")
             return VG_RULE_TYPE_TIMER;
         else if (type_str == "GPIO")
             return VG_RULE_TYPE_GPIO;
         else if (type_str == "TTY")
             return VG_RULE_TYPE_TTY;
-        else if (type_str == "Schedule")
+        else if (type_str == "SCHEDULE")
             return VG_RULE_TYPE_SCHEDULE;
         else if (type_str == "HTTP")
             return VG_RULE_TYPE_HTTP;

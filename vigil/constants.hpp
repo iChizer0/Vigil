@@ -18,7 +18,7 @@ static inline constexpr const size_t kHardwareDestructiveInterferenceSize = std:
 #pragma GCC diagnostic pop
 
 static inline constexpr const std::string_view kRecordWriterPrefixDefault = "";
-static inline constexpr const std::string kRecordWriterDefaultFormat = "mp4";
+static inline constexpr const std::string kRecordWriterDefaultFormat = "MP4";
 static inline constexpr const std::chrono::milliseconds kRecordWriterDefaultIntervalMs = std::chrono::milliseconds(0);
 static inline constexpr const std::string_view kCaptureWriterPrefixDefault = "Capture ";
 

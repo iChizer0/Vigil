@@ -1,8 +1,8 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2025-12-24
-Version: 1.3.0
+Revised: 2025-12-30
+Version: 1.3.1
 
 ## Rule API
 
@@ -20,10 +20,51 @@ Get or set the global rule enablement status.
 {
     "bRuleEnabled": true, // Boolean, enable or disable all rules
     "dWriterConfig": {
-        "sFormat": "mp4", // String, supported: "mp4", "jpg", "raw" (case-sensitive)
+        "sFormat": "MP4", // String, supported: "MP4", "JPG", "RAW" (case-sensitive)
         "iIntervalMs": 0 // Integer, image capture interval in ms; 0 keeps continuous video
     },
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
+}
+```
+
+### Rule Info
+
+Get the information about the rule system.
+
+**Path:** `.../vigil/rule/info`
+
+**Method:** `GET`
+
+**Response Body:**
+
+```json
+{
+    "dRuleEvent": {
+        "dRuleEvent": { // Optional, present only if an event exists
+            "sStatus": "IDLE", // String, write event status
+            "iTimestamp": 1735574400 // Integer, Unix timestamp
+        },
+        "dRuleEventOwner": {
+            "sRuleType": "TIMER", // String, rule type that owns the event
+            "sRuleID": "timer_rule_1", // String, rule ID
+            "iTimestamp": 1735574400 // Integer, Unix timestamp
+        }
+    },
+    "dAvailableGPIOs": {
+        "1": {
+            "iNum": 1, // Integer, GPIO number
+            "sName": "GPIO_01", // String|null, name from system config
+            "sState": "FLOATING", // String|null, "DISABLED", "FLOATING", "PULL_UP", "PULL_DOWN"
+            "lCapabilities": ["FLOATING", "PULL_UP", "PULL_DOWN"], // Array of available input modes
+            "sLevel": "HIGH" // String|null, current level if callback provided ("HIGH" or "LOW")
+        }
+    },
+    "dAvailableTTYs": {
+        "ttyS0": {
+            "sSocketPath": "/tmp/ttyS0.sock", // String, Unix socket path
+            "iBufferSize": 1024 // Integer, buffer size in bytes
+        }
+    }
 }
 ```
 
@@ -56,7 +97,7 @@ Get or set the schedule rule configuration.
         }
         // ... More time ranges
     ],
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
 ```
 
@@ -76,7 +117,7 @@ The payload depends on the `sCurrentSelected` field.
 
 ```json
 {
-    "sCurrentSelected": "InferenceSet",
+    "sCurrentSelected": "INFERENCE_SET",
     "lInferenceSet": [
         {
             "sID": "person_detection", // String, unique rule ID
@@ -92,7 +133,7 @@ The payload depends on the `sCurrentSelected` field.
             ]
         }
     ],
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
 ```
 
@@ -100,11 +141,11 @@ The payload depends on the `sCurrentSelected` field.
 
 ```json
 {
-    "sCurrentSelected": "Timer",
+    "sCurrentSelected": "TIMER",
     "dTimer": {
         "iIntervalSeconds": 60 // Integer, trigger interval in seconds
     },
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
 ```
 
@@ -114,12 +155,12 @@ The payload depends on the `sCurrentSelected` field.
 {
     "sCurrentSelected": "GPIO",
     "dGPIO": {
-        "sName": "GPIO_01", // String, GPIO pin name (or provide "iNumber" instead)
-        "sMode": "Default", // String, "Default", "Floating", "PullUp", "PullDown"
-        "sSignal": "High", // String, "High", "Low", "Rising", "Falling"
+        "sName": "GPIO_01", // String, GPIO pin name (or provide "iNum" instead)
+        "sState": "FLOATING", // String, "DISABLED", "FLOATING", "PULL_UP", "PULL_DOWN"
+        "sSignal": "HIGH", // String, "HIGH", "LOW", "RISING", "FALLING"
         "iDebounceDurationMs": 100 // Integer, must be >= pin's minimum debounce time
     },
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
 ```
 
@@ -132,9 +173,8 @@ The payload depends on the `sCurrentSelected` field.
         "sName": "ttyS0", // String, TTY name as defined in system config
         "sCommand": "RECORD" // String, non-empty command string to trigger recording
     },
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
-
 ```
 
 #### HTTP Rule
@@ -144,9 +184,8 @@ The HTTP rule requires no additional configuration; select it to enable external
 ```json
 {
     "sCurrentSelected": "HTTP",
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
-```
 ```
 
 ### Rule Info
@@ -165,8 +204,9 @@ Get the available hardware resources for rules.
         "1": {
             "iNum": 1, // Integer, GPIO number
             "sName": "GPIO_01", // String|null, name from system config
-            "sMode": "Default", // String, current mode
-            "sLevel": "High" // String|null, current level if callback provided
+            "sState": "FLOATING", // String|null, "DISABLED", "FLOATING", "PULL_UP", "PULL_DOWN"
+            "lCapabilities": ["FLOATING", "PULL_UP", "PULL_DOWN"], // Array of available input modes
+            "sLevel": "HIGH" // String|null, current level if callback provided ("HIGH" or "LOW")
         }
     },
     "dAvailableTTYs": {
@@ -175,7 +215,7 @@ Get the available hardware resources for rules.
             "iBufferSize": 1024 // Integer, buffer size in bytes
         }
     },
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
 
 ```
@@ -192,9 +232,8 @@ Trigger the currently selected HTTP rule (no payload required).
 
 ```json
 {
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
-```
 ```
 
 ## Storage API
@@ -212,7 +251,7 @@ Get or set the storage configuration.
 ```json
 {
     "sTargetEnabledSlotDevPath": "/dev/sda1", // String, device path to enable; empty string disables all
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
 ```
 
@@ -239,8 +278,8 @@ Get the current status of all storage slots.
             "sType": "ext4", // String|null
             "bEnabled": true, // Boolean
             "bWriting": false, // Boolean
-            "eState": 1, // Integer, SlotState enum value (1: Error, 2: NotFormattedOrFormatUnsupported, 3: Formatting, 4: NotMounted, 5: Mounted, 6: Configured, 7: Indexing, 8: Ready)
-            "sState": "Error", // String, human-readable state
+            "eState": 8, // Integer, SlotState enum value (1: ERROR, 2: NOT_FORMATTED_OR_FORMAT_UNSUPPORTED, 3: FORMATTING, 4: NOT_MOUNTED, 5: MOUNTED, 6: CONFIGURED, 7: INDEXING, 8: READY)
+            "sState": "READY", // String, human-readable state ("ERROR", "NOT_FORMATTED_OR_FORMAT_UNSUPPORTED", "FORMATTING", "NOT_MOUNTED", "MOUNTED", "CONFIGURED", "INDEXING", "READY")
             "iStatsSizeBytes": 1000000000, // Integer, total size
             "iStatsFreeBytes": 500000000, // Integer, free space
             "iQuotaLimitBytes": 100000000, // Integer
@@ -251,7 +290,7 @@ Get the current status of all storage slots.
     "sDataDirName": "DCIM", // String
     "sCurrentEnabledSlotDevPath": "/dev/sda1", // String, currently enabled slot
     "sTargetEnabledSlotDevPath": "/dev/sda1", // String, target slot from config
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
 ```
 
@@ -267,7 +306,7 @@ Perform an action on the storage system.
 
 ```json
 {
-    "sAction": "FreeUp", // String, one of: "Format", "FreeUp", "Eject", "Config", "Relay", "RelayStatus", "Unrelay", "RemoveFilesOrDirectories"
+    "sAction": "FREE_UP", // String, one of: "FORMAT", "FREE_UP", "EJECT", "CONFIG", "RELAY", "RELAY_STATUS", "UNRELAY", "REMOVE_FILES_OR_DIRECTORIES"
     "sSlotDevPath": "/dev/sda1", // String, device path of the slot
     "dSlotConfig": { // Required only for "Config" action
         "iQuotaLimitBytes": 1073741824, // Integer
@@ -291,7 +330,7 @@ For `Relay` and `RelayStatus`:
         "iRelayTimeout": 300,
         "sRelayDirectory": "550e8400-e29b-41d4-a716-446655440000"
     },
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
 ```
 
@@ -301,14 +340,14 @@ For `RemoveFilesOrDirectories`:
     "lRemovedFilesOrDirectories": [
         "/DCIM/20251016/event.mp4"
     ],
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
 ```
 
 For other actions:
 ```json
 {
-    "code": 0 // Integer, 0 on success; errors return 30000 + |errno|
+    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
 ```
 
@@ -339,7 +378,7 @@ All endpoints return a `code` field (0 on success). When `code` is non-zero, the
 
 ```json
 {
-    "code": 30022, // Integer, 0 on success; error values are 30000 + |errno|
+    "code": 30022, // Integer, POST only, 0 on success, errors return 30000 + |errno|
     "message": "Invalid argument" // String, error description (present only on failure)
 }
 ```

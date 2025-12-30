@@ -454,6 +454,7 @@ public:
                     owner_obj["iTimestamp"] = owner.timestamp;
                     rule_event_obj["dRuleEventOwner"] = owner_obj;
                 }
+                res_j["dRuleEvent"] = rule_event_obj;
             }
             {
                 auto gpios_obj = nlohmann::json::object();

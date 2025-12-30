@@ -61,17 +61,17 @@ struct WriteEvent
         switch (status)
         {
             case Status::Pending:
-                return "Pending";
+                return "PENDING";
             case Status::Writing:
-                return "Writing";
+                return "WRITING";
             case Status::Completed:
-                return "Completed";
+                return "COMPLETED";
             case Status::Failed:
-                return "Failed";
+                return "FAILED";
             case Status::Interrupted:
-                return "Interrupted";
+                return "INTERRUPTED";
             default:
-                return "Unknown";
+                return "UNKNOWN";
         }
     }
 
@@ -645,23 +645,23 @@ inline std::string_view SlotStateString(SlotState state) noexcept
     switch (state)
     {
         case SlotState::Error:
-            return "Error";
+            return "ERROR";
         case SlotState::NotFormattedOrFormatUnsupported:
-            return "NotFormattedOrFormatUnsupported";
+            return "NOT_FORMATTED_OR_FORMAT_UNSUPPORTED";
         case SlotState::Formatting:
-            return "Formatting";
+            return "FORMATTING";
         case SlotState::NotMounted:
-            return "NotMounted";
+            return "NOT_MOUNTED";
         case SlotState::Mounted:
-            return "Mounted";
+            return "MOUNTED";
         case SlotState::Configured:
-            return "Configured";
+            return "CONFIGURED";
         case SlotState::Indexing:
-            return "Indexing";
+            return "INDEXING";
         case SlotState::Ready:
-            return "Ready";
+            return "READY";
         default:
-            return "Unknown";
+            return "UNKNOWN";
     }
 }
 
@@ -849,9 +849,9 @@ struct FileWriterSettings
         std::string_view fnp = kRecordWriterPrefixDefault, std::chrono::seconds vcl = kVideoClipLengthDefault)
         : type(CaptureType::Video), format(std::move(fmt)), interval(itv), file_name_prefix(fnp), video_clip_length(vcl)
     {
-        if (format == "mp4")
+        if (format == "MP4")
             type = CaptureType::Video;
-        else if (format == "jpg" || format == "raw")
+        else if (format == "JPG" || format == "RAW")
             type = CaptureType::Image;
         else
             throw Exception("Unsupported file writer format: " + format);
@@ -880,13 +880,13 @@ struct GPIOHelpers final
         switch (state)
         {
             case VG_GPIO_PIN_MODE_DISABLED:
-                return "Disabled";
+                return "DISABLED";
             case VG_GPIO_PIN_MODE_INP_FLOATING:
-                return "Floating";
+                return "FLOATING";
             case VG_GPIO_PIN_MODE_INP_PULLUP:
-                return "PullUp";
+                return "PULL_UP";
             case VG_GPIO_PIN_MODE_INP_PULLDOWN:
-                return "PullDown";
+                return "PULL_DOWN";
             default:
                 return std::nullopt;
         }
@@ -894,13 +894,13 @@ struct GPIOHelpers final
 
     static inline std::optional<vg_gpio_pin_mod_e> StringToState(std::string_view state_str) noexcept
     {
-        if (state_str == "Disabled")
+        if (state_str == "DISABLED")
             return VG_GPIO_PIN_MODE_DISABLED;
-        else if (state_str == "Floating")
+        else if (state_str == "FLOATING")
             return VG_GPIO_PIN_MODE_INP_FLOATING;
-        else if (state_str == "PullUp")
+        else if (state_str == "PULL_UP")
             return VG_GPIO_PIN_MODE_INP_PULLUP;
-        else if (state_str == "PullDown")
+        else if (state_str == "PULL_DOWN")
             return VG_GPIO_PIN_MODE_INP_PULLDOWN;
         else
             return std::nullopt;
@@ -911,9 +911,9 @@ struct GPIOHelpers final
         switch (level)
         {
             case VG_GPIO_PIN_LVL_LOW:
-                return "Low";
+                return "LOW";
             case VG_GPIO_PIN_LVL_HIGH:
-                return "High";
+                return "HIGH";
             default:
                 return std::nullopt;
         }
@@ -921,9 +921,9 @@ struct GPIOHelpers final
 
     static inline std::optional<vg_gpio_pin_lvl_e> StringToLevel(std::string_view level_str) noexcept
     {
-        if (level_str == "Low")
+        if (level_str == "LOW")
             return VG_GPIO_PIN_LVL_LOW;
-        else if (level_str == "High")
+        else if (level_str == "HIGH")
             return VG_GPIO_PIN_LVL_HIGH;
         else
             return std::nullopt;
@@ -934,9 +934,9 @@ struct GPIOHelpers final
         switch (event)
         {
             case VG_GPIO_PIN_EVT_RISING:
-                return "Rising";
+                return "RISING";
             case VG_GPIO_PIN_EVT_FALLING:
-                return "Falling";
+                return "FALLING";
             default:
                 return std::nullopt;
         }
@@ -944,9 +944,9 @@ struct GPIOHelpers final
 
     static inline std::optional<vg_gpio_pin_evt_e> StringToEvent(std::string_view event_str) noexcept
     {
-        if (event_str == "Rising")
+        if (event_str == "RISING")
             return VG_GPIO_PIN_EVT_RISING;
-        else if (event_str == "Falling")
+        else if (event_str == "FALLING")
             return VG_GPIO_PIN_EVT_FALLING;
         else
             return std::nullopt;

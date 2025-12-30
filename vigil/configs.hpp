@@ -486,21 +486,21 @@ struct StorageControlConfig
     StorageControlConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
         using namespace std::string_literals;
-        if (auto action_str = j.at("sAction").get<std::string>(); action_str == "Format")
+        if (auto action_str = j.at("sAction").get<std::string>(); action_str == "FORMAT")
             action = ActionType::FormatSlot;
-        else if (action_str == "FreeUp")
+        else if (action_str == "FREE_UP")
             action = ActionType::FreeUpSlot;
-        else if (action_str == "Eject")
+        else if (action_str == "EJECT")
             action = ActionType::EjectSlot;
-        else if (action_str == "Config")
+        else if (action_str == "CONFIG")
             action = ActionType::ConfigSlot;
-        else if (action_str == "Relay")
+        else if (action_str == "RELAY")
             action = ActionType::RelaySlot;
-        else if (action_str == "RelayStatus")
+        else if (action_str == "RELAY_STATUS")
             action = ActionType::RelayStatusSlot;
-        else if (action_str == "Unrelay")
+        else if (action_str == "UNRELAY")
             action = ActionType::UnrelaySlot;
-        else if (action_str == "RemoveFilesOrDirectories")
+        else if (action_str == "REMOVE_FILES_OR_DIRECTORIES")
             action = ActionType::RemoveFilesOrDirectories;
         else
             throw Exception("Invalid storage action string '"s + action_str + "'"s);

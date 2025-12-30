@@ -2,7 +2,9 @@
 #ifndef VIGIL_WRITERS_HPP
 #define VIGIL_WRITERS_HPP
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <ctime>
 #include <filesystem>
@@ -186,7 +188,9 @@ private:
         const auto cache_dir = _slot.getRecordCachePath();
         if (!IndexManager::ensureDirectoryExist(cache_dir, this->ctxRef()))
             return false;
-        _cache_file_info.path = cache_dir / (std::string(this->settings().second.file_name_prefix) + ss.str());
+        auto fmt = this->settings().second.file_name_prefix;
+        std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
+        _cache_file_info.path = cache_dir / (fmt + ss.str());
 
         VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "Initialized writer with 1st level directory '",
             _cache_file_info.first_level_dir_name, "', cache file path '", _cache_file_info.path, "'");

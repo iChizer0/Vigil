@@ -122,11 +122,11 @@ struct GPIOPinStatus
         {
             auto capabilities_arr = nlohmann::json::array();
             if (pin.capabilities & VG_GPIO_PIN_MODE_INP_FLOATING)
-                capabilities_arr.push_back("Floating");
+                capabilities_arr.push_back("FLOATING");
             if (pin.capabilities & VG_GPIO_PIN_MODE_INP_PULLUP)
-                capabilities_arr.push_back("PullUp");
+                capabilities_arr.push_back("PULL_UP");
             if (pin.capabilities & VG_GPIO_PIN_MODE_INP_PULLDOWN)
-                capabilities_arr.push_back("PullDown");
+                capabilities_arr.push_back("PULL_DOWN");
             j["lCapabilities"] = capabilities_arr;
         }
         j["sLevel"] = (!(pin.state & VG_GPIO_PIN_MODE_DISABLED) && ctx.c_api.gpios.sync_level_cb)
