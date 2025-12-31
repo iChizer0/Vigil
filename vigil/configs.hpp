@@ -210,7 +210,7 @@ struct GPIORuleConfig
     vg_gpio_pin_mod_e state;
     vg_gpio_pin_lvl_e level;
     vg_gpio_pin_evt_e event;
-    size_t debounce_durations_ms;
+    int debounce_durations_ms;
 
     GPIORuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
@@ -242,7 +242,12 @@ struct GPIORuleConfig
             else
                 throw Exception("Invalid signal string '" + signal_str + "' while parsing GPIO rule");
         }
-        j.at("iDebounceDurationMs").get_to(debounce_durations_ms);
+        {
+            j.at("iDebounceDurationMs").get_to(debounce_durations_ms);
+            if (debounce_durations_ms < 0)
+                throw Exception(
+                    "Invalid debounce duration " + std::to_string(debounce_durations_ms) + " while parsing GPIO rule");
+        }
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const

@@ -314,7 +314,7 @@ public:
         if (!ctx.c_api.gpios.sync_level_cb && !ctx.c_api.gpios.sync_event_cb)
             throw Exception("No GPIO sync level or last event callback provided in C API while initializing GPIO rule");
 
-        if (auto ret = _acquire_cb(_pin_number, _state, cfg.debounce_durations_ms); ret != 0)
+        if (auto ret = _acquire_cb(_pin_number, _state, static_cast<size_t>(cfg.debounce_durations_ms)); ret != 0)
             throw Exception("Failed to acquire GPIO pin number " + std::to_string(_pin_number)
                             + " while initializing GPIO rule, error code: " + std::to_string(ret));
 
