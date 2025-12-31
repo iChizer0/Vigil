@@ -182,15 +182,15 @@ private:
         const auto duration = this->startTime().time_since_epoch();
         const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
         const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration - seconds);
-        ss << " " << std::put_time(&tm, kFileNamePrefixTimeFormat) << " " << micros.count() << "."
-           << this->settings().second.format;
+        ss << " " << std::put_time(&tm, kFileNamePrefixTimeFormat) << " " << micros.count();
 
         const auto cache_dir = _slot.getRecordCachePath();
         if (!IndexManager::ensureDirectoryExist(cache_dir, this->ctxRef()))
             return false;
-        auto fmt = std::string(this->settings().second.file_name_prefix);
+        auto fmt = std::string(this->settings().second.format);
         std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
-        _cache_file_info.path = cache_dir / (fmt + ss.str());
+        _cache_file_info.path
+            = cache_dir / (std::string(this->settings().second.file_name_prefix) + ss.str() + "." + fmt);
 
         VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "Initialized writer with 1st level directory '",
             _cache_file_info.first_level_dir_name, "', cache file path '", _cache_file_info.path, "'");
