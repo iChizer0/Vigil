@@ -279,17 +279,17 @@ public:
             auto schedule_rule_config = std::make_unique<ScheduleRuleConfig>(j, *_ctx);
             const std::unique_lock lock(_schedule_rule_mutex);
 
-            if (_schedule_rule_config && *schedule_rule_config == *_schedule_rule_config)
-                return res_j;
-
-            _schedule_rule_config = std::move(schedule_rule_config);
-            _schedule_rule.reset(); // If fail in the following steps, the previous rule is changed
-            _schedule_rule = std::make_unique<ScheduleRule>(*_schedule_rule_config, *_ctx);
-
-            if (store)
+            if (!_schedule_rule_config || *schedule_rule_config != *_schedule_rule_config)
             {
-                if (ret = _schedule_rule_config_store->saveToFile(j); ret != 0)
-                    throw Exception("Failed to store schedule rule config to file");
+                _schedule_rule_config = std::move(schedule_rule_config);
+                _schedule_rule.reset(); // If fail in the following steps, the previous rule is changed
+                _schedule_rule = std::make_unique<ScheduleRule>(*_schedule_rule_config, *_ctx);
+
+                if (store)
+                {
+                    if (ret = _schedule_rule_config_store->saveToFile(j); ret != 0)
+                        throw Exception("Failed to store schedule rule config to file");
+                }
             }
         }
         catch (const std::exception &e)
