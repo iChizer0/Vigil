@@ -687,9 +687,9 @@ public:
         {
             res_j.clear();
             ret = ret != 0 ? ret : EINVAL;
-            res_j["code"] = static_cast<int>(ret == 0 ? 0 : (kEndpointErrorBase + std::abs(ret)));
             res_j["message"] = e.what();
         }
+        res_j["code"] = static_cast<int>(ret == 0 ? 0 : (kEndpointErrorBase + std::abs(ret)));
 
         return res_j;
     }
