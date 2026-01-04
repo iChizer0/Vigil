@@ -543,6 +543,17 @@ public:
                 if (ret = static_cast<HTTPRule *>(_record_rule.get())->tryActivate(); ret != 0)
                     throw Exception("Failed to activate HTTP rule, error code: " + std::to_string(ret));
             }
+            {
+                const std::shared_lock lock(_ctx->slot_check_mutex);
+                if (_ctx->slot_check.second)
+                {
+                    if (!(_ctx->slot_check.second)(_ctx->slot_check.first))
+                    {
+                        ret = EBUSY;
+                        throw Exception("Cannot activate HTTP rule when storage slot is not ready to write");
+                    }
+                }
+            }
         }
         catch (const std::exception &e)
         {

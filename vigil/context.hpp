@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <queue>
 #include <shared_mutex>
@@ -196,6 +197,9 @@ struct Context
     mutable std::shared_mutex writer_settings_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> writer_settings_revision = 0;
     FileWriterSettings writer_settings = FileWriterSettings();
+    // Callback for slot status check (for HTTP rule)
+    std::shared_mutex slot_check_mutex;
+    std::pair<const void * /* owner */, std::function<bool(const void *)>> slot_check = { nullptr, nullptr };
 
     // Shared video/audio frame buffers
     template<size_t Limit>

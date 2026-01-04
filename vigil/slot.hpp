@@ -77,6 +77,13 @@ public:
             VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Retrying to disable storage slot for device path ", _dev_path);
             std::this_thread::yield();
         }
+
+        // Detach slot check callback (if current attached)
+        {
+            const std::unique_lock lock2(_ctx.slot_check_mutex);
+            if (_ctx.slot_check.first == static_cast<const void *>(this))
+                _ctx.slot_check = std::make_pair(nullptr, nullptr);
+        }
     }
 
     std::filesystem::path devPath() const
@@ -189,6 +196,21 @@ public:
 
         // Resume write operations (skip status check)
         resumeWrite(true);
+
+        // Attach slot check callback (single slot only)
+        {
+            const std::unique_lock lock2(_ctx.slot_check_mutex);
+            _ctx.slot_check = std::make_pair(static_cast<const void *>(this), [](const void *p) -> bool {
+                if (!p)
+                    return false;
+                const Slot *sp = static_cast<const Slot *>(p);
+                if (!sp->_mutex.try_lock())
+                    return false; // Treat as not ready to write if cannot acquire lock
+                const auto ready = sp->isReadyToWrite();
+                sp->_mutex.unlock();
+                return ready;
+            });
+        }
 
         return 0;
     }
