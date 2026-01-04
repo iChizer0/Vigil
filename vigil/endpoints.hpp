@@ -514,6 +514,7 @@ public:
 
         try
         {
+            // Pre-checks
             {
                 if (!_ctx->rule_enabled.load(std::memory_order_relaxed))
                 {
@@ -534,16 +535,6 @@ public:
                 }
             }
             {
-                const std::shared_lock lock(_record_rule_mutex);
-                if (!_record_rule || _record_rule->type() != VG_RULE_TYPE_HTTP)
-                {
-                    ret = EPERM;
-                    throw Exception("Current record rule is not HTTP rule, cannot activate");
-                }
-                if (ret = static_cast<HTTPRule *>(_record_rule.get())->tryActivate(); ret != 0)
-                    throw Exception("Failed to activate HTTP rule, error code: " + std::to_string(ret));
-            }
-            {
                 const std::shared_lock lock(_ctx->slot_check_mutex);
                 if (_ctx->slot_check.second)
                 {
@@ -553,6 +544,17 @@ public:
                         throw Exception("Cannot activate HTTP rule when storage slot is not ready to write");
                     }
                 }
+            }
+            // Try to activate
+            {
+                const std::shared_lock lock(_record_rule_mutex);
+                if (!_record_rule || _record_rule->type() != VG_RULE_TYPE_HTTP)
+                {
+                    ret = EPERM;
+                    throw Exception("Current record rule is not HTTP rule, cannot activate");
+                }
+                if (ret = static_cast<HTTPRule *>(_record_rule.get())->tryActivate(); ret != 0)
+                    throw Exception("Failed to activate HTTP rule, error code: " + std::to_string(ret));
             }
         }
         catch (const std::exception &e)
