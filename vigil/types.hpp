@@ -96,14 +96,7 @@ struct EventOwner
     std::string id;
     int64_t timestamp;
 
-    void clear() noexcept
-    {
-        type = VG_RULE_TYPE_UNKNOWN;
-        id.clear();
-        timestamp = 0;
-    }
-
-    EventOwner() : type(VG_RULE_TYPE_UNKNOWN), id(""), timestamp(0) { }
+    EventOwner(vg_rule_type_e t, const std::string &i, int64_t ts) : type(t), id(i), timestamp(ts) { }
 
     ~EventOwner() = default;
 };

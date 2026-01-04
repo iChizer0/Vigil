@@ -326,12 +326,17 @@ struct HTTPRuleConfig
 
 struct ScheduleRuleConfig
 {
+    bool enabled;
     std::vector<TimeRange> active_weekdays;
 
     ScheduleRuleConfig() : active_weekdays() { }
 
     ScheduleRuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
+        {
+            if (enabled = j.at("bEnabled").get<bool>(); !enabled)
+                return;
+        }
         {
             auto &weekdays_vec = j.at("lActiveWeekdays");
             auto getWeekdayLocalTime = [&](const nlohmann::json &j, std::string_view k) -> LocalTime {
@@ -360,29 +365,34 @@ struct ScheduleRuleConfig
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
-        nlohmann::json weekdays_vec = nlohmann::json::array();
-        auto reflectLocalTime = [&](const LocalTime &lt) -> nlohmann::json {
-            auto tm = lt.tm();
-            nlohmann::json lt_j;
-            lt_j["iDay"] = tm.tm_wday;
-            lt_j["iHour"] = tm.tm_hour;
-            lt_j["iMinute"] = tm.tm_min;
-            lt_j["iSecond"] = tm.tm_sec;
-            return lt_j;
-        };
-        for (const auto &tr: active_weekdays)
         {
-            nlohmann::json tr_j;
-            tr_j["dStart"] = reflectLocalTime(tr.start());
-            tr_j["dEnd"] = reflectLocalTime(tr.end());
-            weekdays_vec.push_back(tr_j);
+            j["bEnabled"] = enabled;
         }
-        j["lActiveWeekdays"] = weekdays_vec;
+        {
+            nlohmann::json weekdays_vec = nlohmann::json::array();
+            auto reflectLocalTime = [&](const LocalTime &lt) -> nlohmann::json {
+                auto tm = lt.tm();
+                nlohmann::json lt_j;
+                lt_j["iDay"] = tm.tm_wday;
+                lt_j["iHour"] = tm.tm_hour;
+                lt_j["iMinute"] = tm.tm_min;
+                lt_j["iSecond"] = tm.tm_sec;
+                return lt_j;
+            };
+            for (const auto &tr: active_weekdays)
+            {
+                nlohmann::json tr_j;
+                tr_j["dStart"] = reflectLocalTime(tr.start());
+                tr_j["dEnd"] = reflectLocalTime(tr.end());
+                weekdays_vec.push_back(tr_j);
+            }
+            j["lActiveWeekdays"] = weekdays_vec;
+        }
     }
 
     bool operator==(const ScheduleRuleConfig &other) const noexcept
     {
-        return active_weekdays == other.active_weekdays;
+        return enabled == other.enabled && active_weekdays == other.active_weekdays;
     }
 };
 

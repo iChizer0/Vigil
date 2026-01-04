@@ -129,7 +129,7 @@ struct GPIOPinStatus
                 capabilities_arr.push_back("PULL_DOWN");
             j["lCapabilities"] = capabilities_arr;
         }
-        j["sLevel"] = (!(pin.state & VG_GPIO_PIN_MODE_DISABLED) && ctx.c_api.gpios.sync_level_cb)
+        j["sLevel"] = ((pin.state & ~VG_GPIO_PIN_MODE_DISABLED) && ctx.c_api.gpios.sync_level_cb)
                           ? GPIOHelpers::LevelToString(ctx.c_api.gpios.sync_level_cb(pin.num))
                           : std::optional<std::string_view>();
     }

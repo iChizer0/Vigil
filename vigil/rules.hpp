@@ -1,4 +1,5 @@
 #pragma once
+#include <shared_mutex>
 #ifndef VIGIL_RULES_HPP
 #define VIGIL_RULES_HPP
 
@@ -505,8 +506,8 @@ public:
         if (_activated)
             return EALREADY;
         {
-            const std::unique_lock lock2(_ctx.rule_event_mutex);
-            if (_ctx.rule_event)
+            const std::shared_lock lock2(_ctx.rule_event_mutex);
+            if (_ctx.rule_event_owner)
                 return EBUSY;
         }
         _activated = true;
@@ -537,7 +538,7 @@ class ScheduleRule: public BaseRule
 {
 public:
     ScheduleRule(const ScheduleRuleConfig &cfg, const Context &ctx) noexcept
-        : BaseRule(VG_RULE_TYPE_SCHEDULE, 30), _active_weekdays(cfg.active_weekdays)
+        : BaseRule(VG_RULE_TYPE_SCHEDULE, 30), _enabled(cfg.enabled), _active_weekdays(cfg.active_weekdays)
     {
         VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG,
             "Initialized schedule rule with active weekdays: ", cfg.active_weekdays.size());
@@ -548,6 +549,8 @@ public:
 private:
     bool operator()(const Context &ctx) const noexcept override
     {
+        if (!_enabled)
+            return true;
         for (const auto &tr: _active_weekdays)
         {
             if (tr & ctx.local_time)
@@ -557,6 +560,7 @@ private:
     }
 
 private:
+    bool _enabled;
     std::vector<TimeRange> _active_weekdays;
 };
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "vigil_ctypes.h"
 #ifndef VIGIL_SLOT_HPP
 #define VIGIL_SLOT_HPP
 
@@ -675,38 +676,27 @@ private:
             }
 
             const auto start = std::chrono::steady_clock::now();
-            std::shared_ptr<WriteEvent> evaluation_result;
+            std::shared_ptr<WriteEvent> event;
 
             // Check if we are asked to stop writing (suspend)
             if (!isReadyToWrite())
                 goto l_continue;
 
             // Check if could create a new writer
-            if (!_quota_rotate.load(std::memory_order_acquire))
+            if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit > 0)
             {
-                if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit > 0)
-                {
-                    if (_index_manager.usedBytes() >= limit)
-                        goto l_continue;
-                }
-                else if (_stats.load(std::memory_order_acquire).free_bytes <= kMinFileSystemFreeBytes)
+                if (_index_manager.usedBytes() >= limit)
                     goto l_continue;
             }
-
-            // If no writer is active, check the rule evaluation status if should create one
-            {
-                const std::unique_lock lock(_ctx.rule_event_mutex);
-                evaluation_result = _ctx.rule_event;
-            }
+            else if (_stats.load(std::memory_order_acquire).free_bytes <= kMinFileSystemFreeBytes)
+                goto l_continue;
 
             // If media is paused, do not start new writer
             if (_ctx.media_paused.load(std::memory_order_acquire))
                 goto l_continue;
 
-            if (!evaluation_result)
-                goto l_continue;
-
-            goto l_start_new;
+            if (event = _ctx.getRuleEvent(); event)
+                goto l_start_new;
 
         l_continue: {
             const auto elapsed = std::chrono::steady_clock::now() - start;
@@ -716,6 +706,7 @@ private:
         }
 
         l_start_new:
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting new writer task, dev path ", _dev_path);
             try
             {
                 auto writer_settings = _ctx.getWriterSettings();
@@ -723,17 +714,16 @@ private:
                 {
                     case FileWriterSettings::CaptureType::Image:
                         _writer_task = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
-                            std::ref(_ctx), std::move(writer_settings), std::move(evaluation_result));
+                            std::ref(_ctx), std::move(writer_settings), std::move(event));
                         break;
                     case FileWriterSettings::CaptureType::Video:
                         _writer_task = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
-                            std::ref(_ctx), std::move(writer_settings), std::move(evaluation_result));
+                            std::ref(_ctx), std::move(writer_settings), std::move(event));
                         break;
                     default: {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
                             "Unsupported writer type for storage slot with device path ", _dev_path);
-                        const std::unique_lock lock(_ctx.rule_event_mutex);
-                        _ctx.rule_event.reset(); // Clear invalid evaluation result
+                        _ctx.clearRuleEvent(); // Clear invalid evaluation result
                     }
                     break;
                 }

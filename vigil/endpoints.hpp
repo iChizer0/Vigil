@@ -429,31 +429,30 @@ public:
         try
         {
             {
-                auto rule_event_obj = nlohmann::json::object();
-                std::shared_ptr<WriteEvent> evt;
-                EventOwner owner;
-                {
-                    const std::shared_lock lock(_ctx->rule_event_mutex);
-                    evt = _ctx->rule_event;
-                    owner = _ctx->rule_event_owner;
-                }
-                {
-                    if (evt)
-                    {
-                        auto evt_obj = nlohmann::json::object();
-                        evt_obj["sStatus"] = WriteEvent::StatusString(evt->status.load(std::memory_order_relaxed));
-                        evt_obj["iTimestamp"] = evt->timestamp;
-                        rule_event_obj["dRuleEvent"] = evt_obj;
-                    }
-                }
-                {
-                    auto owner_obj = nlohmann::json::object();
-                    owner_obj["sRuleType"] = BaseRule::TypeString(owner.type);
-                    owner_obj["sRuleID"] = owner.id;
-                    owner_obj["iTimestamp"] = owner.timestamp;
-                    rule_event_obj["dRuleEventOwner"] = owner_obj;
-                }
-                res_j["dRuleEvent"] = rule_event_obj;
+                const std::shared_lock lock(_ctx->rule_event_mutex);
+
+                res_j["dLastRuleEvent"] = [&]() -> std::optional<nlohmann::json> {
+                    if (!_ctx->rule_event_last)
+                        return std::nullopt;
+
+                    const auto &evt = _ctx->rule_event_last;
+                    auto obj = nlohmann::json::object();
+                    obj["sStatus"] = WriteEvent::StatusString(evt->status.load(std::memory_order_relaxed));
+                    obj["iTimestamp"] = evt->timestamp;
+                    return obj;
+                }();
+
+                res_j["dLastRuleEventOwner"] = [&]() -> std::optional<nlohmann::json> {
+                    const auto &owner = _ctx->rule_event_owner;
+                    if (!owner.has_value())
+                        return std::nullopt;
+
+                    auto obj = nlohmann::json::object();
+                    obj["sRuleType"] = BaseRule::TypeString(owner->type);
+                    obj["sRuleID"] = owner->id;
+                    obj["iTimestamp"] = owner->timestamp;
+                    return obj;
+                }();
             }
             {
                 auto gpios_obj = nlohmann::json::object();
@@ -491,6 +490,10 @@ public:
                     }
                 }
                 res_j["dAvailableTTYs"] = ttys_obj;
+            }
+            {
+                const bool media_paused = _ctx->media_paused.load(std::memory_order_relaxed);
+                res_j["bMediaPaused"] = media_paused;
             }
         }
         catch (const std::exception &e)
@@ -570,7 +573,6 @@ private:
             else
                 return;
         }
-
         if (_ctx->c_api.basic.on_rule_event_cb)
         {
             const auto evt = vg_rule_evt_t { .type = type, .id = id.c_str(), .timestamp = _ctx->unix_time };

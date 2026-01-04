@@ -71,10 +71,7 @@ struct Context
                 classifications.clear();
 
             // Update last evaluation result to not matched
-            {
-                const std::unique_lock lock(rule_event_mutex);
-                rule_event.reset();
-            }
+            clearRuleEvent();
 
             return false;
         }
@@ -174,10 +171,9 @@ struct Context
             const std::unique_lock lock(rule_event_mutex);
             if (!rule_event)
             {
-                rule_event = std::make_shared<WriteEvent>(steady_time, unix_time);
-                rule_event_owner.type = type;
-                rule_event_owner.id = id;
-                rule_event_owner.timestamp = unix_time;
+                rule_event = std::make_shared<WriteEvent>();
+                rule_event_last = rule_event;
+                rule_event_owner.emplace(type, id, unix_time);
                 return true;
             }
         }
@@ -193,7 +189,12 @@ struct Context
     {
         const std::unique_lock lock(rule_event_mutex);
         rule_event.reset();
-        rule_event_owner.clear();
+    }
+
+    std::shared_ptr<WriteEvent> getRuleEvent() const noexcept
+    {
+        const std::shared_lock lock(rule_event_mutex);
+        return rule_event;
     }
 
     // Shared data
@@ -206,7 +207,8 @@ struct Context
     // Sync rule event, updated in RuleEndpoint::operator()()
     mutable std::shared_mutex rule_event_mutex;
     mutable std::shared_ptr<WriteEvent> rule_event;
-    mutable EventOwner rule_event_owner;
+    mutable std::shared_ptr<WriteEvent> rule_event_last;
+    mutable std::optional<EventOwner> rule_event_owner;
     // Sync video/audio frame buffers, updated in enqueueMediaFrame()
     std::mutex media_mutex;
     std::deque<MediaFrame> media_buffer;
