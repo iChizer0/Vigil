@@ -514,14 +514,35 @@ public:
 
         try
         {
-            const std::shared_lock lock(_record_rule_mutex);
-            if (!_record_rule || _record_rule->type() != VG_RULE_TYPE_HTTP)
             {
-                ret = EPERM;
-                throw Exception("Current record rule is not HTTP rule, cannot activate");
+                if (!_ctx->rule_enabled.load(std::memory_order_relaxed))
+                {
+                    ret = EPERM;
+                    throw Exception("Cannot activate HTTP rule when rule evaluation is disabled");
+                }
             }
-            if (ret = static_cast<HTTPRule *>(_record_rule.get())->tryActivate(); ret != 0)
-                throw Exception("Failed to activate HTTP rule, error code: " + std::to_string(ret));
+            {
+                const std::shared_lock lock(_schedule_rule_mutex);
+                if (_schedule_rule && _schedule_rule->type() == VG_RULE_TYPE_SCHEDULE)
+                {
+                    if (!static_cast<ScheduleRule *>(_schedule_rule.get())->isActive(LocalTime::now()))
+                    {
+                        ret = EPERM;
+                        throw Exception(
+                            "Activating HTTP rule required schedule rule to be ready in current configuration");
+                    }
+                }
+            }
+            {
+                const std::shared_lock lock(_record_rule_mutex);
+                if (!_record_rule || _record_rule->type() != VG_RULE_TYPE_HTTP)
+                {
+                    ret = EPERM;
+                    throw Exception("Current record rule is not HTTP rule, cannot activate");
+                }
+                if (ret = static_cast<HTTPRule *>(_record_rule.get())->tryActivate(); ret != 0)
+                    throw Exception("Failed to activate HTTP rule, error code: " + std::to_string(ret));
+            }
         }
         catch (const std::exception &e)
         {
@@ -572,11 +593,6 @@ private:
             }
             else
                 return;
-        }
-        if (_ctx->c_api.basic.on_rule_event_cb)
-        {
-            const auto evt = vg_rule_evt_t { .type = type, .id = id.c_str(), .timestamp = _ctx->unix_time };
-            _ctx->c_api.basic.on_rule_event_cb(&evt);
         }
 
         _ctx->tryUpdateRuleEvent(type, id);

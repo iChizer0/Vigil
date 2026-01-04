@@ -76,12 +76,7 @@ struct Context
             return false;
         }
 
-        {
-            steady_time = std::chrono::steady_clock::now();
-            const auto now = std::chrono::system_clock::now();
-            unix_time = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-            local_time = LocalTime(now);
-        }
+        shared_time.tick();
 
         if (inference_subscribers.load(std::memory_order_relaxed) > 0)
         {
@@ -91,7 +86,7 @@ struct Context
                 return false;
 
             auto &[ts, result] = inference_queue.front();
-            unix_time = ts; // Update timestamp to that of the inference result
+            shared_time.updateUnixTime(ts); // Update timestamp to that of the inference result
             if (auto *detection_vec = std::get_if<DetectionResultVec>(&result))
                 detections = std::move(*detection_vec);
             else if (auto *classification_vec = std::get_if<ClassificationResultVec>(&result))
@@ -163,18 +158,26 @@ struct Context
         return { writer_settings_revision.load(std::memory_order_acquire), writer_settings };
     }
 
-    // Try to update rule event (should be called in the same thread as tick())
+    // Try to update rule event
     bool tryUpdateRuleEvent(vg_rule_type_e type, const std::string &id) const noexcept
     {
         try
         {
-            const std::unique_lock lock(rule_event_mutex);
-            if (!rule_event)
+            const auto [steady_time, unix_time, _] = shared_time.getAll();
+            if (c_api.basic.on_rule_event_cb)
             {
-                rule_event = std::make_shared<WriteEvent>();
-                rule_event_last = rule_event;
-                rule_event_owner.emplace(type, id, unix_time);
-                return true;
+                const auto evt = vg_rule_evt_t { .type = type, .id = id.c_str(), .timestamp = unix_time };
+                c_api.basic.on_rule_event_cb(&evt);
+            }
+            {
+                const std::unique_lock lock(rule_event_mutex);
+                if (!rule_event)
+                {
+                    rule_event = std::make_shared<WriteEvent>(steady_time, unix_time);
+                    rule_event_last = rule_event;
+                    rule_event_owner.emplace(type, id, unix_time);
+                    return true;
+                }
             }
         }
         catch (std::exception &e)
@@ -218,15 +221,65 @@ struct Context
     mutable std::shared_mutex writer_settings_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> writer_settings_revision = 0;
     FileWriterSettings writer_settings = FileWriterSettings();
+    // Shared time
+    struct SharedTime
+    {
+    private:
+        mutable std::shared_mutex mutex;
+        std::chrono::steady_clock::time_point _steady_time = {};
+        int64_t _unix_time = 0;
+        LocalTime _local_time = LocalTime::now();
 
-    // Local data, updated in tick()
-    mutable std::chrono::steady_clock::time_point steady_time = {};
-    mutable int64_t unix_time = 0;
-    LocalTime local_time = LocalTime::now();
+    protected:
+        friend Context;
+
+        void tick() noexcept
+        {
+            const std::unique_lock lock(mutex);
+            _steady_time = std::chrono::steady_clock::now();
+            const auto now = std::chrono::system_clock::now();
+            _unix_time = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+            _local_time = LocalTime(now);
+        }
+
+        void updateUnixTime(int64_t ts) noexcept
+        {
+            const std::unique_lock lock(mutex);
+            _unix_time = ts;
+        }
+
+    public:
+        std::chrono::steady_clock::time_point steadyTime() const noexcept
+        {
+            const std::shared_lock lock(mutex);
+            return _steady_time;
+        }
+
+        int64_t unixTime() const noexcept
+        {
+            const std::shared_lock lock(mutex);
+            return _unix_time;
+        }
+
+        LocalTime localTime() const noexcept
+        {
+            const std::shared_lock lock(mutex);
+            return _local_time;
+        }
+
+        std::tuple<std::chrono::steady_clock::time_point, int64_t, LocalTime> getAll() const noexcept
+        {
+            const std::shared_lock lock(mutex);
+            return { _steady_time, _unix_time, _local_time };
+        }
+
+    } mutable shared_time;
+
+    // Shared local data
     DetectionResultVec detections = {};
     ClassificationResultVec classifications = {};
 
-    // C APIs
+    // C API
     const vg_config_t c_api;
 
     // Constructor

@@ -1,5 +1,4 @@
 #pragma once
-#include <shared_mutex>
 #ifndef VIGIL_RULES_HPP
 #define VIGIL_RULES_HPP
 
@@ -10,7 +9,6 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -287,7 +285,7 @@ public:
 
     bool operator()(const Context &ctx) const noexcept override
     {
-        auto now = ctx.steady_time;
+        const auto now = ctx.shared_time.steadyTime();
         if (now - _last_trigger_time >= _interval)
         {
             _last_trigger_time = now;
@@ -493,45 +491,23 @@ private:
 class HTTPRule: public BaseRule
 {
 public:
-    HTTPRule(const HTTPRuleConfig &, const Context &ctx) noexcept
-        : BaseRule(VG_RULE_TYPE_HTTP, 0), _ctx(ctx), _mutex(), _activated(false)
-    {
-    }
+    HTTPRule(const HTTPRuleConfig &, const Context &ctx) noexcept : BaseRule(VG_RULE_TYPE_HTTP, 0), _ctx(ctx) { }
 
     ~HTTPRule() = default;
 
     vg_sta_e tryActivate() noexcept
     {
-        const std::unique_lock lock(_mutex);
-        if (_activated)
-            return EALREADY;
-        {
-            const std::shared_lock lock2(_ctx.rule_event_mutex);
-            if (_ctx.rule_event_owner)
-                return EBUSY;
-        }
-        _activated = true;
-        return 0;
+        return _ctx.tryUpdateRuleEvent(type(), id()) ? 0 : EBUSY;
     }
 
 private:
-    bool operator()(const Context &ctx) const noexcept override
+    bool operator()(const Context &ctx [[maybe_unused]]) const noexcept override
     {
-        const std::unique_lock lock(_mutex);
-        if (_activated)
-        {
-            if (!ctx.tryUpdateRuleEvent(type(), id()))
-                return false;
-            _activated = false;
-            return true;
-        }
         return false;
     }
 
 private:
     const Context &_ctx;
-    mutable std::mutex _mutex;
-    mutable bool _activated;
 };
 
 class ScheduleRule: public BaseRule
@@ -546,17 +522,22 @@ public:
 
     ~ScheduleRule() = default;
 
-private:
-    bool operator()(const Context &ctx) const noexcept override
+    inline bool isActive(const LocalTime &t) const noexcept
     {
-        if (!_enabled)
+        if (!_enabled) // Treat disabled rule as active
             return true;
         for (const auto &tr: _active_weekdays)
         {
-            if (tr & ctx.local_time)
+            if (tr & t)
                 return true;
         }
         return false;
+    }
+
+private:
+    bool operator()(const Context &ctx) const noexcept override
+    {
+        return isActive(ctx.shared_time.localTime());
     }
 
 private:

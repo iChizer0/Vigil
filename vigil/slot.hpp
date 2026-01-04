@@ -515,7 +515,7 @@ private:
                             .path = path_str.c_str(),
                             .size_bytes = result->second > 0 ? static_cast<size_t>(result->second) : 0,
                             .attrs = attrs_str,
-                            .timestamp = _ctx.unix_time,
+                            .timestamp = _ctx.shared_time.unixTime(),
                         };
                         _ctx.c_api.basic.on_file_event_cb(&file_evt);
                     }
