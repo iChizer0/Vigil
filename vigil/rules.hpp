@@ -181,11 +181,11 @@ private:
 
     bool filterDetection(const Context &ctx) const noexcept
     {
-        static_assert(std::is_unsigned_v<decltype(ctx.detections)::value_type::value_type>,
+        static_assert(std::is_unsigned_v<decltype(ctx.shared_inference_result.detections)::value_type::value_type>,
             "Value type of detection result should be unsigned.");
 
         bool active = false;
-        for (const auto &det: ctx.detections)
+        for (const auto &det: ctx.shared_inference_result.detections)
         {
             if (!(_conf_rg & det.confidence))
                 continue;
@@ -205,7 +205,7 @@ private:
     bool filterClassification(const Context &ctx) const noexcept
     {
         bool active = false;
-        for (const auto &cls: ctx.classifications)
+        for (const auto &cls: ctx.shared_inference_result.classifications)
         {
             if (!(_conf_rg & cls.confidence))
                 continue;

@@ -9,6 +9,7 @@
 #include <mutex>
 #include <queue>
 #include <shared_mutex>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -65,14 +66,9 @@ struct Context
     {
         if (!rule_enabled.load(std::memory_order_relaxed))
         {
-            if (!detections.empty())
-                detections.clear();
-            if (!classifications.empty())
-                classifications.clear();
-
+            shared_inference_result.reset();
             // Update last evaluation result to not matched
             clearRuleEvent();
-
             return false;
         }
 
@@ -81,25 +77,18 @@ struct Context
         if (inference_subscribers.load(std::memory_order_relaxed) > 0)
         {
             const std::unique_lock lock(inference_mutex);
-
             if (inference_queue.empty())
                 return false;
-
             auto &[ts, result] = inference_queue.front();
             shared_time.updateUnixTime(ts); // Update timestamp to that of the inference result
             if (auto *detection_vec = std::get_if<DetectionResultVec>(&result))
-                detections = std::move(*detection_vec);
+                shared_inference_result.detections = std::move(*detection_vec);
             else if (auto *classification_vec = std::get_if<ClassificationResultVec>(&result))
-                classifications = std::move(*classification_vec);
+                shared_inference_result.classifications = std::move(*classification_vec);
             inference_queue.pop();
         }
         else
-        {
-            if (!detections.empty())
-                detections.clear();
-            if (!classifications.empty())
-                classifications.clear();
-        }
+            shared_inference_result.reset();
 
         return true;
     }
@@ -131,25 +120,13 @@ struct Context
     template<typename T>
     void enqueueMediaFrame(T &&frame) noexcept
     {
-        static_assert(std::is_same_v<std::remove_cvref_t<T>, MediaFrame>,
-            "enqueueMediaFrame only accepts MediaFrame type.");
-        const std::unique_lock lock(media_mutex);
-        auto rit = media_buffer.crbegin();
-        for (; rit != media_buffer.crend(); ++rit)
-        {
-            if (rit->time_stamp <= frame.time_stamp)
-                break;
-        }
-        media_buffer.insert(rit.base(), std::forward<T>(frame));
-        while (media_buffer.size() >= kMediaMuxerBufferSize)
-            media_buffer.pop_front();
+        slot_media_buffer.enqueue(std::forward<T>(frame));
     }
 
     // Clear media frames (thread-safe)
     void clearMediaBuffer() noexcept
     {
-        const std::unique_lock lock(media_mutex);
-        media_buffer.clear();
+        slot_media_buffer.clear();
     }
 
     FileWriterSettingsWithRevision getWriterSettings() const noexcept
@@ -213,15 +190,46 @@ struct Context
     mutable std::shared_ptr<WriteEvent> rule_event_last;
     mutable std::optional<EventOwner> rule_event_owner;
     // Sync video/audio frame buffers, updated in enqueueMediaFrame()
-    std::mutex media_mutex;
-    std::deque<MediaFrame> media_buffer;
     std::mutex media_pause_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> media_paused = false;
     // Sync record writer settings
     mutable std::shared_mutex writer_settings_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> writer_settings_revision = 0;
     FileWriterSettings writer_settings = FileWriterSettings();
-    // Shared time
+
+    // Shared video/audio frame buffers
+    template<size_t Limit>
+    struct SharedMediaBuffer
+    {
+        static_assert(Limit > 0, "Limit must be greater than 0");
+
+        std::mutex mutex;
+        std::deque<MediaFrame> queue;
+
+        void clear() noexcept
+        {
+            const std::unique_lock lock(mutex);
+            queue.clear();
+        }
+
+        template<typename T, std::enable_if_t<std::is_same_v<std::remove_cvref_t<T>, MediaFrame>, bool> = true>
+        void enqueue(T &&frame) noexcept
+        {
+            const std::unique_lock lock(mutex);
+            auto rit = queue.crbegin();
+            for (; rit != queue.crend(); ++rit)
+            {
+                if (rit->time_stamp <= frame.time_stamp)
+                    break;
+            }
+            queue.insert(rit.base(), std::forward<T>(frame));
+            while (queue.size() >= Limit)
+                queue.pop_front();
+        }
+    };
+    SharedMediaBuffer<kMediaMuxerBufferSize> slot_media_buffer;
+
+    // Shared time (thread-safe)
     struct SharedTime
     {
     private:
@@ -272,12 +280,22 @@ struct Context
             const std::shared_lock lock(mutex);
             return { _steady_time, _unix_time, _local_time };
         }
+    } shared_time;
 
-    } mutable shared_time;
+    // Shared inference results (not thread-safe)
+    struct SharedInferenceResult
+    {
+        DetectionResultVec detections = {};
+        ClassificationResultVec classifications = {};
 
-    // Shared local data
-    DetectionResultVec detections = {};
-    ClassificationResultVec classifications = {};
+        void reset()
+        {
+            if (!detections.empty())
+                detections.clear();
+            if (!classifications.empty())
+                classifications.clear();
+        }
+    } shared_inference_result;
 
     // C API
     const vg_config_t c_api;
