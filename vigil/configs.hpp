@@ -334,8 +334,7 @@ struct ScheduleRuleConfig
     ScheduleRuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
         {
-            if (enabled = j.at("bEnabled").get<bool>(); !enabled)
-                return;
+            enabled = j.at("bEnabled").get<bool>();
         }
         {
             auto &weekdays_vec = j.at("lActiveWeekdays");
