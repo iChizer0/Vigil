@@ -1,8 +1,8 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2025-12-30
-Version: 1.3.1
+Revised: 2026-01-05
+Version: 1.3.2
 
 ## Rule API
 
@@ -39,16 +39,14 @@ Get the information about the rule system.
 
 ```json
 {
-    "dRuleEvent": {
-        "dRuleEvent": { // Optional, present only if an event exists
-            "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"
-            "iTimestamp": 1735574400 // Integer, Unix timestamp
-        },
-        "dRuleEventOwner": {
-            "sRuleType": "TIMER", // String, rule type that owns the event
-            "sRuleID": "timer_rule_1", // String, rule ID
-            "iTimestamp": 1735574400 // Integer, Unix timestamp
-        }
+    "dLastRuleEvent": { // Optional, present only if an event exists
+        "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"
+        "iTimestamp": 1735574400 // Integer, Unix timestamp
+    },
+    "dLastRuleEventOwner": { // Optional, present only if an event owner exists
+        "sRuleType": "TIMER", // String, rule type that owns the event
+        "sRuleID": "timer_rule_1", // String, rule ID
+        "iTimestamp": 1735574400 // Integer, Unix timestamp
     },
     "dAvailableGPIOs": {
         "1": {
@@ -64,7 +62,8 @@ Get the information about the rule system.
             "sSocketPath": "/tmp/ttyS0.sock", // String, Unix socket path
             "iBufferSize": 1024 // Integer, buffer size in bytes
         }
-    }
+    },
+    "bMediaPaused": false // Boolean, whether media capture is currently paused
 }
 ```
 
@@ -186,38 +185,6 @@ The HTTP rule requires no additional configuration; select it to enable external
     "sCurrentSelected": "HTTP",
     "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
-```
-
-### Rule Info
-
-Get the available hardware resources for rules.
-
-**Path:** `.../vigil/rule/info`
-
-**Method:** `GET`
-
-**Response Body:**
-
-```json
-{
-    "dAvailableGPIOs": {
-        "1": {
-            "iNum": 1, // Integer, GPIO number
-            "sName": "GPIO_01", // String|null, name from system config
-            "sState": "FLOATING", // String|null, "DISABLED", "FLOATING", "PULL_UP", "PULL_DOWN"
-            "lCapabilities": ["FLOATING", "PULL_UP", "PULL_DOWN"], // Array of available input modes
-            "sLevel": "HIGH" // String|null, current level if callback provided ("HIGH" or "LOW")
-        }
-    },
-    "dAvailableTTYs": {
-        "ttyS0": {
-            "sSocketPath": "/tmp/ttyS0.sock", // String, Unix socket path
-            "iBufferSize": 1024 // Integer, buffer size in bytes
-        }
-    },
-    "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
-}
-
 ```
 
 ### HTTP Rule Activation
