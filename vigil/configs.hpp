@@ -228,6 +228,8 @@ struct GPIORuleConfig
                 state = state_opt.value();
             else
                 throw Exception("Invalid state string '" + state_str + "' while parsing GPIO rule");
+            if (state == VG_GPIO_PIN_MODE_DISABLED)
+                throw Exception("GPIO state cannot be DISABLED while parsing GPIO rule");
         }
         {
             const auto signal_str = j.at("sSignal").get<std::string>();
