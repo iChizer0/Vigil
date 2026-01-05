@@ -466,7 +466,7 @@ public:
                         {
                             const auto &pin = available_pins.pins[i];
                             GPIOPinStatus gpio_status(pin);
-                            gpio_status.to(gpios_obj[gpio_status.id()], *_ctx);
+                            gpio_status.to(gpios_obj[gpio_status.pin.name], *_ctx);
                         }
                     }
                     if (available_pins.free_cb)

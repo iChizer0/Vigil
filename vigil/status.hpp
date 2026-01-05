@@ -109,15 +109,9 @@ struct GPIOPinStatus
 
     GPIOPinStatus(const vg_config_gpio_pin_t &p) : pin(p) { }
 
-    std::string id() const noexcept
-    {
-        return std::to_string(pin.num);
-    }
-
     void to(nlohmann::json &j, const Context &ctx) const
     {
         j["iNum"] = pin.num;
-        j["sName"] = pin.name;
         j["sState"] = GPIOHelpers::StateToString(pin.state);
         {
             auto capabilities_arr = nlohmann::json::array();

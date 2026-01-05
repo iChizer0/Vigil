@@ -49,9 +49,8 @@ Get the information about the rule system.
         "iTimestamp": 1735574400 // Integer, Unix timestamp
     },
     "dAvailableGPIOs": {
-        "1": {
+        "GPIO_01": {
             "iNum": 1, // Integer, GPIO number
-            "sName": "GPIO_01", // String|null, name from system config
             "sState": "FLOATING", // String|null, "DISABLED", "FLOATING", "PULL_UP", "PULL_DOWN"
             "lCapabilities": ["FLOATING", "PULL_UP", "PULL_DOWN"], // Array of available input modes
             "sLevel": "HIGH" // String|null, current level if callback provided ("HIGH" or "LOW")
