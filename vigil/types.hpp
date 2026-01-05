@@ -188,7 +188,8 @@ public:
 
     bool operator==(const LocalTime &other) const noexcept
     {
-        return _local_seconds_weekly == other._local_seconds_weekly;
+        return _local_tm->tm_wday == other._local_tm->tm_wday && _local_tm->tm_hour == other._local_tm->tm_hour
+               && _local_tm->tm_min == other._local_tm->tm_min && _local_tm->tm_sec == other._local_tm->tm_sec;
     }
 
 private:
@@ -201,7 +202,7 @@ private:
 private:
     std::tm _local_tm_storage;
     std::tm *_local_tm;
-    long _local_seconds_weekly;
+    int64_t _local_seconds_weekly;
 };
 
 class TimeRange final
@@ -215,9 +216,9 @@ public:
 
     bool operator&(const LocalTime &time) const noexcept
     {
-        if (_start <= _end)
+        if (_start < _end)
             return time >= _start && time <= _end;
-        else
+        else // Looped when equal or start > end
             return time >= _start || time <= _end;
     }
 

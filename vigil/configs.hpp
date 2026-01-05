@@ -2,7 +2,9 @@
 #ifndef VIGIL_CONFIGS_HPP
 #define VIGIL_CONFIGS_HPP
 
+#include <array>
 #include <chrono>
+#include <cstdio>
 #include <new>
 #include <shared_mutex>
 #include <string>
@@ -338,27 +340,47 @@ struct ScheduleRuleConfig
         }
         {
             auto &weekdays_vec = j.at("lActiveWeekdays");
-            auto getWeekdayLocalTime = [&](const nlohmann::json &j, std::string_view k) -> LocalTime {
-                int d, h, m, s;
-                auto &rg_j = j.at(k);
+            // Parse weekday + ISO 8601 time string: "Day HH:MM:SS"
+            auto parse_weekday_local_time = [&](const std::string &time_str) -> LocalTime {
+                char day_buf[8] = {};
+                int h, m, s;
+                if (std::sscanf(time_str.c_str(), "%7s %d:%d:%d", day_buf, &h, &m, &s) != 4)
+                    throw Exception(
+                        "Invalid time format '" + time_str + "' while parsing schedule rule, expected 'Day HH:MM:SS'");
 
-                rg_j.at("iDay").get_to(d);
-                if (d < 0 || d > 6)
-                    throw Exception("Invalid day of week " + std::to_string(d) + " while parsing schedule rule");
-                rg_j.at("iHour").get_to(h);
-                if (h < 0 || h > 23)
+                int d = -1;
+                std::string_view day_sv(day_buf);
+                for (size_t i = 0; i < kTMDayNamesMap.size(); ++i)
+                {
+                    if (day_sv == kTMDayNamesMap[i])
+                    {
+                        d = static_cast<int>(i);
+                        break;
+                    }
+                }
+                if (d < 0)
+                    throw Exception("Invalid day name '" + std::string(day_buf) + "' while parsing schedule rule");
+
+                if (h < 0 || h > 24)
                     throw Exception("Invalid hour " + std::to_string(h) + " while parsing schedule rule");
-                rg_j.at("iMinute").get_to(m);
                 if (m < 0 || m > 59)
                     throw Exception("Invalid minute " + std::to_string(m) + " while parsing schedule rule");
-                rg_j.at("iSecond").get_to(s);
                 if (s < 0 || s > 59)
                     throw Exception("Invalid second " + std::to_string(s) + " while parsing schedule rule");
+                // 24:00:00 is valid (end of day), but 24:01:00 etc. is not
+                if (h == 24 && (m != 0 || s != 0))
+                    throw Exception("Hour 24 is only valid with 00:00 (end-of-day) while parsing schedule rule");
 
                 return LocalTime(d, h, m, s);
             };
             for (const auto &tr_j: weekdays_vec)
-                active_weekdays.emplace_back(getWeekdayLocalTime(tr_j, "dStart"), getWeekdayLocalTime(tr_j, "dEnd"));
+            {
+                auto start = parse_weekday_local_time(tr_j.at("sStart").get<std::string>());
+                auto end = parse_weekday_local_time(tr_j.at("sEnd").get<std::string>());
+                if (start == end)
+                    throw Exception("Start time equals end time while parsing schedule rule");
+                active_weekdays.emplace_back(start, end);
+            }
         }
     }
 
@@ -369,20 +391,21 @@ struct ScheduleRuleConfig
         }
         {
             nlohmann::json weekdays_vec = nlohmann::json::array();
-            auto reflectLocalTime = [&](const LocalTime &lt) -> nlohmann::json {
+            // Format as "Day HH:MM:SS" string
+            auto format_weekday_local_time = [&](const LocalTime &lt) -> std::string {
                 auto tm = lt.tm();
-                nlohmann::json lt_j;
-                lt_j["iDay"] = tm.tm_wday;
-                lt_j["iHour"] = tm.tm_hour;
-                lt_j["iMinute"] = tm.tm_min;
-                lt_j["iSecond"] = tm.tm_sec;
-                return lt_j;
+                const size_t day_idx
+                    = (tm.tm_wday >= 0 && tm.tm_wday < static_cast<int>(kTMDayNamesMap.size())) ? tm.tm_wday : 0;
+                char buf[20] = {};
+                std::snprintf(buf, sizeof(buf), "%s %02d:%02d:%02d", kTMDayNamesMap[day_idx], tm.tm_hour, tm.tm_min,
+                    tm.tm_sec);
+                return std::string(buf);
             };
             for (const auto &tr: active_weekdays)
             {
                 nlohmann::json tr_j;
-                tr_j["dStart"] = reflectLocalTime(tr.start());
-                tr_j["dEnd"] = reflectLocalTime(tr.end());
+                tr_j["sStart"] = format_weekday_local_time(tr.start());
+                tr_j["sEnd"] = format_weekday_local_time(tr.end());
                 weekdays_vec.push_back(tr_j);
             }
             j["lActiveWeekdays"] = weekdays_vec;

@@ -2,6 +2,7 @@
 #ifndef VIGIL_CONSTANTS_HPP
 #define VIGIL_CONSTANTS_HPP
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <new>
@@ -39,6 +40,16 @@ static inline constexpr const std::string_view kStorageNetlinkAction = "ACTION="
 static inline constexpr const std::string_view kStorageNetlinkDevName = "DEVNAME=";
 static inline constexpr const std::string_view kStorageNetlinkSubsystem = "SUBSYSTEM=";
 static inline constexpr const std::string_view kStorageNetlinkDevType = "DEVTYPE=";
+
+static inline constexpr const std::array<const char *, 7> kTMDayNamesMap = {
+    "Sun",
+    "Mon",
+    "Tue",
+    "Wed",
+    "Thu",
+    "Fri",
+    "Sat",
+};
 
 } // namespace vigil::constants
 

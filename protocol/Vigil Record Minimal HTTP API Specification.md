@@ -79,22 +79,13 @@ Get or set the schedule rule configuration.
 
 ```json
 {
+    "bEnabled": true, // Boolean, enable or disable schedule rule
     "lActiveWeekdays": [
         {
-            "dStart": {
-                "iDay": 1, // Integer, 0-6 (Sunday-Saturday)
-                "iHour": 9, // Integer, 0-23
-                "iMinute": 0, // Integer, 0-59
-                "iSecond": 0 // Integer, 0-59
-            },
-            "dEnd": {
-                "iDay": 1,
-                "iHour": 18,
-                "iMinute": 0,
-                "iSecond": 0
-            }
+            "sStart": "Mon 09:00:00", // String, format: "Day HH:MM:SS" (Day: Sun, Mon, Tue, Wed, Thu, Fri, Sat; Hour 24:00:00 is valid for end-of-day)
+            "sEnd": "Mon 18:00:00" // String, weekday name (short) + ISO 8601 time
         }
-        // ... More time ranges
+        // ... More time ranges, e.g., full week: {"sStart": "Mon 00:00:00", "sEnd": "Sun 24:00:00"}
     ],
     "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
