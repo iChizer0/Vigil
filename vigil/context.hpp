@@ -130,12 +130,6 @@ struct Context
         slot_media_buffer.clear();
     }
 
-    FileWriterSettingsWithRevision getWriterSettings() const noexcept
-    {
-        const std::shared_lock lock(writer_settings_mutex);
-        return { writer_settings_revision.load(std::memory_order_acquire), writer_settings };
-    }
-
     // Try to update rule event
     bool tryUpdateRuleEvent(vg_rule_type_e type, const std::string &id) const noexcept
     {
@@ -193,13 +187,41 @@ struct Context
     // Sync video/audio frame buffers, updated in enqueueMediaFrame()
     std::mutex media_pause_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> media_paused = false;
-    // Sync record writer settings
-    mutable std::shared_mutex writer_settings_mutex;
-    alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> writer_settings_revision = 0;
-    FileWriterSettings writer_settings = FileWriterSettings();
     // Callback for slot status check (for HTTP rule)
     std::shared_mutex slot_check_mutex;
     std::pair<const void * /* owner */, std::function<bool(const void *)>> slot_check = { nullptr, nullptr };
+
+    // Shared writer settings
+    struct SharedWriterSettings
+    {
+    private:
+        mutable std::shared_mutex mutex;
+        alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> revision = 0;
+        FileWriterSettings settings = FileWriterSettings();
+
+    public:
+        void update(const FileWriterSettings &new_settings)
+        {
+            const std::unique_lock lock(mutex);
+            if (settings != new_settings)
+            {
+                settings = new_settings;
+                revision.fetch_add(1, std::memory_order_release);
+            }
+        }
+
+        FileWriterSettingsWithRevision get() const noexcept
+        {
+            const std::shared_lock lock(mutex);
+            return { revision.load(std::memory_order_acquire), settings };
+        }
+
+        WaterMarks getWaterMarks() const noexcept
+        {
+            const std::shared_lock lock(mutex);
+            return settings.watermarks;
+        }
+    } shared_writer_settings;
 
     // Shared video/audio frame buffers
     template<size_t Limit>

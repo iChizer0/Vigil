@@ -445,18 +445,12 @@ struct FileWriterConfig
 
     void sync(Context &ctx) const
     {
-        std::unique_lock lock(ctx.writer_settings_mutex);
-        if (settings != ctx.writer_settings)
-        {
-            ctx.writer_settings = settings;
-            ctx.writer_settings_revision.fetch_add(1, std::memory_order_relaxed);
-        }
+        ctx.shared_writer_settings.update(settings);
     }
 
     static FileWriterConfig fromContext(const Context &ctx)
     {
-        std::shared_lock lock(ctx.writer_settings_mutex);
-        return FileWriterConfig(ctx.writer_settings);
+        return ctx.shared_writer_settings.get().second;
     }
 };
 
