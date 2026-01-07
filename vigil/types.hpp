@@ -1,5 +1,4 @@
 #pragma once
-#include <cstddef>
 #ifndef VIGIL_TYPES_HPP
 #define VIGIL_TYPES_HPP
 
@@ -10,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <compare>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -585,7 +585,8 @@ struct FileIndex final
     {
     }
 
-    explicit FileIndex(const std::filesystem::path &path, const char *name_time_formt) : name(path.filename().string())
+    explicit FileIndex(const std::filesystem::path &path, const char *name_time_formt, bool fallback = true)
+        : name(path.filename().string())
     {
         // Check if could parse the name as time_point
         if (name_time_formt)
@@ -593,18 +594,26 @@ struct FileIndex final
             std::istringstream ss(name);
             std::tm tm = {};
             ss >> std::get_time(&tm, name_time_formt);
-            if (ss.fail())
+            if (ss.fail() && !fallback)
                 throw Exception("Failed to parse time from filename: " + name);
             // Strictly check that the formated time matches the entire filename
-            if (!ss.eof())
+            if (!ss.eof() && !fallback)
                 throw Exception("Filename contains extra characters after time: " + name);
-            if (tm.tm_year < 0)
+            if (tm.tm_year < 0 && !fallback)
                 throw Exception("Parsed year is invalid (zero value) from filename: " + name);
             const auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
             creation_time = std::chrono::file_clock::from_sys(tp);
         }
+        else if (fallback)
+        {
+            // Try getting creation time from filesystem
+            std::error_code ec;
+            creation_time = std::filesystem::last_write_time(path, ec);
+            if (ec)
+                creation_time = std::filesystem::file_time_type::clock::now();
+        }
         else
-            creation_time = std::filesystem::file_time_type::clock::now();
+            throw Exception("No valid method to get creation time for filename: " + name);
     }
 
     FileIndex(const FileIndex &other) noexcept = default;
@@ -856,6 +865,38 @@ struct MediaFrame
     };
 };
 
+struct WaterMarks
+{
+    FileSize critical_remain_bytes;
+    FileSize high_remain_bytes;
+    FileSize recycle_bytes;
+
+    static inline WaterMarks from(const std::string &format) noexcept
+    {
+        size_t i = 0;
+        for (; i < kFormatAverageBytesMap.size(); ++i)
+        {
+            if (kFormatAverageBytesMap[i].first == format)
+                break;
+        }
+        const auto avg = kFormatAverageBytesMap[i].second;
+
+        return WaterMarks {
+            .critical_remain_bytes = static_cast<FileSize>(kStorageCriticalWaterMarkFactor * avg),
+            .high_remain_bytes = static_cast<FileSize>(kStorageHighWaterMarkFactor * avg),
+            .recycle_bytes = static_cast<FileSize>(kStorageRecycleFactor * avg),
+        };
+    }
+
+private:
+    static inline constexpr const std::array<std::pair<std::string_view, FileSize>, 4> kFormatAverageBytesMap = {
+        std::make_pair<std::string_view, FileSize>("MP4", 100 * 1024 * 1024),          // 100 MB per minute
+        std::make_pair<std::string_view, FileSize>("JPG", 10 * 1024 * 1024),           // 10 MB per image
+        std::make_pair<std::string_view, FileSize>("RAW", 200 * 1024 * 1024),          // 200 MB per image
+        std::make_pair<std::string_view, FileSize>("", kStorageMinFileSystemFreeBytes) // Fallback
+    };
+};
+
 struct FileWriterSettings
 {
     enum class CaptureType { Video, Image };
@@ -864,11 +905,13 @@ struct FileWriterSettings
     std::chrono::milliseconds interval;
     std::string_view file_name_prefix;
     std::chrono::seconds video_clip_length;
+    WaterMarks watermarks;
 
     FileWriterSettings(std::string fmt = kRecordWriterDefaultFormat,
         std::chrono::milliseconds itv = kRecordWriterDefaultIntervalMs,
         std::string_view fnp = kRecordWriterPrefixDefault, std::chrono::seconds vcl = kVideoClipLengthDefault)
-        : type(CaptureType::Video), format(std::move(fmt)), interval(itv), file_name_prefix(fnp), video_clip_length(vcl)
+        : type(CaptureType::Video), format(std::move(fmt)), interval(itv), file_name_prefix(fnp),
+          video_clip_length(vcl), watermarks(WaterMarks::from(format))
     {
         if (format == "MP4")
             type = CaptureType::Video;

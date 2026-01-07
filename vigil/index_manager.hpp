@@ -13,7 +13,6 @@
 #include <optional>
 #include <shared_mutex>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -63,15 +62,19 @@ public:
 
     void reset() noexcept
     {
-        const std::unique_lock lock(_1st_level_mutex);
-        _1st_level_stats.clear();
+        {
+            const std::unique_lock lock(_1st_level_mutex);
+            const std::unique_lock lock2(_fs_mutex);
+            _1st_level_stats.clear();
+            _fs_sync_revision.fetch_add(1, std::memory_order_release);
+        }
         _last_index_time.store(std::chrono::steady_clock::now(), std::memory_order_release);
     }
 
     bool trySync() noexcept
     {
-        const auto last_fs_sync_rev = _fs_sync_revision.load(std::memory_order_acquire);
         std::vector<std::pair<FileIndex, FileSize>> new_1st_level_stats;
+        const auto last_fs_sync_rev = _fs_sync_revision.load(std::memory_order_acquire);
         try
         {
             for (const auto &entry: std::filesystem::directory_iterator(_root_path,
@@ -86,23 +89,19 @@ public:
                             "Skipping hidden file or directory during indexing: ", entry.path());
                         continue; // Skip hidden files and dirs
                     }
+                    const auto index
+                        = FileIndex(entry.path(), kStorageFirstLevelDirNameTimeFormat); // Check if index is valid
                     {
                         const std::shared_lock lock(_fs_mutex);
                         const auto entry_size = doStatsSizeUnsafe(entry.path(), entry.status());
                         if (!entry_size)
-                        {
-                            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN,
-                                "Failed to get size for entry during indexing: ", entry.path());
                             return false;
-                        }
-                        new_1st_level_stats.emplace_back(FileIndex(entry.path(), kStorageFirstLevelDirNameTimeFormat),
-                            *entry_size);
                         if (last_fs_sync_rev != _fs_sync_revision.load(std::memory_order_acquire))
                         {
-                            VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG,
-                                "Filesystem changed during indexing, restarting index sync");
+                            VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Filesystem changed during indexing");
                             return false;
                         }
+                        new_1st_level_stats.emplace_back(index, *entry_size);
                     }
                 }
                 catch (const std::exception &e)
@@ -125,7 +124,7 @@ public:
             const std::shared_lock lock2(_fs_mutex);
             if (last_fs_sync_rev != _fs_sync_revision.load(std::memory_order_relaxed))
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Filesystem changed during swapping index, restarting index sync");
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Filesystem changed during swapping index");
                 return false;
             }
             _1st_level_stats.clear();
@@ -152,7 +151,7 @@ public:
                       return pair.first.name == cache_file_info.first_level_dir_name;
                   });
             {
-                const std::unique_lock lock(_fs_mutex);
+                const std::unique_lock lock2(_fs_mutex);
                 if (it == _1st_level_stats.end())
                 {
                     if (!ensureDirectoryExistUnsafe(target_dir_path))
@@ -172,7 +171,7 @@ public:
                         return std::nullopt;
                     }
                     bool success = false;
-                    std::tie(it, success) = _1st_level_stats.insert_or_assign(
+                    std::tie(it, success) = _1st_level_stats.try_emplace(
                         FileIndex(cache_file_info.first_level_dir_name, cache_file_info.creation_time), *dir_size);
                     if (it == _1st_level_stats.end() || !success)
                     {
@@ -181,8 +180,7 @@ public:
                         return std::nullopt;
                     }
                 }
-                std::filesystem::rename(cache_file_info.path, target_file_path, ec);
-                if (ec)
+                if (std::filesystem::rename(cache_file_info.path, target_file_path, ec); ec)
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to move file from ", cache_file_info.path, " to ",
                         target_file_path, ": ", ec.message());
@@ -197,7 +195,7 @@ public:
                         ec.message());
                     return std::nullopt;
                 }
-                it->second.fetch_add(file_size, std::memory_order_relaxed);
+                it->second.fetch_add(file_size, std::memory_order_release);
                 return std::make_pair(target_file_path, file_size);
             }
         }
@@ -226,8 +224,8 @@ public:
             if (it == _1st_level_stats.end())
                 return removeUntrackedFileOrDirectoryUnsafe(_root_path / normalized); // Not found in index
             {
-                const std::unique_lock lock2(_fs_mutex);
                 const auto full_path = _root_path / normalized; // Treat as already canonicalized
+                const std::unique_lock lock2(_fs_mutex);
                 const auto status = std::filesystem::status(full_path, ec);
                 if (ec)
                 {
@@ -248,50 +246,31 @@ public:
                 else if (removed > 0)
                     _fs_sync_revision.fetch_add(1, std::memory_order_acq_rel);
             }
-            FileSize observed = it->second.load(std::memory_order_acquire);
-            FileSize desired = observed;
-            const bool reindex_needed = observed < removed_size;
-            if (reindex_needed)
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Removed size ", removed_size, " exceeds tracked size ", observed,
-                    " for directory ", (_root_path / it->first.name));
-                const auto full_path = _root_path / it->first.name;
-                do
+                if (auto tracked = it->second.load(std::memory_order_acquire); tracked >= removed_size)
+                    it->second.store(tracked - removed_size, std::memory_order_release);
+                else
                 {
-                    const auto fs_sync_rev_before = _fs_sync_revision.load(std::memory_order_acquire);
-                    const std::unique_lock lock2(_fs_mutex);
+                    const auto full_path = _root_path / it->first.name;
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Removed size ", removed_size, " exceeds tracked size ",
+                        tracked, " for directory ", full_path);
+                    const std::shared_lock lock2(_fs_mutex);
                     if (auto status = std::filesystem::status(full_path, ec); ec)
                     {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to get file status for ", full_path, ": ",
                             ec.message());
-                        desired = 0;
+                        tracked = 0;
                     }
                     else
                     {
-                        if (auto size_now = doStatsSizeUnsafe(full_path, status); size_now)
-                            desired = *size_now;
-                        else
-                            desired = 0;
+                        const auto size_now = doStatsSizeUnsafe(full_path, status);
+                        tracked = size_now.has_value() ? *size_now : 0;
                     }
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Resetting tracked size to ", desired, " for directory ",
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Resetting tracked size to ", tracked, " for directory ",
                         full_path);
-                    if (fs_sync_rev_before == _fs_sync_revision.load(std::memory_order_acquire))
-                    {
-                        it->second.store(desired, std::memory_order_release);
-                        break;
-                    }
-                    std::this_thread::yield();
+                    it->second.store(tracked, std::memory_order_release);
                 }
-                while (true);
             }
-            else
-                do
-                {
-                    desired = observed - removed_size;
-                }
-                while (!it->second.compare_exchange_strong(observed, desired, std::memory_order_acq_rel,
-                    std::memory_order_acquire));
-            _fs_sync_revision.fetch_add(1, std::memory_order_acq_rel);
             return 0;
         }
         else // If the path is a first-level file/directory
@@ -305,23 +284,20 @@ public:
         }
     }
 
-    FileSize freeUpStaledFiles(FileSize required_to_free)
+    FileSize freeUpStaledFiles(FileSize required_to_free) noexcept
     {
         if (required_to_free <= 0)
             return 0;
         else if (auto used = usedBytes(); required_to_free > used)
             required_to_free = used;
         FileSize bytes_free = 0;
-        while (bytes_free < required_to_free)
         {
             const std::unique_lock lock(_1st_level_mutex);
-            auto it = _1st_level_stats.begin();
-            if (it == _1st_level_stats.end())
-                break; // No more files to remove
-            const auto removed_size = removeFirstLevelUnsafe(it);
-            if (!removed_size.has_value())
-                break; // Failed to remove file
-            bytes_free += *removed_size > 0 ? *removed_size : 0;
+            for (auto it = _1st_level_stats.begin(); bytes_free < required_to_free && it != _1st_level_stats.end();)
+            {
+                if (auto rs = removeFirstLevelUnsafe(it); rs.has_value())
+                    bytes_free += *rs > 0 ? *rs : 0;
+            }
         }
         return bytes_free;
     }
@@ -385,22 +361,20 @@ private:
             return true;
         else if (std::filesystem::remove_all(dir_path, ec))
             _fs_sync_revision.fetch_add(1, std::memory_order_release);
-        if (std::filesystem::create_directories(dir_path, ec))
-            _fs_sync_revision.fetch_add(1, std::memory_order_release);
-        if (ec)
+        if (std::filesystem::create_directories(dir_path, ec); ec)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create directory ", dir_path, ": ", ec.message());
             return false;
         }
+        _fs_sync_revision.fetch_add(1, std::memory_order_release);
         return true;
     }
 
     vg_sta_e removeUntrackedFileOrDirectoryUnsafe(const std::filesystem::path &path) noexcept
     {
         std::error_code ec;
-        _fs_sync_revision.fetch_add(1, std::memory_order_relaxed);
-        std::filesystem::remove_all(path, ec);
-        if (ec)
+        const std::unique_lock lock(_fs_mutex);
+        if (std::filesystem::remove_all(path, ec); ec)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove untracked file or directory ", path, ": ",
                 ec.message());
@@ -410,13 +384,12 @@ private:
         return 0;
     }
 
-    std::optional<FileSize> removeFirstLevelUnsafe(auto &it)
+    std::optional<FileSize> removeFirstLevelUnsafe(auto &it) noexcept
     {
         std::error_code ec;
-        _fs_sync_revision.fetch_add(1, std::memory_order_relaxed);
+        const auto target_path = _root_path / it->first.name; // Should be already normalized
         {
             const std::unique_lock lock2(_fs_mutex);
-            const auto target_path = _root_path / it->first.name; // Should be already normalized
             if (auto removed = std::filesystem::remove_all(target_path, ec); ec)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove file or directory ", target_path, ": ",
@@ -482,11 +455,13 @@ private:
 private:
     Context &_ctx;
     std::filesystem::path _root_path;
-    mutable std::shared_mutex _fs_mutex;
 
+    mutable std::shared_mutex _fs_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> _fs_sync_revision;
+
     mutable std::shared_mutex _1st_level_mutex;
     std::map<FileIndex, std::atomic<FileSize>> _1st_level_stats;
+
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<std::chrono::steady_clock::time_point> _last_index_time;
 };
 

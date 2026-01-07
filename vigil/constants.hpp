@@ -40,6 +40,11 @@ static inline constexpr const std::string_view kStorageNetlinkAction = "ACTION="
 static inline constexpr const std::string_view kStorageNetlinkDevName = "DEVNAME=";
 static inline constexpr const std::string_view kStorageNetlinkSubsystem = "SUBSYSTEM=";
 static inline constexpr const std::string_view kStorageNetlinkDevType = "DEVTYPE=";
+static inline constexpr const size_t kStorageMinSupportedFileSystemBytes = 2048UL * 1024 * 1024; // 2GB
+static inline constexpr const size_t kStorageMinFileSystemFreeBytes = 512 * 1024 * 1024;         // 512 MB
+static inline constexpr const size_t kStorageHighWaterMarkFactor = 3;
+static inline constexpr const size_t kStorageCriticalWaterMarkFactor = 1;
+static inline constexpr const size_t kStorageRecycleFactor = 10;
 
 static inline constexpr const std::array<const char *, 7> kTMDayNamesMap = {
     "Sun",
