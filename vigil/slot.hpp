@@ -1,5 +1,4 @@
 #pragma once
-#include "vigil_ctypes.h"
 #ifndef VIGIL_SLOT_HPP
 #define VIGIL_SLOT_HPP
 
@@ -13,7 +12,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <queue>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -404,10 +402,45 @@ protected:
         return _writer_task_count;
     }
 
-    void addToCacheFileSyncQueue(const CacheFileInfo &cache_file_info) noexcept
+    void moveAndAddCacheFile(const CacheFileInfo &cache_file_info) noexcept
     {
-        const std::unique_lock lock(_cache_file_sync_mutex);
-        _cache_file_sync_queue.push(cache_file_info);
+        if (auto result = _index_manager.moveAndAddCacheFile(cache_file_info); result)
+        {
+            if (result->second > 0)
+                _write_stats.addNewWriteStat(result->second);
+            if (_ctx.c_api.basic.on_file_event_cb)
+            {
+                const auto path_str = result->first.string();
+                const auto attrs_str
+                    = cache_file_info.event ? WriteEvent::StatusString(cache_file_info.event->status) : "";
+                const auto file_evt = vg_file_evt_t {
+                    .op_type = VG_FILE_EVT_OP_ADDED,
+                    .path = path_str.c_str(),
+                    .size_bytes = result->second > 0 ? static_cast<size_t>(result->second) : 0,
+                    .attrs = attrs_str,
+                    .timestamp = _ctx.shared_time.unixTime(),
+                };
+                _ctx.c_api.basic.on_file_event_cb(&file_evt);
+            }
+        }
+        else
+        {
+            std::error_code ec;
+            if (std::filesystem::exists(cache_file_info.path, ec))
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to move and add cache file ", cache_file_info.path,
+                    " to index, removing cache file");
+                std::filesystem::remove_all(cache_file_info.path, ec);
+            }
+            else if (ec)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Unable to check cache file existence for ", cache_file_info.path,
+                    ": ", ec.message());
+            }
+            else
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Cache file ", cache_file_info.path,
+                    " missing after move failure, skipping resync");
+        }
     }
 
     std::filesystem::path getRecordQuotaLimitPath() const
@@ -437,12 +470,6 @@ private:
     {
         if (_state.load(std::memory_order_acquire) < SlotState::Configured) // Requires the root folder to be ready
             return;                                                         // No cache to clear if not mounted
-        // There's no activate writer at this moment
-        {
-            const std::unique_lock lock(_cache_file_sync_mutex);
-            while (!_cache_file_sync_queue.empty())
-                _cache_file_sync_queue.pop();
-        }
         const auto cache_path = getRecordCachePath();
         std::error_code ec;
         std::filesystem::remove_all(cache_path, ec);
@@ -457,44 +484,6 @@ private:
 
     void doRotateStaledFilesAndSync() const
     {
-        const auto quota_limit = _quota_limit_bytes.load(std::memory_order_acquire);
-        const auto estimated_write_bytes_in_period = _write_stats.getEstimatedWriteBytesIn(
-            kManagerEstimatedWriteBytesPeriod); // Should before quota calculation since it updates quota used
-
-        FileSize bytes_to_free = 0;
-        // First check if we are already over quota if quota limit is set
-        if (quota_limit > 0)
-        {
-            const auto quota_used = _index_manager.usedBytes();
-            const auto quota_free = quota_limit - quota_used;
-            if (estimated_write_bytes_in_period > quota_free)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Quota used bytes ", quota_used,
-                    " bytes is over limit for storage slot for device path ", _dev_path,
-                    ", need to free up space for estimated write bytes in ", kManagerEstimatedWriteBytesPeriod.count(),
-                    " minutes: ", estimated_write_bytes_in_period, " bytes");
-                bytes_to_free = estimated_write_bytes_in_period - quota_free;
-                goto l_free_up_space; // Free up space directly
-            }
-        }
-        // Next check if we need to free up space based on the free space of this slot
-        {
-            // Sync stats to check if we need to free more space
-            if (!doStats())
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to sync stats for storage slot ", _dev_path);
-                return;
-            }
-            const auto slot_stats = _stats.load(std::memory_order_acquire);
-            const auto free_bytes = slot_stats.free_bytes;
-            if (estimated_write_bytes_in_period <= free_bytes)
-                goto l_try_sync_index_and_cache; // No need to free up space
-            bytes_to_free = estimated_write_bytes_in_period - free_bytes;
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Free space of storage slot for device path ", _dev_path,
-                " is lower than quota threshold, need to free up ", bytes_to_free, " bytes");
-        }
-
-    l_try_sync_index_and_cache:
         // Sync the index first
         if (auto now = std::chrono::steady_clock::now(); now - _index_manager.lastIndexTime() >= kIndexSyncInterval)
         {
@@ -506,79 +495,39 @@ private:
                 std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now).count(),
                 " ms for storage slot for device path ", _dev_path);
         }
-        // Sync the cache files
-        try
+
+        // Check if we need to free up space
+        if (!_quota_rotate.load(std::memory_order_acquire))
+            return;
+
+        const auto watermarks = _ctx.shared_writer_settings.getWaterMarks();
+        const auto limit = _quota_limit_bytes.load(std::memory_order_acquire);
+
+        // Check if quota limit is exceeded
+        if (limit > 0)
         {
-            for (;;)
-            {
-                std::optional<CacheFileInfo> cache_file_info;
-                {
-                    // Lazy sync the cache files
-                    const std::unique_lock lock(_cache_file_sync_mutex);
-                    if (!_cache_file_sync_queue.empty())
-                    {
-                        cache_file_info = std::move(_cache_file_sync_queue.front());
-                        _cache_file_sync_queue.pop();
-                    }
-                }
-                if (!cache_file_info) // If no cache file info is available, break the loop
-                    break;
-                if (auto result = _index_manager.moveAndAddCacheFile(*cache_file_info); result)
-                {
-                    if (result->second > 0)
-                        _write_stats.addNewWriteStat(result->second);
-                    if (_ctx.c_api.basic.on_file_event_cb)
-                    {
-                        const auto path_str = result->first.string();
-                        const auto attrs_str
-                            = cache_file_info->event ? WriteEvent::StatusString(cache_file_info->event->status) : "";
-                        const auto file_evt = vg_file_evt_t {
-                            .op_type = VG_FILE_EVT_OP_ADDED,
-                            .path = path_str.c_str(),
-                            .size_bytes = result->second > 0 ? static_cast<size_t>(result->second) : 0,
-                            .attrs = attrs_str,
-                            .timestamp = _ctx.shared_time.unixTime(),
-                        };
-                        _ctx.c_api.basic.on_file_event_cb(&file_evt);
-                    }
-                }
-                else
-                {
-                    std::error_code ec;
-                    if (std::filesystem::exists(cache_file_info->path, ec))
-                    {
-                        VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Deferring cache file sync due to move failure for ",
-                            cache_file_info->path);
-                        const std::unique_lock lock(_cache_file_sync_mutex);
-                        _cache_file_sync_queue.push(std::move(*cache_file_info));
-                    }
-                    else if (ec)
-                    {
-                        VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Unable to check cache file existence for ",
-                            cache_file_info->path, ": ", ec.message());
-                    }
-                    else
-                        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Cache file ", cache_file_info->path,
-                            " missing after move failure, skipping resync");
-                }
-            }
+            if ((_index_manager.usedBytes() + watermarks.high_remain_bytes) > limit)
+                goto l_free_up_space;
         }
-        catch (const std::exception &e)
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
-                "Unexpected error during syncing cache files for storage slot for device path ", _dev_path, ": ",
-                e.what());
-        }
+
+        // Check if free space is sufficient
+        if (doStats(); _stats.load(std::memory_order_acquire).free_bytes <= watermarks.high_remain_bytes)
+            goto l_free_up_space;
+
         return;
 
     l_free_up_space:
+        const auto estimated_write_bytes_in_period
+            = _write_stats.getEstimatedWriteBytesIn(kManagerEstimatedWriteBytesPeriod);
+
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Storage slot for device path ", _dev_path,
-            " is low on free space, quota limit: ", quota_limit, " bytes, estimated write bytes in ",
+            " is low on free space, quota limit: ", limit, " bytes, estimated write bytes in next ",
             kManagerEstimatedWriteBytesPeriod.count(), " minutes: ", estimated_write_bytes_in_period,
-            " bytes, will free up ", bytes_to_free, " bytes");
-        bytes_to_free = _index_manager.freeUpStaledFiles(bytes_to_free);
-        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Freed up ", bytes_to_free, " bytes on storage slot for device path ",
-            _dev_path);
+            " bytes, will free up ", watermarks.recycle_bytes, " bytes");
+
+        const auto freed = _index_manager.freeUpStaledFiles(watermarks.recycle_bytes);
+
+        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Freed up ", freed, " bytes on storage slot for device path", _dev_path);
     }
 
     void managerThreadTask()
@@ -675,7 +624,7 @@ private:
 
     void writerThreadTask()
     {
-        _ctx.clearRuleEvent(); // Clear any existing rule event at start
+        _ctx.shared_rule_event.reset(WriteEvent::Status::Canceled); // Clear any existing rule event at start
         while (!_stop_token.load(std::memory_order_acquire))
         {
             // If already has a writer, check if it is finished
@@ -698,65 +647,79 @@ private:
             }
 
             const auto start = std::chrono::steady_clock::now();
-            std::shared_ptr<WriteEvent> event;
+            const auto settings = _ctx.shared_writer_settings.get();
+            const auto &watermarks = settings.second.watermarks;
+            std::shared_ptr<WriteEvent> event = nullptr;
 
-            // Check if we are asked to stop writing (suspend)
+            // Check if slot status is ready to write
             if (!isReadyToWrite())
-                goto l_continue;
+                goto l_continue_evt;
 
-            // Check if could create a new writer
+            // Check if quota limit is exceeded
             if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit > 0)
             {
-                if (_index_manager.usedBytes() >= limit)
-                    goto l_continue;
+                if ((_index_manager.usedBytes() + watermarks.critical_remain_bytes) > limit)
+                    goto l_continue_log;
             }
-            else if (_stats.load(std::memory_order_acquire).free_bytes <= kMinFileSystemFreeBytes)
-                goto l_continue;
 
-            // If media is paused, do not start new writer
+            // Check if free space is sufficient
+            if (doStats(); _stats.load(std::memory_order_acquire).free_bytes <= watermarks.critical_remain_bytes)
+                goto l_continue_log;
+
+            // Check if media is paused
             if (_ctx.media_paused.load(std::memory_order_acquire))
-                goto l_continue;
+                goto l_continue_evt;
 
-            if (event = _ctx.getRuleEvent(); event)
-                goto l_start_new;
+            // Check for new write event
+            if (event = _ctx.shared_rule_event.getCurrent(); !event)
+                goto l_continue_evt;
 
-        l_continue: {
-            const auto elapsed = std::chrono::steady_clock::now() - start;
-            if (elapsed < kWriterProbeInterval)
+            // Start new writer task
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting new writer task, dev path ", _dev_path);
+                try
+                {
+                    switch (settings.second.type)
+                    {
+                        case FileWriterSettings::CaptureType::Image:
+                            _writer_task = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
+                                std::ref(_ctx), std::move(settings), std::move(event));
+                            break;
+                        case FileWriterSettings::CaptureType::Video:
+                            _writer_task = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
+                                std::ref(_ctx), std::move(settings), std::move(event));
+                            break;
+                        default: {
+                            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
+                                "Unsupported writer type for storage slot with device path ", _dev_path);
+                            _ctx.shared_rule_event.reset(WriteEvent::Status::Failed); // Clear processed event
+                        }
+                        break;
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
+                        "Failed to create new writer task for storage slot with device "
+                        "path ",
+                        _dev_path, ": ", e.what());
+                }
+                continue;
+            }
+
+        l_continue_log:
+            if (!_quota_rotate.load())
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Writer thread for ", _dev_path,
+                    " reached critical watermark, skipping new writer task start");
+            }
+
+        l_continue_evt:
+            if (event)
+                _ctx.shared_rule_event.reset(WriteEvent::Status::Canceled); // Clear processed event
+            if (auto elapsed = std::chrono::steady_clock::now() - start; elapsed < kWriterProbeInterval)
                 std::this_thread::sleep_for(kWriterProbeInterval - elapsed);
             continue;
-        }
-
-        l_start_new:
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting new writer task, dev path ", _dev_path);
-            try
-            {
-                auto writer_settings = _ctx.getWriterSettings();
-                switch (writer_settings.second.type)
-                {
-                    case FileWriterSettings::CaptureType::Image:
-                        _writer_task = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
-                            std::ref(_ctx), std::move(writer_settings), std::move(event));
-                        break;
-                    case FileWriterSettings::CaptureType::Video:
-                        _writer_task = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
-                            std::ref(_ctx), std::move(writer_settings), std::move(event));
-                        break;
-                    default: {
-                        VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
-                            "Unsupported writer type for storage slot with device path ", _dev_path);
-                        _ctx.clearRuleEvent(); // Clear invalid evaluation result
-                    }
-                    break;
-                }
-            }
-            catch (const std::exception &e)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
-                    "Failed to create new writer task for storage slot with device "
-                    "path ",
-                    _dev_path, ": ", e.what());
-            }
         }
     }
 
@@ -1242,13 +1205,12 @@ private:
     static inline constexpr const std::chrono::milliseconds kManagerProbeInterval = std::chrono::milliseconds(500);
     static inline constexpr const std::chrono::seconds kManagerRecoverDelay = std::chrono::seconds(3);
     static inline constexpr const std::chrono::minutes kManagerEstimatedWriteBytesPeriod = std::chrono::minutes(30);
-    static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(10);
+    static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);
     static inline constexpr const std::chrono::milliseconds kWriterRotatePullDelay = std::chrono::milliseconds(50);
-    static inline constexpr const std::chrono::days kIndexSyncInterval = std::chrono::days(7);
+    static inline constexpr const std::chrono::minutes kIndexSyncInterval = std::chrono::minutes(5);
     static inline constexpr const std::string_view kRecordCacheDirName = ".cache";
     static inline constexpr const std::string_view kRecordQuotaLimitFileName = ".quota_limit";
     static inline constexpr const std::string_view kRecordQuotaRotateFileName = ".quota_rotate";
-    static inline constexpr const FileSize kMinFileSystemFreeBytes = 512 * 1024 * 1024; // 512 MB
 
     // - MARK: Slot Private Members
 
@@ -1301,10 +1263,6 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<
         bool> _writer_task_stop_token; // Controls whether new writes are allowed and current writes should stop
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<int> _writer_task_count;
-
-    // Cache to sync queue
-    mutable std::mutex _cache_file_sync_mutex;
-    mutable std::queue<CacheFileInfo> _cache_file_sync_queue;
 
     // Relay
     Relay _relay;

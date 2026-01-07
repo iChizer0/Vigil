@@ -429,21 +429,32 @@ public:
         try
         {
             {
-                const std::shared_lock lock(_ctx->rule_event_mutex);
+                auto [last_evt, current_evt, current_owner] = _ctx->shared_rule_event.get();
 
                 res_j["dLastRuleEvent"] = [&]() -> std::optional<nlohmann::json> {
-                    if (!_ctx->rule_event_last)
+                    if (!last_evt)
                         return std::nullopt;
 
-                    const auto &evt = _ctx->rule_event_last;
+                    const auto &evt = last_evt;
                     auto obj = nlohmann::json::object();
                     obj["sStatus"] = WriteEvent::StatusString(evt->status.load(std::memory_order_relaxed));
                     obj["iTimestamp"] = evt->timestamp;
                     return obj;
                 }();
 
-                res_j["dLastRuleEventOwner"] = [&]() -> std::optional<nlohmann::json> {
-                    const auto &owner = _ctx->rule_event_owner;
+                res_j["dCurrentRuleEvent"] = [&]() -> std::optional<nlohmann::json> {
+                    if (!current_evt)
+                        return std::nullopt;
+
+                    const auto &evt = current_evt;
+                    auto obj = nlohmann::json::object();
+                    obj["sStatus"] = WriteEvent::StatusString(evt->status.load(std::memory_order_relaxed));
+                    obj["iTimestamp"] = evt->timestamp;
+                    return obj;
+                }();
+
+                res_j["dCurrentRuleEvent"] = [&]() -> std::optional<nlohmann::json> {
+                    const auto &owner = current_owner;
                     if (!owner.has_value())
                         return std::nullopt;
 

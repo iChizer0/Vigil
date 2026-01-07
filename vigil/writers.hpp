@@ -138,9 +138,9 @@ public:
 
     virtual ~SlotAdaptedWriter() noexcept
     {
-        _slot.addToCacheFileSyncQueue(_cache_file_info);
+        _slot.moveAndAddCacheFile(_cache_file_info);
         _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
-        this->ctxRef().clearRuleEvent();
+        this->ctxRef().shared_rule_event.reset(WriteEvent::Status::Completed);
     }
 
 protected:
@@ -163,8 +163,7 @@ protected:
 
     inline bool shouldContinueWritingImpl() const noexcept
     {
-        return this->ctxRef().writer_settings_revision.load(std::memory_order_relaxed) == this->settings().first
-               && _slot.isReadyToWrite();
+        return this->ctxRef().shared_writer_settings.getRevision() == this->settings().first && _slot.isReadyToWrite();
     }
 
 private:

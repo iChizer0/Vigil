@@ -8,8 +8,10 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <shared_mutex>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -68,8 +70,7 @@ struct Context
         if (!rule_enabled.load(std::memory_order_relaxed))
         {
             shared_inference_result.reset();
-            // Update last evaluation result to not matched
-            clearRuleEvent();
+            shared_rule_event.reset(WriteEvent::Status::Canceled);
             return false;
         }
 
@@ -142,12 +143,12 @@ struct Context
                 c_api.basic.on_rule_event_cb(&evt);
             }
             {
-                const std::unique_lock lock(rule_event_mutex);
-                if (!rule_event)
+                const std::unique_lock lock(shared_rule_event.mutex);
+                if (!shared_rule_event.current)
                 {
-                    rule_event = std::make_shared<WriteEvent>(steady_time, unix_time);
-                    rule_event_last = rule_event;
-                    rule_event_owner.emplace(type, id, unix_time);
+                    shared_rule_event.last = shared_rule_event.current;
+                    shared_rule_event.current = std::make_shared<WriteEvent>(steady_time, unix_time);
+                    shared_rule_event.current_owner.emplace(type, id, unix_time);
                     return true;
                 }
             }
@@ -160,17 +161,6 @@ struct Context
     }
 
     // Clear rule event (thread-safe)
-    void clearRuleEvent() const noexcept
-    {
-        const std::unique_lock lock(rule_event_mutex);
-        rule_event.reset();
-    }
-
-    std::shared_ptr<WriteEvent> getRuleEvent() const noexcept
-    {
-        const std::shared_lock lock(rule_event_mutex);
-        return rule_event;
-    }
 
     // Shared data
     // Used to control rule evaluation and inference subscriptions
@@ -179,17 +169,58 @@ struct Context
     // Sync inference results queue, updated in enqueueInferenceResult()
     std::mutex inference_mutex;
     std::queue<InferenceResult> inference_queue;
-    // Sync rule event, updated in RuleEndpoint::operator()()
-    mutable std::shared_mutex rule_event_mutex;
-    mutable std::shared_ptr<WriteEvent> rule_event;
-    mutable std::shared_ptr<WriteEvent> rule_event_last;
-    mutable std::optional<EventOwner> rule_event_owner;
     // Sync video/audio frame buffers, updated in enqueueMediaFrame()
     std::mutex media_pause_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> media_paused = false;
     // Callback for slot status check (for HTTP rule)
     std::shared_mutex slot_check_mutex;
     std::pair<const void * /* owner */, std::function<bool(const void *)>> slot_check = { nullptr, nullptr };
+
+    // Shared rule event
+    struct SharedRuleEvent
+    {
+    protected:
+        friend Context;
+
+        mutable std::shared_mutex mutex;
+        std::shared_ptr<WriteEvent> last = nullptr;
+        std::shared_ptr<WriteEvent> current = nullptr;
+        std::optional<EventOwner> current_owner = std::nullopt;
+
+    public:
+        void reset(WriteEvent::Status status) noexcept
+        {
+            if (current)
+            {
+                current->status.store(status, std::memory_order_relaxed);
+                {
+                    const std::unique_lock lock(mutex);
+                    last = current;
+                    current.reset();
+                }
+            }
+        }
+
+        std::shared_ptr<WriteEvent> getLast() const noexcept
+        {
+            const std::shared_lock lock(mutex);
+            return last;
+        }
+
+        std::shared_ptr<WriteEvent> getCurrent() const noexcept
+        {
+            const std::shared_lock lock(mutex);
+            return current;
+        }
+
+        std::tuple<std::shared_ptr<WriteEvent>, std::shared_ptr<WriteEvent>, std::optional<EventOwner>>
+        get() const noexcept
+        {
+            const std::shared_lock lock(mutex);
+            return { last, current, current_owner };
+        }
+
+    } mutable shared_rule_event;
 
     // Shared writer settings
     struct SharedWriterSettings
@@ -220,6 +251,11 @@ struct Context
         {
             const std::shared_lock lock(mutex);
             return settings.watermarks;
+        }
+
+        size_t getRevision() const noexcept
+        {
+            return revision.load(std::memory_order_acquire);
         }
     } shared_writer_settings;
 

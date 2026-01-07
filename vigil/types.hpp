@@ -55,6 +55,7 @@ struct WriteEvent
         Completed,
         Failed,
         Interrupted,
+        Canceled,
     };
 
     static inline const char *StatusString(Status status) noexcept
@@ -71,6 +72,8 @@ struct WriteEvent
                 return "FAILED";
             case Status::Interrupted:
                 return "INTERRUPTED";
+            case Status::Canceled:
+                return "CANCELED";
             default:
                 return "UNKNOWN";
         }
