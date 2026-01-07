@@ -380,6 +380,7 @@ public:
                     break;
 
                 VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Error reading from TTY socket fd ", _fd, ": ", strerror(err));
+                closeSocket();
                 break;
             }
             else if (bytes_read == 0)
