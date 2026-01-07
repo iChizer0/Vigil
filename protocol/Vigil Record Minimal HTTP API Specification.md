@@ -39,11 +39,16 @@ Get the information about the rule system.
 
 ```json
 {
-    "dLastRuleEvent": { // Optional, present only if an event exists
-        "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"
+    "dLastRuleEvent": { // Optional, present only if a last event exists
+        "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", "UNKNOWN"
         "iTimestamp": 1735574400 // Integer, Unix timestamp
     },
-    "dLastRuleEventOwner": { // Optional, present only if an event owner exists
+    "dCurrentRuleEvent": { // Optional, present only if a current event owner exists
+        "sRuleType": "TIMER", // String, rule type that owns the event
+        "sRuleID": "timer_rule_1", // String, rule ID
+        "iTimestamp": 1735574400 // Integer, Unix timestamp
+    },
+    "dCurrentRuleEventOwner": { // Optional, present only if a current event owner exists
         "sRuleType": "TIMER", // String, rule type that owns the event
         "sRuleID": "timer_rule_1", // String, rule ID
         "iTimestamp": 1735574400 // Integer, Unix timestamp

@@ -453,7 +453,7 @@ public:
                     return obj;
                 }();
 
-                res_j["dCurrentRuleEvent"] = [&]() -> std::optional<nlohmann::json> {
+                res_j["dCurrentRuleEventOwner"] = [&]() -> std::optional<nlohmann::json> {
                     const auto &owner = current_owner;
                     if (!owner.has_value())
                         return std::nullopt;
