@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -285,8 +286,36 @@ struct Context
                     break;
             }
             queue.insert(rit.base(), std::forward<T>(frame));
-            while (queue.size() >= Limit)
-                queue.pop_front();
+            if (queue.size() > Limit)
+                tryDropFramesInternal();
+        }
+
+    private:
+        void tryDropFramesInternal() noexcept
+        {
+            // At least one frame to drop
+            for (auto it = queue.erase(queue.begin()); it != queue.end();)
+            {
+                if (it->isKeyFrame())
+                    break;
+                else if (std::holds_alternative<AudioFrame>(*it->frame))
+                {
+                    ++it;
+                    continue;
+                }
+                it = queue.erase(it);
+            }
+
+            // Keep last audio frames before next key frame
+            auto it = queue.begin();
+            while (it != queue.end())
+            {
+                if (it->isKeyFrame())
+                    break;
+                ++it;
+            }
+            if (const auto dist = std::distance(queue.begin(), it); dist > 2)
+                queue.erase(queue.begin(), std::next(queue.begin(), dist - 2));
         }
     };
     SharedMediaBuffer<kMediaMuxerBufferSize> slot_media_buffer;
