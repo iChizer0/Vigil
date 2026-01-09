@@ -140,7 +140,6 @@ public:
     {
         _slot.moveAndAddCacheFile(_cache_file_info);
         _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
-        this->ctxRef().shared_rule_event.reset(WriteEvent::Status::Completed);
     }
 
 protected:

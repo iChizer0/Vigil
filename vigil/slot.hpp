@@ -633,6 +633,7 @@ private:
                 const auto result = _writer_task->operator()();
                 const auto end = _writer_task->endTime();
                 _writer_task.reset();
+                _ctx.shared_rule_event.reset(result->status); // Clear processed event with final status
                 if (result->status != WriteEvent::Status::Interrupted)
                 {
                     do
