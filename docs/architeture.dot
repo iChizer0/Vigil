@@ -1,0 +1,332 @@
+digraph G {
+  rankdir=TB;
+  node [fontname="Helvetica"];
+  compound=true;
+
+  subgraph cluster_clients {
+    label="Client / Integration";
+    style="rounded,dashed";
+    color=gray60;
+    app [label="Host App\n(C API caller)\nMedia Pipeline\nInference Pipeline", shape=box];
+    http_client [label="HTTP Client\n(CGI/Web)\nJSON Request/Response", shape=box];
+  }
+
+  subgraph cluster_endpoints {
+    label="Endpoint Controllers";
+    style=rounded;
+    color=navy;
+
+    config_store [label="ConfigStore\nJSON File Persistence\nAtomic Write (tmp→rename)", shape=box];
+
+    subgraph cluster_rule_endpoint {
+      label="RuleEndpoint";
+      style="rounded,dashed";
+      color=gray50;
+      rule_ep [label="Rule Config\nbRuleEnabled\ndWriterConfig", shape=box];
+      schedule_ep [label="Schedule Config\nTimeRange per Weekday", shape=box];
+      record_ep [label="Record Config\nsCurrentSelected\nRule Type Variants", shape=box];
+      rule_info_ep [label="Rule Info\nEvent Status\nGPIO/TTY Availability", shape=box];
+    }
+
+    subgraph cluster_storage_endpoint {
+      label="StorageEndpoint";
+      style="rounded,dashed";
+      color=gray50;
+      storage_cfg_ep [label="Storage Config\nTarget Slot Selection", shape=box];
+      storage_status_ep [label="Storage Status\nSlot States/Stats", shape=box];
+      storage_ctrl_ep [label="Storage Control\nFormat/Eject/FreeUp\nRelay Enable/Disable\nRemove Files", shape=box];
+    }
+  }
+
+  subgraph cluster_device_support {
+    label="Device Support Layer";
+    style=rounded;
+    color=darkblue;
+
+    subgraph cluster_hal {
+      label="HAL Callbacks (vg_config_t)";
+      style=rounded;
+      color=gray50;
+      hal_media [label="Media HAL\nVideo/Audio File I/O\nImage Capture", shape=box];
+      hal_gpio [label="GPIO HAL\nPin Discovery\nAcquire/Release\nLevel/Event Sync", shape=box];
+      hal_storage [label="Storage HAL\nMount/Unmount Events\nDevice Filtering", shape=box];
+      hal_basic [label="Basic HAL\nLogging\nRule/File Events", shape=box];
+      hal_tty [label="TTY HAL\nSocket Configuration", shape=box];
+    }
+
+    subgraph cluster_service_api {
+      label="Vigil Service C Interface";
+      style=rounded;
+      color=gray50;
+      svc_core [label="Core API\nInit/Deinit", shape=box];
+      svc_media [label="Media API\nVideo/Audio Frames\nMedia Control (Suspend/Resume)", shape=box];
+      svc_infer [label="Inference API\nProtobuf Enqueue", shape=box];
+    }
+
+    subgraph cluster_http_api {
+      label="HTTP API Bindings (CGI)";
+      style=rounded;
+      color=gray50;
+      http_rule [label="Rule Endpoints\nConfig/Info\nSchedule/Record\nHTTP Rule Activation", shape=box];
+      http_storage [label="Storage Endpoints\nConfig/Status\nControl", shape=box];
+    }
+  }
+
+  subgraph cluster_context {
+    label="Core Context & State";
+    style=rounded;
+    color=brown;
+
+    ctx [label="Context\nC API Config Reference\ntick() State Update", shape=box];
+
+    subgraph cluster_ctx_control {
+      label="Control Flags";
+      style="rounded,dashed";
+      color=gray60;
+      ctrl_rule_enabled [label="rule_enabled\nAtomic Bool", shape=note];
+      ctrl_infer_subs [label="inference_subscribers\nAtomic Int (ref count)", shape=note];
+      ctrl_media_paused [label="media_paused\nAtomic Bool", shape=note];
+    }
+
+    subgraph cluster_ctx_queues {
+      label="Queues & Buffers";
+      style="rounded,dashed";
+      color=gray60;
+      infer_q [label="Inference Queue\nTimestamped Results\nBounded Pop-on-Full", shape=note];
+      media_buf [label="Media Buffer\nSorted by PTS\nKeyframe-Aware Drop\nAudio Frame Preserve", shape=note];
+    }
+
+    subgraph cluster_ctx_shared {
+      label="Shared State";
+      style="rounded,dashed";
+      color=gray60;
+      shared_time [label="SharedTime\nsteady_clock Time\nUnix Timestamp (ms)\nLocalTime (weekday/hour)", shape=note];
+      shared_infer_result [label="SharedInferenceResult\nDetectionResultVec\nClassificationResultVec", shape=note];
+      shared_rule_evt [label="SharedRuleEvent\nLast/Current WriteEvent\nEventOwner (type/id/ts)", shape=note];
+      shared_writer_cfg [label="SharedWriterSettings\nRevision Counter\nFileWriterSettings\nWaterMarks", shape=note];
+    }
+  }
+
+  subgraph cluster_rules {
+    label="Rule Engine";
+    style=rounded;
+    color=purple;
+
+    rule_thread [label="Rule Thread (10ms eval)\nContext tick() Invocation\nSchedule Filter Gate\nPrecedence-Ordered Evaluation\nWrite Event Generation", shape=box];
+
+    subgraph cluster_rule_base {
+      label="BaseRule Framework";
+      style="rounded,dashed";
+      color=gray60;
+      rule_base [label="BaseRule\nType/Precedence\nPolymorphic operator()", shape=box];
+    }
+
+    subgraph cluster_rule_types {
+      label="Rule Implementations";
+      style="rounded,dashed";
+      color=gray60;
+
+      rule_infer [label="InferenceRule (P=0)\nConfidence Filter\nClass Filter\nMask Region Filter\nDebounce Counter", shape=box];
+      rule_infer_set [label="InferenceRuleSet (P=0)\nMulti-Rule Container\nFirst-Match Activation", shape=box];
+      rule_timer [label="TimerRule (P=20)\nInterval-Based Trigger", shape=box];
+      rule_gpio [label="GPIORule (P=10)\nLevel/Event Detection\nDebounce Support", shape=box];
+      rule_tty [label="TTYRule (P=0)\nUnix Socket Listener\nBoyer-Moore Search\nCommand Pattern Match", shape=box];
+      rule_http [label="HTTPRule (P=0)\nManual API Activation", shape=box];
+      rule_schedule [label="ScheduleRule (P=30)\nWeekday/Time Range\nActive Window Filter", shape=box];
+    }
+  }
+
+  subgraph cluster_media {
+    label="Media & Writing";
+    style=rounded;
+    color=darkorange;
+
+    subgraph cluster_writer_base {
+      label="Writer Framework";
+      style="rounded,dashed";
+      color=gray60;
+
+      writer_base [label="AdaptableWriter<T>\nEvent-Based Control\nSettings Revision Check\nStart/End Time Window", shape=box];
+      slot_adapter [label="SlotAdaptedWriter<Slot>\nCache Path Generation\nTimestamp Naming (HH-MM-SS µs)\nWriter Count Tracking", shape=box];
+    }
+
+    subgraph cluster_writer_impl {
+      label="Writer Implementations";
+      style="rounded,dashed";
+      color=gray60;
+
+      image_writer [label="ImageWriter\nSingle-Shot Capture\nimage_capture_cb", shape=box];
+      video_writer [label="VideoWriter\nKeyframe Clip Boundaries\nClip Length Control\nFrame-by-Frame Write\nvideo_file_*_cb", shape=box];
+    }
+
+    writer_thread [label="Writer Thread (50ms poll)\nSlot Ready Check\nQuota/Watermark Check\nMedia Pause Check\nWrite Event Dispatch", shape=box];
+  }
+
+  subgraph cluster_storage {
+    label="Storage Management";
+    style=rounded;
+    color=darkgreen;
+
+    storage [label="Storage Manager\nNetlink Hotplug Monitor\nSlot Discovery/Selection", shape=box];
+
+    subgraph cluster_slot {
+      label="Slot (per device)";
+      style="rounded,dashed";
+      color=gray60;
+
+      slot_state [label="Slot State Machine\nError→Initial→Formatted\n→Mounted→Configured→Ready", shape=box];
+      slot_ops [label="Slot Operations\nMount/Unmount/Format\nEnable/Disable\nSuspend/Resume Write", shape=box];
+      slot_quota [label="Quota Manager\nLimit Bytes\nRotate Policy", shape=box];
+
+      subgraph cluster_slot_components {
+        label="Slot Components";
+        style="rounded,dotted";
+        color=gray70;
+        indexer [label="Index Manager\nFirst-Level Dir Stats (YYYY-MM-DD)\nFile Size Tracking\nStaled File Cleanup", shape=box];
+        write_stats [label="Write Stats\nHourly Bytes/Minute\nEstimated Write Rate", shape=box];
+        slot_writer [label="Slot Writer\nCache→Target Move\nAsync Write Thread", shape=box];
+        relay [label="Relay\nUUID Symlink Export\nTimeout Auto-Disable (5m)\nNginx Integration", shape=box];
+      }
+    }
+
+    fs [label="Filesystem\n(ext4/vfat/exfat)", shape=cylinder];
+  }
+
+  // HTTP Client -> Endpoint Controllers (sync, blue)
+  http_client -> rule_ep [color=blue, label="GET/POST\nrule config", lhead=cluster_rule_endpoint];
+  http_client -> schedule_ep [color=blue, label="GET/POST\nschedule", lhead=cluster_rule_endpoint];
+  http_client -> record_ep [color=blue, label="GET/POST\nrecord rule", lhead=cluster_rule_endpoint];
+  http_client -> rule_info_ep [color=blue, label="GET\ninfo", lhead=cluster_rule_endpoint];
+  http_client -> storage_cfg_ep [color=blue, label="GET/POST\nconfig", lhead=cluster_storage_endpoint];
+  http_client -> storage_status_ep [color=blue, label="GET\nstatus", lhead=cluster_storage_endpoint];
+  http_client -> storage_ctrl_ep [color=blue, label="POST\ncontrol", lhead=cluster_storage_endpoint];
+
+  // Endpoint Controllers -> Config Store
+  rule_ep -> config_store [color=blue, label="load/save", ltail=cluster_rule_endpoint];
+  schedule_ep -> config_store [color=blue, label="load/save", ltail=cluster_rule_endpoint];
+  record_ep -> config_store [color=blue, label="load/save", ltail=cluster_rule_endpoint];
+  storage_cfg_ep -> config_store [color=blue, label="load/save", ltail=cluster_storage_endpoint];
+
+  // Host App -> Service C Interface (sync, blue)
+  app -> svc_core [color=blue, label="init/deinit", ltail=cluster_clients, lhead=cluster_service_api];
+  app -> svc_media [color=blue, label="enqueue\nframes", ltail=cluster_clients, lhead=cluster_service_api];
+  app -> svc_infer [color=blue, label="enqueue\ninference", ltail=cluster_clients, lhead=cluster_service_api];
+
+  // HTTP API Bindings -> Endpoint Controllers
+  http_rule -> rule_ep [color=blue, label="config", ltail=cluster_http_api, lhead=cluster_rule_endpoint];
+  http_rule -> schedule_ep [color=blue, label="schedule", ltail=cluster_http_api, lhead=cluster_rule_endpoint];
+  http_rule -> record_ep [color=blue, label="record", ltail=cluster_http_api, lhead=cluster_rule_endpoint];
+  http_rule -> rule_info_ep [color=blue, label="info", ltail=cluster_http_api, lhead=cluster_rule_endpoint];
+  http_storage -> storage_cfg_ep [color=blue, label="config", ltail=cluster_http_api, lhead=cluster_storage_endpoint];
+  http_storage -> storage_status_ep [color=blue, label="status", ltail=cluster_http_api, lhead=cluster_storage_endpoint];
+  http_storage -> storage_ctrl_ep [color=blue, label="control", ltail=cluster_http_api, lhead=cluster_storage_endpoint];
+
+  // Endpoint Controllers -> Internal modules
+  rule_ep -> ctrl_rule_enabled [color=blue, label="enable/disable", ltail=cluster_rule_endpoint, lhead=cluster_ctx_control];
+  rule_ep -> shared_writer_cfg [color=blue, label="update settings", ltail=cluster_rule_endpoint, lhead=cluster_ctx_shared];
+  schedule_ep -> rule_schedule [color=blue, label="create/update", ltail=cluster_rule_endpoint, lhead=cluster_rule_types];
+  record_ep -> rule_thread [color=blue, label="swap rule", ltail=cluster_rule_endpoint, lhead=cluster_rules];
+  record_ep -> rule_http [color=blue, label="activate", ltail=cluster_rule_endpoint, lhead=cluster_rule_types];
+  storage_cfg_ep -> storage [color=blue, label="setConfig", ltail=cluster_storage_endpoint, lhead=cluster_storage];
+  storage_ctrl_ep -> storage [color=blue, label="control ops", ltail=cluster_storage_endpoint, lhead=cluster_storage];
+
+  // Rule thread owned by RuleEndpoint
+  rule_ep -> rule_thread [color=blue, label="owns thread", ltail=cluster_rule_endpoint, lhead=cluster_rules];
+
+  // Service API -> Core Context
+  svc_core -> ctx [color=blue, label="lifecycle", ltail=cluster_service_api, lhead=cluster_context];
+  svc_media -> media_buf [color=blue, label="enqueue frames", ltail=cluster_service_api, lhead=cluster_ctx_queues];
+  svc_media -> ctrl_media_paused [color=blue, label="suspend/resume", ltail=cluster_service_api, lhead=cluster_ctx_control];
+  svc_infer -> infer_q [color=blue, label="enqueue results", ltail=cluster_service_api, lhead=cluster_ctx_queues];
+
+  // HAL Callbacks (invoked by Vigil internals, green)
+  image_writer -> hal_media [color=green, style=dashed, label="image_capture_cb", ltail=cluster_writer_impl, lhead=cluster_hal];
+  video_writer -> hal_media [color=green, style=dashed, label="video_file_*_cb", ltail=cluster_writer_impl, lhead=cluster_hal];
+  rule_gpio -> hal_gpio [color=green, style=dashed, label="acquire/release\nlevel/event", ltail=cluster_rule_types, lhead=cluster_hal];
+  storage -> hal_storage [color=green, style=dashed, label="mount/unmount\ncallbacks", ltail=cluster_storage, lhead=cluster_hal];
+  ctx -> hal_basic [color=green, style=dashed, label="log/events", ltail=cluster_context, lhead=cluster_hal];
+
+  // Context internal relationships
+  ctx -> shared_time [color=blue, label="tick()"];
+  ctx -> ctrl_rule_enabled [color=blue, label="check"];
+  ctx -> ctrl_infer_subs [color=blue, label="check"];
+  infer_q -> shared_infer_result [color=orange, style=dashed, label="pop & move"];
+  rule_thread -> ctx [color=blue, label="tick()"];
+  rule_thread -> shared_rule_evt [color=orange, style=dashed, label="tryUpdateRuleEvent()"];
+
+  // Rule framework relationships
+  rule_base -> rule_infer [color=blue, label="extends"];
+  rule_base -> rule_infer_set [color=blue, label="extends"];
+  rule_base -> rule_timer [color=blue, label="extends"];
+  rule_base -> rule_gpio [color=blue, label="extends"];
+  rule_base -> rule_tty [color=blue, label="extends"];
+  rule_base -> rule_http [color=blue, label="extends"];
+  rule_base -> rule_schedule [color=blue, label="extends"];
+  rule_infer_set -> rule_infer [color=blue, label="contains"];
+
+  // Rule thread evaluates rules
+  rule_thread -> rule_infer [color=orange, style=dashed, label="eval"];
+  rule_thread -> rule_infer_set [color=orange, style=dashed, label="eval"];
+  rule_thread -> rule_timer [color=orange, style=dashed, label="eval"];
+  rule_thread -> rule_gpio [color=orange, style=dashed, label="eval"];
+  rule_thread -> rule_tty [color=orange, style=dashed, label="eval"];
+  rule_thread -> rule_schedule [color=orange, style=dashed, label="filter"];
+
+  // Rules read shared state
+  rule_timer -> shared_time [color=blue, label="steadyTime()"];
+  rule_schedule -> shared_time [color=blue, label="localTime()"];
+  shared_infer_result -> rule_infer [color=orange, style=dashed, label="detection/\nclassification"];
+  shared_infer_result -> rule_infer_set [color=orange, style=dashed, label="detection/\nclassification"];
+
+  // Async edges (queues/events) in orange dashed
+  media_buf -> video_writer [color=orange, style=dashed, label="video/audio\nframes"];
+  shared_rule_evt -> writer_thread [color=orange, style=dashed, label="getCurrent()"];
+  writer_thread -> shared_rule_evt [color=orange, style=dashed, label="reset()"];
+
+  // Writer thread reads shared settings
+  writer_thread -> shared_writer_cfg [color=blue, label="get()"];
+  writer_thread -> ctrl_media_paused [color=blue, label="check"];
+
+  // Writer framework relationships
+  writer_base -> slot_adapter [color=blue, label="CRTP\nbase"];
+  slot_adapter -> image_writer [color=blue, label="template"];
+  slot_adapter -> video_writer [color=blue, label="template"];
+  writer_thread -> image_writer [color=orange, style=dashed, label="create\n(Image type)"];
+  writer_thread -> video_writer [color=orange, style=dashed, label="create\n(Video type)"];
+
+  // Writer -> Slot flow
+  slot_adapter -> slot_writer [color=orange, style=dashed, label="cache file\ninfo"];
+  slot_writer -> indexer [color=orange, style=dashed, label="move & index"];
+
+  // Storage internal relationships
+  storage -> slot_state [color=blue, label="slot lifecycle"];
+  slot_state -> slot_ops [color=blue, label="state-driven"];
+  slot_ops -> slot_quota [color=blue, label="quota check"];
+  slot_quota -> indexer [color=blue, label="usage query"];
+  indexer -> write_stats [color=blue, label="size tracking"];
+  slot_quota -> indexer [color=orange, style=dashed, label="rotate staled"];
+
+  // Writer thread belongs to slot
+  slot_ops -> writer_thread [color=blue, label="spawn thread"];
+
+  // Storage -> Filesystem
+  slot_ops -> fs [color=blue, label="mount/format"];
+  indexer -> fs [color=blue, label="file ops"];
+
+  // Relay relationships
+  slot_ops -> relay [color=blue, label="enable/disable"];
+  relay -> http_client [color=blue, label="file fetch\n(nginx symlink)"];
+
+  // Legend
+  subgraph cluster_legend {
+    label="Legend";
+    style=dashed;
+    rank=sink;
+    legend_sync [label="Sync call", shape=plaintext];
+    legend_async [label="Async/Queue", shape=plaintext];
+    legend_hal [label="HAL callback", shape=plaintext];
+    legend_sync -> legend_async [color=blue, label="blue"];
+    legend_async -> legend_hal [color=orange, style=dashed, label="orange"];
+    legend_hal -> legend_sync [color=green, style=dashed, label="green", constraint=false];
+  }
+}
