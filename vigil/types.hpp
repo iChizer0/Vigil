@@ -891,6 +891,13 @@ struct WaterMarks
         };
     }
 
+    template<typename T, std::enable_if_t<std::is_unsigned_v<T>, bool> = true>
+    WaterMarks& operator+=(const T& scalar) noexcept {
+        critical_remain_bytes += scalar;
+        high_remain_bytes += scalar;
+        return *this;
+    }
+
 private:
     static inline constexpr const std::array<std::pair<std::string_view, FileSize>, 4> kFormatAverageBytesMap = {
         std::make_pair<std::string_view, FileSize>("MP4", 100 * 1024 * 1024),          // 100 MB per minute

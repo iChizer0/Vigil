@@ -500,8 +500,10 @@ private:
         if (!_quota_rotate.load(std::memory_order_acquire))
             return;
 
-        const auto watermarks = _ctx.shared_writer_settings.getWaterMarks();
         const auto limit = _quota_limit_bytes.load(std::memory_order_acquire);
+        auto watermarks = _ctx.shared_writer_settings.getWaterMarks();
+        if (_internal)
+            watermarks += kStorageMinFileSystemFreeBytesInternal;
 
         // Check if quota limit is exceeded
         if (limit > 0)
@@ -649,7 +651,9 @@ private:
 
             const auto start = std::chrono::steady_clock::now();
             const auto settings = _ctx.shared_writer_settings.get();
-            const auto &watermarks = settings.second.watermarks;
+            auto watermarks = settings.second.watermarks;
+            if (_internal)
+                watermarks += kStorageMinFileSystemFreeBytesInternal;
             std::shared_ptr<WriteEvent> event = nullptr;
 
             // Check if slot status is ready to write
