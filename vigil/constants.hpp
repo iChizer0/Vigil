@@ -30,8 +30,15 @@ static inline constexpr const size_t kInferenceQueueSize = 60 * 1;
 
 static inline constexpr const std::chrono::seconds kVideoClipLengthDefault = std::chrono::seconds(60);
 static inline constexpr const size_t kVideoFrameBufferSize = 30 * 5;
-static inline constexpr const size_t kAudioFrameBufferSize = 50 * 5;
-static inline constexpr const size_t kMediaMuxerBufferSize = kVideoFrameBufferSize + kAudioFrameBufferSize;
+static inline constexpr const size_t kAudioFrameBufferSize = 30 * 5;
+static inline constexpr const size_t kSlotMediaMuxerBufferSize = kVideoFrameBufferSize + kAudioFrameBufferSize;
+static inline constexpr const size_t kSlotMediaMuxerBufferPeriod = 10;
+
+static inline constexpr const size_t kCaptureVideoFrameBufferSize = 30 * 5;
+static inline constexpr const size_t kCaptureAudioFrameBufferSize = 30 * 5;
+static inline constexpr const size_t kCaptureMediaMuxerBufferSize
+    = kCaptureVideoFrameBufferSize + kCaptureAudioFrameBufferSize;
+static inline constexpr const size_t kCaptureMediaMuxerBufferPeriod = 10;
 
 static inline constexpr const std::string_view kStorageMountBasePath = "/mnt";
 static inline constexpr const char *kStorageFirstLevelDirNameTimeFormat = "%Y-%m-%d";
