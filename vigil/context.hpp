@@ -1,5 +1,4 @@
 #pragma once
-#include <iterator>
 #ifndef VIGIL_CONTEXT_HPP
 #define VIGIL_CONTEXT_HPP
 
@@ -9,6 +8,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <queue>
