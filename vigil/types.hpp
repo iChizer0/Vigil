@@ -892,7 +892,8 @@ struct WaterMarks
     }
 
     template<typename T, std::enable_if_t<std::is_unsigned_v<T>, bool> = true>
-    WaterMarks& operator+=(const T& scalar) noexcept {
+    WaterMarks &operator+=(const T &scalar) noexcept
+    {
         critical_remain_bytes += scalar;
         high_remain_bytes += scalar;
         return *this;
@@ -1025,6 +1026,22 @@ struct GPIOHelpers final
         else
             return std::nullopt;
     }
+};
+
+struct CaptureEvent
+{
+    std::filesystem::path output_directory;
+    FileWriterSettings settings;
+    std::shared_ptr<WriteEvent> event;
+    std::string file_name;
+
+    CaptureEvent(const std::filesystem::path &od, FileWriterSettings &&fws, std::shared_ptr<WriteEvent> evt,
+        const std::string &fn)
+        : output_directory(od), settings(std::move(fws)), event(evt), file_name(fn)
+    {
+    }
+
+    ~CaptureEvent() = default;
 };
 
 } // namespace vigil::types
