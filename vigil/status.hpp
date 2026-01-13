@@ -80,8 +80,8 @@ struct StorageStatus
     std::string current_enabled_slot_dev_path;
     std::string target_enabled_slot_dev_path;
 
-    StorageStatus(std::string_view data_dir_name_)
-        : slots_status(), data_dir_name(data_dir_name_), current_enabled_slot_dev_path(), target_enabled_slot_dev_path()
+    StorageStatus(std::string_view ddn)
+        : slots_status(), data_dir_name(ddn), current_enabled_slot_dev_path(), target_enabled_slot_dev_path()
     {
     }
 
@@ -126,6 +126,34 @@ struct GPIOPinStatus
         j["sLevel"] = ((pin.state & ~VG_GPIO_PIN_MODE_DISABLED) && ctx.c_api.gpios.sync_level_cb)
                           ? GPIOHelpers::LevelToString(ctx.c_api.gpios.sync_level_cb(pin.num))
                           : std::optional<std::string_view>();
+    }
+};
+
+struct CaptureStatus
+{
+    std::filesystem::path output_directory;
+    FileWriterSettings settings;
+    std::shared_ptr<WriteEvent> event;
+    std::string file_name;
+    bool ready_to_capture_new;
+
+    void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
+    {
+        j["sOutputDirectory"] = output_directory;
+        {
+            j["sFormat"] = settings.format;
+            if (settings.type == FileWriterSettings::CaptureType::Video
+                && settings.video_clip_length != std::chrono::seconds::max())
+                j["iVideoClipLengthSeconds"] = settings.video_clip_length.count();
+        }
+        if (event)
+        {
+            j["sStatus"] = WriteEvent::StatusString(event->status.load(std::memory_order_relaxed));
+            j["sTimepoint"] = event->timepoint.time_since_epoch().count();
+            j["iTimestamp"] = event->timestamp;
+        }
+        j["sFileName"] = file_name;
+        j["bReadyToCaptureNew"] = ready_to_capture_new;
     }
 };
 

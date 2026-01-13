@@ -553,6 +553,24 @@ struct StorageControlConfig
     }
 };
 
+struct CaptureConfig
+{
+    std::filesystem::path output_directory;
+    FileWriterSettings settings;
+
+    CaptureConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
+    {
+        j.at("sOutputDirectory").get_to(output_directory);
+        {
+            std::chrono::seconds video_length = std::chrono::seconds::max();
+            if (j.contains("iVideoLengthSeconds"))
+                video_length = std::chrono::seconds(j.at("iVideoLengthSeconds").get<int>());
+            settings = FileWriterSettings(j.at("sFormat").get<std::string>(), std::chrono::milliseconds(0),
+                kCaptureWriterPrefixDefault, video_length);
+        }
+    }
+};
+
 } // namespace vigil::configs
 
 #endif

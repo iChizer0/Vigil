@@ -122,15 +122,17 @@ struct Context
 
     // Media frame enqueueing (thread-safe)
     template<typename T>
-    void enqueueMediaFrame(T &&frame) noexcept
+    void enqueueMediaFrame(const T &frame) noexcept
     {
-        slot_media_buffer.enqueue(std::forward<T>(frame));
+        slot_media_buffer.enqueue(frame);
+        capture_media_buffer.enqueue(frame);
     }
 
     // Clear media frames (thread-safe)
     void clearMediaBuffer() noexcept
     {
         slot_media_buffer.clear();
+        capture_media_buffer.clear();
     }
 
     // Try to update rule event
@@ -325,6 +327,7 @@ struct Context
         }
     };
     SharedMediaBuffer<kSlotMediaMuxerBufferSize, kSlotMediaMuxerBufferPeriod> slot_media_buffer;
+    SharedMediaBuffer<kCaptureMediaMuxerBufferSize, kCaptureMediaMuxerBufferPeriod> capture_media_buffer;
 
     // Shared time (thread-safe)
     struct SharedTime
