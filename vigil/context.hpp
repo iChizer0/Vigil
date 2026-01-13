@@ -1,4 +1,5 @@
 #pragma once
+#include <iterator>
 #ifndef VIGIL_CONTEXT_HPP
 #define VIGIL_CONTEXT_HPP
 
@@ -293,29 +294,24 @@ struct Context
     private:
         void tryDropFramesInternal() noexcept
         {
-            // At least one frame to drop
-            for (auto it = queue.erase(queue.begin()); it != queue.end();)
+            auto s = queue.begin();
+            auto e = std::next(s);
+
+            for (; e != queue.end(); ++e)
             {
-                if (it->isKeyFrame())
+                if (e->isKeyFrame())
                     break;
-                else if (std::holds_alternative<AudioFrame>(*it->frame))
-                {
-                    ++it;
-                    continue;
-                }
-                it = queue.erase(it);
             }
 
-            // Keep last audio frames before next key frame
-            auto it = queue.begin();
-            while (it != queue.end())
+            if (s->isKeyFrame() || e == queue.end())
             {
-                if (it->isKeyFrame())
-                    break;
-                ++it;
+                queue.erase(s, e); // Drop frames between key frames
+                return;
             }
-            if (const auto dist = std::distance(queue.begin(), it); dist > 2)
-                queue.erase(queue.begin(), std::next(queue.begin(), dist - 2));
+
+            while (s != e && std::holds_alternative<AudioFrame>(*e->frame))
+                e = std::prev(e);
+            queue.erase(e); // Drop the last video frame before the next key frame
         }
     };
     SharedMediaBuffer<kMediaMuxerBufferSize> slot_media_buffer;
