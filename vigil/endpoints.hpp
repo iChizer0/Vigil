@@ -927,7 +927,7 @@ public:
         }
     }
 
-    nlohmann::json getCaptureStatus() const
+    nlohmann::json getStatus() const
     {
         auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
@@ -953,7 +953,7 @@ public:
         return res_j;
     }
 
-    nlohmann::json doStartCapture(const nlohmann::json &j)
+    nlohmann::json doStart(const nlohmann::json &j)
     {
         auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
@@ -986,7 +986,7 @@ public:
         return res_j;
     }
 
-    nlohmann::json doStopCapture(const nlohmann::json &)
+    nlohmann::json doStop(const nlohmann::json &)
     {
         auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;

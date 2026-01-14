@@ -543,7 +543,7 @@ vg_sta_e vg_http_api_capture_status_get(vg_http_api_response_t *response)
 
     try
     {
-        auto res_j = vigil_instance->captureEndpoint().getCaptureStatus();
+        auto res_j = vigil_instance->captureEndpoint().getStatus();
         return vg_http_api_json_2_response(res_j, *response);
     }
     catch (const std::exception &e)
@@ -565,7 +565,7 @@ vg_sta_e vg_http_api_capture_start_post(const vg_http_api_request_t *request, vg
     try
     {
         auto req_j = vg_http_api_request_2_json(*request);
-        auto res_j = vigil_instance->captureEndpoint().doStartCapture(req_j);
+        auto res_j = vigil_instance->captureEndpoint().doStart(req_j);
         return vg_http_api_json_2_response(res_j, *response);
     }
     catch (const std::exception &e)
@@ -587,7 +587,7 @@ vg_sta_e vg_http_api_capture_stop_post(const vg_http_api_request_t *request, vg_
     try
     {
         auto req_j = vg_http_api_request_2_json(*request);
-        auto res_j = vigil_instance->captureEndpoint().doStopCapture(req_j);
+        auto res_j = vigil_instance->captureEndpoint().doStop(req_j);
         return vg_http_api_json_2_response(res_j, *response);
     }
     catch (const std::exception &e)

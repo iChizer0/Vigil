@@ -69,6 +69,7 @@ public:
         return _start_time + _settings.second.interval;
     }
 
+protected:
     inline std::mutex &mediaMutex() const noexcept
     {
         return static_cast<const T *>(this)->mediaMutexImpl();
@@ -107,7 +108,6 @@ public:
 
     virtual WriteEvent::Status waitUntilWriteFinish() noexcept = 0; // Return true to indicate write is complete
 
-protected:
     inline const std::shared_ptr<WriteEvent> &event() const noexcept
     {
         return _event;
