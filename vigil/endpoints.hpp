@@ -6,6 +6,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -910,6 +911,8 @@ public:
 
     ~CaptureEndpoint() noexcept
     {
+        _finish_current_capture.store(true);
+
         try
         {
             if (_capture_thread)
@@ -978,7 +981,7 @@ public:
         return res_j;
     }
 
-    nlohmann::json doStopCapture()
+    nlohmann::json doStopCapture(const nlohmann::json &)
     {
         auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
@@ -1064,33 +1067,61 @@ private:
         while (!_capture_stop_token.load(std::memory_order_relaxed))
         {
             const auto start = std::chrono::steady_clock::now();
-            try
-            {
-                captureTaskLoop();
-            }
-            catch (std::exception &e)
-            {
-                VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Exception in capture task loop: ", e.what());
-            }
+            captureTaskLoop();
             if (auto duration = std::chrono::steady_clock::now() - start; duration < kWriterProbeInterval)
                 std::this_thread::sleep_for(kWriterProbeInterval - duration);
         }
     }
 
-    void captureTaskLoop()
+    void captureTaskLoop() noexcept
     {
-        // Event capturing logic here
+        if (_ctx->media_paused.load(std::memory_order_relaxed))
+            return;
+        auto event = getCaptureEvent();
+        try
+        {
+            if (auto writer = getWriterFromEvent(event); writer)
+                writer->operator()();
+        }
+        catch (std::exception &e)
+        {
+            VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Exception in capture task loop: ", e.what());
+            handleCompletedCaptureEvent(event);
+        }
+    }
+
+    std::shared_ptr<CaptureEvent> getCaptureEvent() const noexcept
+    {
+        const std::shared_lock lock(_event_mutex);
+        return _event_current;
+    }
+
+    std::unique_ptr<CaptureAdaptedWriter<CaptureEndpoint>> getWriterFromEvent(std::shared_ptr<CaptureEvent> event)
+    {
+        if (!event)
+            return nullptr;
+        switch (event->settings.type)
+        {
+            case FileWriterSettings::CaptureType::Image:
+                return std::make_unique<ImageWriter<CaptureAdaptedWriter<CaptureEndpoint>>>(std::ref(*this), event,
+                    std::ref(*_ctx), FileWriterSettingsWithRevision { 0, event->settings }, event->event);
+            case FileWriterSettings::CaptureType::Video:
+                return std::make_unique<VideoWriter<CaptureAdaptedWriter<CaptureEndpoint>>>(std::ref(*this), event,
+                    std::ref(*_ctx), FileWriterSettingsWithRevision { 0, event->settings }, event->event);
+            default:
+                return nullptr;
+        }
     }
 
 protected:
     friend CaptureAdaptedWriter<CaptureEndpoint>;
 
-    void handleCompletedCaptureEvent(std::shared_ptr<CaptureEvent> evt) noexcept
+    void handleCompletedCaptureEvent(std::shared_ptr<CaptureEvent> event) noexcept
     {
         const std::unique_lock lock(_event_mutex);
-        if (evt != _event_current)
-            VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Completed capture event does not match current event pointer");
-        _event_last = std::move(evt);
+        if (event != _event_current)
+            VG_LOG(_ctx->log, VG_LOG_LEVEL_WARN, "Completed capture event does not match current event pointer");
+        _event_last = std::move(event);
         _event_current.reset();
         _finish_current_capture.store(false, std::memory_order_release);
     }

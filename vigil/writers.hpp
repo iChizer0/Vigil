@@ -300,8 +300,8 @@ private:
                     ", code: ", ret);
                 return false;
             }
-            const auto free_bytes = stat.f_bavail * stat.f_frsize;
-            const auto required_bytes = this->settings().second.watermarks.critical_remain_bytes;
+            const FileSize free_bytes = stat.f_bavail * stat.f_frsize;
+            const FileSize required_bytes = this->settings().second.watermarks.critical_remain_bytes;
             if (free_bytes < required_bytes)
             {
                 VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
