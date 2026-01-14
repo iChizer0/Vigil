@@ -969,6 +969,11 @@ public:
 
             const auto config = CaptureConfig(j, *_ctx);
             _event_current = getCaptureEvent(config);
+            if (!_event_current)
+            {
+                ret = EFAULT;
+                throw Exception("Failed to create capture event from configuration");
+            }
         }
         catch (const std::exception &e)
         {
@@ -1022,12 +1027,10 @@ private:
             if (!config.output_directory.is_absolute())
                 throw Exception("Capture output directory must be an absolute path");
             auto ods = config.output_directory.string();
-            if (!ods.starts_with(kStorageMountBasePath))
-                throw Exception("Capture output directory must be under storage mount base path '"
-                                + std::string(kStorageMountBasePath) + "'");
-            if (_ctx->c_api.storage.internal_mount_point && !ods.starts_with(_ctx->c_api.storage.internal_mount_point))
-                throw Exception("Capture output directory must be under internal storage mount point '"
-                                + std::string(_ctx->c_api.storage.internal_mount_point) + "'");
+            if (!(ods.starts_with(kStorageMountBasePath)
+                    || (_ctx->c_api.storage.internal_mount_point
+                        && ods.starts_with(_ctx->c_api.storage.internal_mount_point))))
+                throw Exception("Capture output directory must be under storage mount point");
         }
 
         const auto steady_now = std::chrono::steady_clock::now();
@@ -1044,7 +1047,7 @@ private:
 
             const auto local_time = LocalTime(system_now);
             auto tm = local_time.tm();
-            ss << ' ' << std::put_time(&tm, kStorageFirstLevelDirNameTimeFormat);
+            ss << std::put_time(&tm, kStorageFirstLevelDirNameTimeFormat);
 
             const auto duration = steady_now.time_since_epoch();
             const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);

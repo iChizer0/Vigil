@@ -1,8 +1,8 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2026-01-05
-Version: 1.3.2
+Revised: 2026-01-14
+Version: 1.4.0
 
 ## Rule API
 
@@ -312,6 +312,94 @@ For other actions:
     "code": 0 // Integer, POST only, 0 on success, errors return 30000 + |errno|
 }
 ```
+
+## Capture API
+
+The Capture API provides manual control over media capture, independent of the rule-based recording system.
+
+### Capture Status
+
+Get the current capture status including any ongoing and last completed capture.
+
+**Path:** `.../vigil/capture/status`
+
+**Method:** `GET`
+
+**Response Body:**
+
+```json
+{
+    "dCurrent": { // Object|null, present only if a capture is in progress
+        "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
+        "sFormat": "MP4", // String, capture format ("MP4", "JPG", "RAW")
+        "iVideoClipLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
+        "sStatus": "WRITING", // String, write event status ("PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", "UNKNOWN")
+        "sTimepoint": 1736870400000000000, // String, steady clock timepoint (nanoseconds since epoch)
+        "iTimestamp": 1736870400000, // Integer, Unix timestamp in milliseconds
+        "sFileName": "CAP 20260114 143000 123456.mp4" // String, generated file name
+    },
+    "dLast": { // Object|null, present only if a previous capture exists
+        "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
+        "sFormat": "JPG", // String, capture format
+        "sStatus": "COMPLETED", // String, write event status
+        "sTimepoint": 1736866800000000000, // String, steady clock timepoint
+        "iTimestamp": 1736866800000, // Integer, Unix timestamp in milliseconds
+        "sFileName": "CAP 20260114 133000 654321.jpg" // String, generated file name
+    }
+}
+```
+
+### Start Capture
+
+Start a new capture session.
+
+**Path:** `.../vigil/capture/start`
+
+**Method:** `POST`
+
+**Request Payload:**
+
+```json
+{
+    "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, absolute path under storage mount point
+    "sFormat": "MP4", // String, capture format: "MP4" (video), "JPG" (image), "RAW" (image)
+    "iVideoLengthSeconds": 60 // Integer, optional, video clip length in seconds; omit for continuous recording
+}
+```
+
+**Response Body:**
+
+```json
+{
+    "code": 0 // Integer, 0 on success, errors return 30000 + |errno|
+}
+```
+
+**Notes:**
+- Returns error `EBUSY` (30016) if a capture is already in progress.
+- The output directory must be an absolute path under the configured storage mount point.
+
+### Stop Capture
+
+Stop the current capture session.
+
+**Path:** `.../vigil/capture/stop`
+
+**Method:** `POST`
+
+**Request Payload:** None required (empty object `{}` accepted).
+
+**Response Body:**
+
+```json
+{
+    "code": 0 // Integer, 0 on success, errors return 30000 + |errno|
+}
+```
+
+**Notes:**
+- Returns error `ENOENT` (30002) if no capture is in progress.
+- Returns error `EALREADY` (30114) if capture stop is already in progress.
 
 ## Files API
 
