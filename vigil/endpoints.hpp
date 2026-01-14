@@ -1,5 +1,4 @@
 #pragma once
-#include "nlohmann/json_fwd.hpp"
 #ifndef VIGIL_ENDPOINTS_HPP
 #define VIGIL_ENDPOINTS_HPP
 
@@ -23,6 +22,7 @@
 
 #include "configs.hpp"
 #include "context.hpp"
+#include "log.hpp"
 #include "rules.hpp"
 #include "status.hpp"
 #include "storage.hpp"
@@ -37,6 +37,7 @@ using namespace vigil::configs;
 using namespace vigil::storage;
 using namespace vigil::status;
 using namespace vigil::constants;
+using namespace vigil::writers;
 
 // - MARK: Config Store
 
@@ -1079,6 +1080,29 @@ private:
     void captureTaskLoop()
     {
         // Event capturing logic here
+    }
+
+protected:
+    friend CaptureAdaptedWriter<CaptureEndpoint>;
+
+    void handleCompletedCaptureEvent(std::shared_ptr<CaptureEvent> evt) noexcept
+    {
+        const std::unique_lock lock(_event_mutex);
+        if (evt != _event_current)
+            VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Completed capture event does not match current event pointer");
+        _event_last = std::move(evt);
+        _event_current.reset();
+        _finish_current_capture.store(false, std::memory_order_release);
+    }
+
+    inline bool shouldFinishWriting() const noexcept
+    {
+        return _finish_current_capture.load(std::memory_order_relaxed);
+    }
+
+    inline bool shouldContinueWriting() const noexcept
+    {
+        return !_capture_stop_token.load(std::memory_order_relaxed);
     }
 
 private:

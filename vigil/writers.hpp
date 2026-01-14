@@ -472,6 +472,15 @@ private:
         return _is_clip_finish;
     }
 
+    template<class... Ts>
+    struct Overloaded: Ts...
+    {
+        using Ts::operator()...;
+    };
+
+    template<class... Ts>
+    Overloaded(Ts...) -> Overloaded<Ts...>;
+
     inline bool writeMediaFrame(const MediaFrame &media_frame) noexcept
     {
         if (!media_frame.frame)
@@ -479,42 +488,32 @@ private:
             VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_WARN, "Media frame is empty, skipping write");
             return false;
         }
-        return std::visit(
-            [&](auto &&arg) -> bool {
-                using FrameType = std::decay_t<decltype(arg)>;
-                if constexpr (std::is_same_v<FrameType, VideoFrame>)
-                {
-                    const auto video_frame = arg.toRef();
-                    const auto ret = this->ctxRef().c_api.media.video_file_write_video_frame_cb(_fd, &video_frame,
-                        this->ctxRef().c_api.media.user_data);
-                    if (ret != 0)
-                    {
-                        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to write video frame to file with fd ",
-                            _fd, ", code: ", static_cast<int>(ret));
-                        return false;
-                    }
-                    return true;
-                }
-                else if constexpr (std::is_same_v<FrameType, AudioFrame>)
-                {
-                    const auto audio_frame = arg.toRef();
-                    const auto ret = this->ctxRef().c_api.media.video_file_write_audio_frame_cb(_fd, &audio_frame,
-                        this->ctxRef().c_api.media.user_data);
-                    if (ret != 0)
-                    {
-                        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to write audio frame to file with fd ",
-                            _fd, ", code: ", static_cast<int>(ret));
-                        return false;
-                    }
-                    return true;
-                }
-                else
-                {
-                    VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_WARN,
-                        "Media frame is neither video nor audio frame, skipping write");
-                    return false;
-                }
-            },
+        return std::visit(Overloaded { [&](const VideoFrame &vf) {
+                                          const auto video_frame = vf.toRef();
+                                          const auto ret = this->ctxRef().c_api.media.video_file_write_video_frame_cb(
+                                              _fd, &video_frame, this->ctxRef().c_api.media.user_data);
+                                          if (ret != 0)
+                                          {
+                                              VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                                                  "Failed to write video frame to file with fd ", _fd,
+                                                  ", code: ", static_cast<int>(ret));
+                                              return false;
+                                          }
+                                          return true;
+                                      },
+                              [&](const AudioFrame &af) {
+                                  const auto audio_frame = af.toRef();
+                                  const auto ret = this->ctxRef().c_api.media.video_file_write_audio_frame_cb(_fd,
+                                      &audio_frame, this->ctxRef().c_api.media.user_data);
+                                  if (ret != 0)
+                                  {
+                                      VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                                          "Failed to write audio frame to file with fd ", _fd,
+                                          ", code: ", static_cast<int>(ret));
+                                      return false;
+                                  }
+                                  return true;
+                              } },
             *media_frame.frame);
     }
 
