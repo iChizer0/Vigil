@@ -42,6 +42,7 @@ static inline constexpr const size_t kCaptureMediaMuxerBufferPeriod = 10;
 
 static inline constexpr const std::string_view kStorageMountBasePath = "/mnt";
 static inline constexpr const char *kStorageFirstLevelDirNameTimeFormat = "%Y-%m-%d";
+static inline constexpr const char *kStorageFileNamePrefixTimeFormat = "%H-%M-%S";
 static inline constexpr const size_t kStorageNetlinkBufferSize = 4096;
 static inline constexpr const std::string_view kStorageNetlinkAction = "ACTION=";
 static inline constexpr const std::string_view kStorageNetlinkDevName = "DEVNAME=";

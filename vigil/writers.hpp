@@ -16,6 +16,9 @@
 #include <utility>
 #include <variant>
 
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+
 #include "constants.hpp"
 #include "context.hpp"
 #include "index_manager.hpp"
@@ -182,7 +185,7 @@ private:
         const auto local_time = LocalTime(std::chrono::system_clock::now());
         auto tm = local_time.tm();
         std::stringstream ss;
-        ss << std::put_time(&tm, kFirstLevelDirNameTimeFormat);
+        ss << std::put_time(&tm, kStorageFirstLevelDirNameTimeFormat);
         _cache_file_info.first_level_dir_name = ss.str();
 
         const auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
@@ -191,7 +194,7 @@ private:
         const auto duration = this->startTime().time_since_epoch();
         const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
         const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration - seconds);
-        ss << " " << std::put_time(&tm, kFileNamePrefixTimeFormat) << " " << micros.count();
+        ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << micros.count();
 
         const auto cache_dir = _slot.getRecordCachePath();
         if (!IndexManager::ensureDirectoryExist(cache_dir, this->ctxRef()))
@@ -199,16 +202,12 @@ private:
         auto fmt = std::string(this->settings().second.format);
         std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
         _cache_file_info.path
-            = cache_dir / (std::string(this->settings().second.file_name_prefix) + ss.str() + "." + fmt);
+            = cache_dir / (std::string(this->settings().second.file_name_prefix) + ss.str() + '.' + fmt);
 
         VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "Initialized writer with 1st level directory '",
             _cache_file_info.first_level_dir_name, "', cache file path '", _cache_file_info.path, "'");
         return true;
     }
-
-private:
-    static inline constexpr const char *kFirstLevelDirNameTimeFormat = kStorageFirstLevelDirNameTimeFormat;
-    static inline constexpr const char *kFileNamePrefixTimeFormat = "%H-%M-%S";
 
 private:
     T &_slot;
@@ -224,7 +223,7 @@ public:
     template<typename... Args>
     CaptureAdaptedWriter(T &capture, std::shared_ptr<CaptureEvent> event, Args &&...args)
         : AdaptableWriter<CaptureAdaptedWriter<T>>(std::forward<Args>(args)...), _capture(capture),
-          _event(std::move(event)), _output_file_path()
+          _event(std::move(event)), _output_file_path(), _last_stats_time(std::chrono::steady_clock::time_point::min())
     {
         if (!_event)
             throw Exception("CaptureAdaptedWriter initialized with null event");
@@ -233,6 +232,12 @@ public:
         {
             this->setEventStatus(WriteEvent::Status::Failed);
             throw Exception("CaptureAdaptedWriter initialized with empty output file name");
+        }
+
+        if (!isRemainSpaceEnough())
+        {
+            this->setEventStatus(WriteEvent::Status::Failed);
+            throw Exception("CaptureAdaptedWriter detected insufficient remaining space");
         }
 
         if (!IndexManager::ensureDirectoryExist(_event->output_directory, this->ctxRef()))
@@ -275,13 +280,44 @@ protected:
 
     inline bool shouldContinueWritingImpl() const noexcept
     {
-        return _capture.shouldContinueWriting();
+        return _capture.shouldContinueWriting() && isRemainSpaceEnough();
+    }
+
+private:
+    bool isRemainSpaceEnough() const noexcept
+    {
+        if (auto now = std::chrono::steady_clock::now(); now - _last_stats_time < std::chrono::minutes(1))
+            return true;
+        else
+            _last_stats_time = now;
+
+        {
+            struct statvfs stat;
+            if (auto ret = ::statvfs(_event->output_directory.c_str(), &stat); ret != 0)
+            {
+                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                    "CaptureAdaptedWriter failed to get filesystem stats for path: ", _event->output_directory,
+                    ", code: ", ret);
+                return false;
+            }
+            const auto free_bytes = stat.f_bavail * stat.f_frsize;
+            const auto required_bytes = this->settings().second.watermarks.critical_remain_bytes;
+            if (free_bytes < required_bytes)
+            {
+                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                    "CaptureAdaptedWriter detected insufficient remaining space for path: ", _event->output_directory,
+                    ", free bytes: ", free_bytes, ", required bytes: ", required_bytes);
+                return false;
+            }
+            return true;
+        }
     }
 
 private:
     T &_capture;
     std::shared_ptr<CaptureEvent> _event;
     std::filesystem::path _output_file_path;
+    mutable std::chrono::steady_clock::time_point _last_stats_time;
 };
 
 // - MARK: Image Writer

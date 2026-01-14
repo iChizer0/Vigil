@@ -1035,10 +1035,16 @@ struct CaptureEvent
     const std::shared_ptr<WriteEvent> event;
     const std::string file_name;
 
-    CaptureEvent(const std::filesystem::path &od, FileWriterSettings &&fws, std::shared_ptr<WriteEvent> evt,
-        const std::string &fn)
-        : output_directory(od), settings(std::move(fws)), event(evt), file_name(fn)
+    CaptureEvent(const std::filesystem::path &od, const FileWriterSettings &fws, std::shared_ptr<WriteEvent> evt,
+        std::string fn)
+        : output_directory(od), settings(fws), event(std::move(evt)), file_name(std::move(fn))
     {
+        if (output_directory.empty())
+            throw Exception("Output directory cannot be empty");
+        if (!event)
+            throw Exception("Write event cannot be null");
+        if (file_name.empty())
+            throw Exception("File name cannot be empty");
     }
 
     ~CaptureEvent() = default;

@@ -1,4 +1,5 @@
 #pragma once
+#include "nlohmann/json_fwd.hpp"
 #ifndef VIGIL_ENDPOINTS_HPP
 #define VIGIL_ENDPOINTS_HPP
 
@@ -671,7 +672,7 @@ private:
 private:
     mutable std::shared_ptr<Context> _ctx;
 
-    std::atomic<bool> _rule_stop_token;
+    alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _rule_stop_token;
     std::unique_ptr<std::thread> _rule_thread;
 
     mutable std::shared_mutex _schedule_rule_mutex;
@@ -900,6 +901,10 @@ public:
     {
         if (!_ctx)
             throw Exception("Context pointer cannot be null in CaptureEndpoint");
+
+        _capture_thread = std::make_unique<std::thread>(&CaptureEndpoint::captureThreadTask, this);
+        if (!_capture_thread)
+            throw Exception("Failed to create capture thread in CaptureEndpoint");
     }
 
     ~CaptureEndpoint() noexcept
@@ -918,10 +923,141 @@ public:
         }
     }
 
+    nlohmann::json getCaptureStatus() const
+    {
+        auto res_j = nlohmann::json::object();
+        vg_sta_e ret = 0;
+
+        auto get_capture_status = [&]() -> CaptureStatus {
+            const std::shared_lock lock(_event_mutex);
+            return { _event_current, _event_last };
+        };
+
+        try
+        {
+            auto evt = get_capture_status();
+            evt.to(res_j, *_ctx);
+        }
+        catch (const std::exception &e)
+        {
+            res_j.clear();
+            ret = ret != 0 ? ret : ENOENT;
+            res_j["code"] = static_cast<int>(ret == 0 ? 0 : (kEndpointErrorBase + std::abs(ret)));
+            res_j["message"] = e.what();
+        }
+
+        return res_j;
+    }
+
+    nlohmann::json doStartCapture(const nlohmann::json &j)
+    {
+        auto res_j = nlohmann::json::object();
+        vg_sta_e ret = 0;
+
+        try
+        {
+            const std::unique_lock lock(_event_mutex);
+            if (_event_current)
+            {
+                ret = EBUSY;
+                throw Exception("Capture is already in progress");
+            }
+
+            const auto config = CaptureConfig(j, *_ctx);
+            _event_current = getCaptureEvent(config);
+        }
+        catch (const std::exception &e)
+        {
+            res_j.clear();
+            ret = ret != 0 ? ret : EINVAL;
+            res_j["message"] = e.what();
+        }
+        res_j["code"] = static_cast<int>(ret == 0 ? 0 : (kEndpointErrorBase + std::abs(ret)));
+
+        return res_j;
+    }
+
+    nlohmann::json doStopCapture()
+    {
+        auto res_j = nlohmann::json::object();
+        vg_sta_e ret = 0;
+
+        try
+        {
+            const std::unique_lock lock(_event_mutex);
+            if (!_event_current)
+            {
+                ret = ENOENT;
+                throw Exception("No ongoing capture to stop");
+            }
+            if (auto exp = false;
+                !_finish_current_capture.compare_exchange_strong(exp, true, std::memory_order_acq_rel))
+            {
+                ret = EALREADY;
+                throw Exception("Capture stopping is already in progress");
+            }
+        }
+        catch (const std::exception &e)
+        {
+            res_j.clear();
+            ret = ret != 0 ? ret : EINVAL;
+            res_j["message"] = e.what();
+        }
+        res_j["code"] = static_cast<int>(ret == 0 ? 0 : (kEndpointErrorBase + std::abs(ret)));
+
+        return res_j;
+    }
+
 private:
     static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);
 
 private:
+    std::shared_ptr<CaptureEvent> getCaptureEvent(const CaptureConfig &config) const
+    {
+        {
+            if (!config.output_directory.is_absolute())
+                throw Exception("Capture output directory must be an absolute path");
+            auto ods = config.output_directory.string();
+            if (!ods.starts_with(kStorageMountBasePath))
+                throw Exception("Capture output directory must be under storage mount base path '"
+                                + std::string(kStorageMountBasePath) + "'");
+            if (_ctx->c_api.storage.internal_mount_point && !ods.starts_with(_ctx->c_api.storage.internal_mount_point))
+                throw Exception("Capture output directory must be under internal storage mount point '"
+                                + std::string(_ctx->c_api.storage.internal_mount_point) + "'");
+        }
+
+        const auto steady_now = std::chrono::steady_clock::now();
+        const auto system_now = std::chrono::system_clock::now();
+
+        auto write_event = std::make_shared<WriteEvent>(steady_now,
+            static_cast<int64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(system_now.time_since_epoch()).count()));
+
+        std::string file_name;
+        {
+            std::stringstream ss;
+            ss << std::string(config.settings.file_name_prefix);
+
+            const auto local_time = LocalTime(system_now);
+            auto tm = local_time.tm();
+            ss << ' ' << std::put_time(&tm, kStorageFirstLevelDirNameTimeFormat);
+
+            const auto duration = steady_now.time_since_epoch();
+            const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
+            const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration - seconds);
+            ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << micros.count();
+
+            auto fmt = std::string(config.settings.format);
+            std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
+            ss << '.' << fmt;
+
+            file_name = ss.str();
+        }
+
+        return std::make_shared<CaptureEvent>(config.output_directory, config.settings, std::move(write_event),
+            std::move(file_name));
+    }
+
     void captureThreadTask() noexcept
     {
         while (!_capture_stop_token.load(std::memory_order_relaxed))
@@ -948,12 +1084,14 @@ private:
 private:
     mutable std::shared_ptr<Context> _ctx;
 
-    std::atomic<bool> _capture_stop_token;
+    alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _capture_stop_token = false;
     std::unique_ptr<std::thread> _capture_thread;
 
-    std::shared_mutex _event_mutex;
-    std::shared_ptr<CaptureEvent> _event_current;
-    std::shared_ptr<CaptureEvent> _event_last;
+    mutable std::shared_mutex _event_mutex;
+    std::shared_ptr<CaptureEvent> _event_current = nullptr;
+    std::shared_ptr<CaptureEvent> _event_last = nullptr;
+
+    alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _finish_current_capture = false;
 };
 
 } // namespace vigil::endpoints
