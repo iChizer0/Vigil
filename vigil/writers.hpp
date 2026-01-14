@@ -9,6 +9,7 @@
 #include <ctime>
 #include <filesystem>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -73,6 +74,11 @@ public:
     inline std::deque<MediaFrame> &mediaQueue() noexcept
     {
         return static_cast<T *>(this)->mediaQueueImpl();
+    }
+
+    inline bool shouldFinishWriting() const noexcept
+    {
+        return static_cast<const T *>(this)->shouldFinishWritingImpl();
     }
 
     inline bool shouldContinueWriting() const noexcept
@@ -160,6 +166,11 @@ protected:
         return _cache_file_info.path;
     }
 
+    inline bool shouldFinishWritingImpl() const noexcept
+    {
+        return false;
+    }
+
     inline bool shouldContinueWritingImpl() const noexcept
     {
         return this->ctxRef().shared_writer_settings.getRevision() == this->settings().first && _slot.isReadyToWrite();
@@ -202,6 +213,75 @@ private:
 private:
     T &_slot;
     CacheFileInfo _cache_file_info;
+};
+
+// - MARK: Capture Adapted Writer
+
+template<typename T>
+class CaptureAdaptedWriter: public AdaptableWriter<CaptureAdaptedWriter<T>>
+{
+public:
+    template<typename... Args>
+    CaptureAdaptedWriter(T &capture, std::shared_ptr<CaptureEvent> event, Args &&...args)
+        : AdaptableWriter<CaptureAdaptedWriter<T>>(std::forward<Args>(args)...), _capture(capture),
+          _event(std::move(event)), _output_file_path()
+    {
+        if (!_event)
+            throw Exception("CaptureAdaptedWriter initialized with null event");
+
+        if (_event->file_name.empty())
+        {
+            this->setEventStatus(WriteEvent::Status::Failed);
+            throw Exception("CaptureAdaptedWriter initialized with empty output file name");
+        }
+
+        if (!IndexManager::ensureDirectoryExist(_event->output_directory, this->ctxRef()))
+        {
+            this->setEventStatus(WriteEvent::Status::Failed);
+            throw Exception(
+                "CaptureAdaptedWriter failed to ensure output directory exists: " + _event->output_directory.string());
+        }
+
+        _output_file_path = _event->output_directory / _event->file_name;
+    }
+
+    virtual ~CaptureAdaptedWriter() noexcept
+    {
+        _capture.handleCompletedCaptureEvent(_event);
+    }
+
+protected:
+    friend AdaptableWriter<CaptureAdaptedWriter<T>>;
+
+    inline std::mutex &mediaMutexImpl() const noexcept
+    {
+        return this->ctxRef().capture_media_buffer.mutex;
+    }
+
+    inline std::deque<MediaFrame> &mediaQueueImpl() noexcept
+    {
+        return this->ctxRef().capture_media_buffer.queue;
+    }
+
+    inline std::filesystem::path getFilePathImpl() const noexcept
+    {
+        return _output_file_path;
+    }
+
+    inline bool shouldFinishWritingImpl() const noexcept
+    {
+        return _capture.shouldFinishWriting();
+    }
+
+    inline bool shouldContinueWritingImpl() const noexcept
+    {
+        return _capture.shouldContinueWriting();
+    }
+
+private:
+    T &_capture;
+    std::shared_ptr<CaptureEvent> _event;
+    std::filesystem::path _output_file_path;
 };
 
 // - MARK: Image Writer
@@ -351,7 +431,8 @@ private:
     inline bool isClipFinished() noexcept
     {
         if (!_is_clip_finish)
-            _is_clip_finish = (std::chrono::steady_clock::now() - this->startTime()) >= _video_clip_length;
+            _is_clip_finish = this->shouldFinishWriting()
+                              || ((std::chrono::steady_clock::now() - this->startTime()) >= _video_clip_length);
         return _is_clip_finish;
     }
 

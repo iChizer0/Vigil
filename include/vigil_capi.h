@@ -114,6 +114,11 @@ vg_sta_e vg_http_api_storage_config_post(const vg_http_api_request_t *request, v
 vg_sta_e vg_http_api_storage_status_get(vg_http_api_response_t *response);
 vg_sta_e vg_http_api_storage_control_post(const vg_http_api_request_t *request, vg_http_api_response_t *response);
 
+// Capture Endpoint APIs
+vg_sta_e vg_http_api_capture_status_get(vg_http_api_response_t *response);
+vg_sta_e vg_http_api_capture_start_post(const vg_http_api_request_t *request, vg_http_api_response_t *response);
+vg_sta_e vg_http_api_capture_stop_post(const vg_http_api_request_t *request, vg_http_api_response_t *response);
+
 #ifdef __cplusplus
 }
 #endif

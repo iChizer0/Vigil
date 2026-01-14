@@ -26,6 +26,7 @@
 #include "status.hpp"
 #include "storage.hpp"
 #include "types.hpp"
+#include "writers.hpp"
 
 namespace vigil::endpoints {
 
@@ -203,13 +204,19 @@ public:
             throw Exception("Failed to create rule evaluation thread in RuleEndpoint");
     }
 
-    ~RuleEndpoint()
+    ~RuleEndpoint() noexcept
     {
-        if (_rule_thread)
+        try
         {
-            _rule_stop_token.store(true, std::memory_order_release);
-            _rule_thread->join();
-            _rule_thread.reset();
+            if (_rule_thread)
+            {
+                _rule_stop_token.store(true, std::memory_order_release);
+                _rule_thread->join();
+                _rule_thread.reset();
+            }
+        }
+        catch (...)
+        {
         }
     }
 
@@ -882,6 +889,71 @@ private:
 
     // Config store
     std::unique_ptr<ConfigStore> _storage_config_store;
+};
+
+// - MARK: Capture Endpoint
+
+class CaptureEndpoint final
+{
+public:
+    CaptureEndpoint(std::shared_ptr<Context> ctx) : _ctx(std::move(ctx))
+    {
+        if (!_ctx)
+            throw Exception("Context pointer cannot be null in CaptureEndpoint");
+    }
+
+    ~CaptureEndpoint() noexcept
+    {
+        try
+        {
+            if (_capture_thread)
+            {
+                _capture_stop_token.store(true, std::memory_order_release);
+                _capture_thread->join();
+                _capture_thread.reset();
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+private:
+    static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);
+
+private:
+    void captureThreadTask() noexcept
+    {
+        while (!_capture_stop_token.load(std::memory_order_relaxed))
+        {
+            const auto start = std::chrono::steady_clock::now();
+            try
+            {
+                captureTaskLoop();
+            }
+            catch (std::exception &e)
+            {
+                VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Exception in capture task loop: ", e.what());
+            }
+            if (auto duration = std::chrono::steady_clock::now() - start; duration < kWriterProbeInterval)
+                std::this_thread::sleep_for(kWriterProbeInterval - duration);
+        }
+    }
+
+    void captureTaskLoop()
+    {
+        // Event capturing logic here
+    }
+
+private:
+    mutable std::shared_ptr<Context> _ctx;
+
+    std::atomic<bool> _capture_stop_token;
+    std::unique_ptr<std::thread> _capture_thread;
+
+    std::shared_mutex _event_mutex;
+    std::shared_ptr<CaptureEvent> _event_current;
+    std::shared_ptr<CaptureEvent> _event_last;
 };
 
 } // namespace vigil::endpoints

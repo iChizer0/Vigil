@@ -1030,10 +1030,10 @@ struct GPIOHelpers final
 
 struct CaptureEvent
 {
-    std::filesystem::path output_directory;
-    FileWriterSettings settings;
-    std::shared_ptr<WriteEvent> event;
-    std::string file_name;
+    const std::filesystem::path output_directory;
+    const FileWriterSettings settings;
+    const std::shared_ptr<WriteEvent> event;
+    const std::string file_name;
 
     CaptureEvent(const std::filesystem::path &od, FileWriterSettings &&fws, std::shared_ptr<WriteEvent> evt,
         const std::string &fn)
