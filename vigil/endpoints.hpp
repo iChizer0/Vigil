@@ -1103,9 +1103,11 @@ private:
         switch (event->settings.type)
         {
             case FileWriterSettings::CaptureType::Image:
+                _ctx->capture_media_buffer.clearToLastKeyFrame();
                 return std::make_unique<ImageWriter<CaptureAdaptedWriter<CaptureEndpoint>>>(std::ref(*this), event,
                     std::ref(*_ctx), FileWriterSettingsWithRevision { 0, event->settings }, event->event);
             case FileWriterSettings::CaptureType::Video:
+                _ctx->capture_media_buffer.clearToLastKeyFrame();
                 return std::make_unique<VideoWriter<CaptureAdaptedWriter<CaptureEndpoint>>>(std::ref(*this), event,
                     std::ref(*_ctx), FileWriterSettingsWithRevision { 0, event->settings }, event->event);
             default:

@@ -276,6 +276,22 @@ struct Context
             queue.clear();
         }
 
+        void clearToLastKeyFrame() noexcept
+        {
+            const std::unique_lock lock(mutex);
+            auto s = queue.rbegin();
+            auto e = queue.rend();
+            for (; s != e; ++s)
+            {
+                if (s->isKeyFrame())
+                {
+                    ++s;
+                    break;
+                }
+            }
+            queue.erase(queue.begin(), s.base());
+        }
+
         template<typename T, std::enable_if_t<std::is_same_v<std::remove_cvref_t<T>, MediaFrame>, bool> = true>
         void enqueue(T &&frame) noexcept
         {
