@@ -288,7 +288,7 @@ protected:
 private:
     bool isRemainSpaceEnough() const noexcept
     {
-        if (auto now = std::chrono::steady_clock::now(); now - _last_stats_time < std::chrono::minutes(1))
+        if (auto now = std::chrono::steady_clock::now(); now - _last_stats_time < std::chrono::minutes(1)) [[likely]]
             return true;
         else
             _last_stats_time = now;
