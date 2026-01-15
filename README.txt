@@ -1,5 +1,7 @@
 [Vigil]
-    A C/C++ library for event-driven media capture and recording on embedded IPC (IP Camera) systems. It provides a rule-based engine to trigger video/audio recording and image capture based on various inputs such as inference results, GPIO signals, TTY events, timers, schedules, and HTTP requests.
+    A C/C++ library for event-driven media capture and recording on embedded IPC (IP Camera) systems which
+    provides a rule-based engine to trigger video/audio recording and image capture based on various inputs
+    such as inference results, GPIO signals, TTY events, timers, schedules, and HTTP requests.
 
 [Requirements]
     - C++20 compatible compiler
