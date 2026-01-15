@@ -126,6 +126,7 @@ digraph G {
       ctrl_rule_enabled [label="rule_enabled\nstd::atomic<bool>", shape=note];
       ctrl_infer_subs [label="inference_subscribers\nstd::atomic<int>", shape=note];
       ctrl_media_paused [label="media_paused\nstd::atomic<bool>", shape=note];
+      ctrl_writers_active [label="media_writers_active\nstd::atomic<size_t>", shape=note];
     }
 
     subgraph cluster_ctx_queues {
@@ -279,7 +280,8 @@ digraph G {
   // Service API → Core Context
   svc_core -> vigil_svc [color=blue, xlabel="create/destroy"];
   svc_media -> slot_media_buf [color=blue, xlabel="enqueue", lhead=cluster_ctx_queues];
-  svc_media -> ctrl_media_paused [color=blue, lhead=cluster_ctx_control];
+  svc_media -> ctrl_media_paused [color=blue, xlabel="suspend/resume"];
+  svc_media -> ctrl_writers_active [color=blue, xlabel="wait active=0"];
   svc_infer -> infer_q [color=blue, xlabel="enqueue"];
 
   // ============================================================
@@ -371,6 +373,9 @@ digraph G {
   capture_adapter -> video_writer [color=gray, style=dotted];
   writer_thread -> image_writer [color=orange, style=dashed];
   writer_thread -> video_writer [color=orange, style=dashed];
+
+  // VideoWriter tracks active writers count
+  video_writer -> ctrl_writers_active [color=blue, xlabel="inc/dec"];
 
   // ============================================================
   // EDGES: Capture Endpoint Relationships
