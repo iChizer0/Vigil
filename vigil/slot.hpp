@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -54,9 +55,7 @@ public:
           _internal(internal), _data_dir_name(data_dir_name), _info_mutex(), _label(), _uuid(), _type(), _mutex(),
           _op_mutex(), _stop_token(false), _manager_thread(nullptr), _writer_thread(nullptr), _state(SlotState::Error),
           _stats(), _quota_limit_bytes(0), _quota_rotate(false), _index_manager(_ctx, _mount_path / _data_dir_name),
-          _write_stats(), _writer_task(nullptr),
-          _writer_task_stop_token(_ctx.media_paused.load(std::memory_order_acquire)), _writer_task_count(0),
-          _relay(ctx, _mount_path / _data_dir_name)
+          _writer_task_count(0), _write_stats(), _relay(ctx, _mount_path / _data_dir_name)
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Creating storage slot for device path ", _dev_path, " at mount path ",
             _mount_path, ", removable: ", _removable ? "true" : "false");
@@ -107,7 +106,7 @@ public:
 
     inline bool isReadyToWrite() const
     {
-        return !_writer_task_stop_token.load(std::memory_order_acquire)
+        return !_stop_token.load(std::memory_order_acquire)
                && _state.load(std::memory_order_acquire) == SlotState::Ready;
     }
 
@@ -175,7 +174,6 @@ public:
         resetWriteCacheUnsafe();
 
         _stop_token.store(false, std::memory_order_release);
-        _writer_task_stop_token.store(false, std::memory_order_release);
         try
         {
             // Launch manager thread
@@ -191,9 +189,6 @@ public:
                 _dev_path, ": ", e.what());
             return EFAULT;
         }
-
-        // Resume write operations (skip status check)
-        resumeWrite(true);
 
         // Attach slot check callback (single slot only)
         {
@@ -223,13 +218,7 @@ public:
         if (ret = disableNginxRelay(); ret != 0)
             goto l_disable_fail;
 
-        // Remove all write handlers
-        if (ret = suspendWrite(true); ret != 0)
-            goto l_disable_fail;
-
-        _writer_task_stop_token.store(true, std::memory_order_release);
         _stop_token.store(true, std::memory_order_release);
-
         try
         {
             if (_writer_thread)
@@ -268,39 +257,6 @@ public:
         VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to disable storage slot for device path ", _dev_path,
             ", code: ", ret);
         return ret;
-    }
-
-    vg_sta_e suspendWrite(bool wait = true) noexcept
-    {
-        auto stop_requested = _writer_task_stop_token.load(std::memory_order_acquire);
-        while (!stop_requested)
-        {
-            if (_writer_task_stop_token.compare_exchange_weak(stop_requested, true, std::memory_order_acq_rel,
-                    std::memory_order_acquire))
-                break;
-        }
-        if (wait)
-        {
-            while (_writer_task_count.load(std::memory_order_acquire) > 0)
-                std::this_thread::yield(); // Wait for writers to finish
-            return 0;
-        }
-
-        return _writer_task_count.load(std::memory_order_acquire) > 0 ? EAGAIN : 0;
-    }
-
-    vg_sta_e resumeWrite(bool reset_media_queue = true) noexcept
-    {
-        if (reset_media_queue)
-            _ctx.clearMediaBuffer();
-        auto stop_requested = _writer_task_stop_token.load(std::memory_order_acquire);
-        while (stop_requested)
-        {
-            if (_writer_task_stop_token.compare_exchange_weak(stop_requested, false, std::memory_order_acq_rel,
-                    std::memory_order_acquire))
-                break;
-        }
-        return 0;
     }
 
     vg_sta_e setQuotaLimitBytes(FileSize bytes)
@@ -397,7 +353,7 @@ protected:
         return _ctx;
     }
 
-    inline std::atomic<int> &writerCountRef()
+    inline std::atomic<size_t> &writerCountRef()
     {
         return _writer_task_count;
     }
@@ -626,16 +582,11 @@ private:
 
     void writerThreadTask()
     {
-        _ctx.shared_rule_event.reset(WriteEvent::Status::Canceled); // Clear any existing rule event at start
-        while (!_stop_token.load(std::memory_order_acquire))
-        {
-            // If already has a writer, check if it is finished
-            if (_writer_task)
+        auto handle_write = [this](SlotAdaptedWriter<Slot> &writer) -> bool {
+            const auto result = writer.operator()();
+            const auto end = writer.endTime();
+            if (result)
             {
-                const auto result = _writer_task->operator()();
-                const auto end = _writer_task->endTime();
-                _writer_task.reset();
-                _ctx.shared_rule_event.reset(result->status); // Clear processed event with final status
                 if (result->status != WriteEvent::Status::Interrupted)
                 {
                     do
@@ -643,12 +594,21 @@ private:
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                         std::this_thread::yield();
                         if (_stop_token.load(std::memory_order_acquire))
-                            return; // Stop requested or storage is ejected
+                        {
+                            _ctx.shared_rule_event.reset(result->status);
+                            return false; // Stop requested
+                        }
                     }
                     while (std::chrono::steady_clock::now() < end);
                 }
+                _ctx.shared_rule_event.reset(result->status);
             }
+            return true; // Continue
+        };
 
+        _ctx.shared_rule_event.reset(WriteEvent::Status::Canceled); // Clear any existing rule event at start
+        while (!_stop_token.load(std::memory_order_acquire))
+        {
             std::shared_ptr<WriteEvent> event = nullptr;
             const auto start = std::chrono::steady_clock::now();
             const auto [rev, settings] = _ctx.shared_writer_settings.get();
@@ -696,12 +656,16 @@ private:
                     switch (settings->type)
                     {
                         case FileWriterSettings::CaptureType::Image:
-                            _writer_task = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), rev,
-                                std::ref(_ctx), std::move(settings), std::move(event));
+                            if (auto writer = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
+                                    rev, std::ref(_ctx), std::move(settings), std::move(event));
+                                writer && !handle_write(*writer))
+                                return;
                             break;
                         case FileWriterSettings::CaptureType::Video:
-                            _writer_task = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), rev,
-                                std::ref(_ctx), std::move(settings), std::move(event));
+                            if (auto writer = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
+                                    rev, std::ref(_ctx), std::move(settings), std::move(event));
+                                writer && !handle_write(*writer))
+                                return;
                             break;
                         default: {
                             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
@@ -1269,14 +1233,11 @@ private:
     // Index manager, e.g., 'YYYY-MM-DD' directories
     mutable IndexManager _index_manager;
 
+    // Writer task count
+    alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> _writer_task_count;
+
     // Write stats
     mutable WriteStats _write_stats;
-
-    // Writer task
-    std::unique_ptr<SlotAdaptedWriter<Slot>> _writer_task;
-    alignas(kHardwareDestructiveInterferenceSize) std::atomic<
-        bool> _writer_task_stop_token; // Controls whether new writes are allowed and current writes should stop
-    alignas(kHardwareDestructiveInterferenceSize) std::atomic<int> _writer_task_count;
 
     // Relay
     Relay _relay;

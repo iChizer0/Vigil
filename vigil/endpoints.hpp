@@ -874,16 +874,6 @@ public:
         return res_j;
     }
 
-    vg_sta_e suspendWrite(bool wait) noexcept
-    {
-        return _storage->suspendWrite(wait);
-    }
-
-    vg_sta_e resumeWrite(bool reset_media_queue) noexcept
-    {
-        return _storage->resumeWrite(reset_media_queue);
-    }
-
 private:
     mutable std::shared_ptr<Context> _ctx;
 

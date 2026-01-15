@@ -268,38 +268,6 @@ public:
         return slot ? slot->disableNginxRelay() : EPERM;
     }
 
-    vg_sta_e suspendWrite(bool wait) noexcept
-    {
-        vg_sta_e ret = 0;
-        std::unordered_map<std::string, std::shared_ptr<Slot>> slots;
-        const std::unique_lock lock(_ctx.media_pause_mutex);
-        _ctx.media_paused.store(true, std::memory_order_release);
-        {
-            const std::shared_lock lock(_slots_mutex);
-            slots = _slots;
-        }
-        for (const auto &[_, slot]: slots)
-            ret |= slot ? slot->suspendWrite(wait) : 0;
-        return ret;
-    }
-
-    vg_sta_e resumeWrite(bool reset_media_queue) noexcept
-    {
-        vg_sta_e ret = 0;
-        std::unordered_map<std::string, std::shared_ptr<Slot>> slots;
-        if (reset_media_queue)
-            _ctx.clearMediaBuffer();
-        const std::unique_lock lock(_ctx.media_pause_mutex);
-        _ctx.media_paused.store(false, std::memory_order_release);
-        {
-            const std::shared_lock lock(_slots_mutex);
-            slots = _slots;
-        }
-        for (const auto &[_, slot]: _slots)
-            ret |= slot ? slot->resumeWrite(false) : 0;
-        return ret;
-    }
-
 private:
     static bool isValidDevName(std::string_view name)
     {

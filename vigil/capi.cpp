@@ -129,10 +129,14 @@ vg_sta_e vg_media_scoped_suspend_write(bool wait)
     try
     {
         const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
-        const auto ret = vigil_instance->storageEndpoint().suspendWrite(wait);
-        if (ret == 0)
-            ++vigil_instance_scoped_suspend_count;
-        return ret;
+        {
+            auto &ctx = vigil_instance->context();
+            ctx.media_paused.store(true, std::memory_order_release);
+            while (wait && ctx.media_writers_active.load(std::memory_order_acquire) > 0)
+                std::this_thread::yield(); // Wait for writers to finish
+        }
+        ++vigil_instance_scoped_suspend_count;
+        return 0;
     }
     catch (const std::exception &e)
     {
@@ -151,11 +155,11 @@ vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue)
         const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
         if (vigil_instance_scoped_suspend_count == 1)
         {
-            if (vigil_instance->storageEndpoint().resumeWrite(reset_media_queue) == 0)
-            {
-                vigil_instance_scoped_suspend_count = 0;
-                return 0;
-            }
+            if (reset_media_queue)
+                vigil_instance->context().clearMediaBuffer();
+            vigil_instance->context().media_paused.store(false, std::memory_order_release);
+            vigil_instance_scoped_suspend_count = 0;
+            return 0;
         }
         else if (vigil_instance_scoped_suspend_count > 1)
         {

@@ -173,8 +173,8 @@ struct Context
     std::mutex inference_mutex;
     std::queue<InferenceResult> inference_queue;
     // Sync video/audio frame buffers, updated in enqueueMediaFrame()
-    std::mutex media_pause_mutex;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> media_paused = false;
+    alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> media_writers_active = 0;
     // Callback for slot status check (for HTTP rule)
     std::shared_mutex slot_check_mutex;
     std::pair<const void * /* owner */, std::function<bool(const void *)>> slot_check = { nullptr, nullptr };
@@ -240,7 +240,7 @@ struct Context
             if (!new_settings)
                 throw Exception("New FileWriterSettings is null.");
             const std::unique_lock lock(mutex);
-            if (settings != new_settings)
+            if (!settings || *settings != *new_settings)
             {
                 settings = new_settings;
                 revision.fetch_add(1, std::memory_order_release);
@@ -256,7 +256,7 @@ struct Context
         WaterMarks getWaterMarks() const noexcept
         {
             const std::shared_lock lock(mutex);
-            return settings->watermarks;
+            return settings ? settings->watermarks : WaterMarks::from("");
         }
 
         size_t getRevision() const noexcept

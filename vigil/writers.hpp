@@ -143,7 +143,6 @@ public:
             this->setEventStatus(WriteEvent::Status::Failed);
             throw Exception("SlotAdaptedWriter failed to initialize cache file paths and names");
         }
-
         _slot.writerCountRef().fetch_add(1, std::memory_order_acq_rel);
     }
 
@@ -379,12 +378,14 @@ public:
                             "write callback set");
         }
 
+        this->ctxRef().media_writers_active.fetch_add(1, std::memory_order_release);
         startWrite();
     }
 
     ~VideoWriter() override
     {
         endWrite();
+        this->ctxRef().media_writers_active.fetch_sub(1, std::memory_order_release);
     }
 
 private:
