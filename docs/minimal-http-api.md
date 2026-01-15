@@ -244,6 +244,7 @@ Get the current status of all storage slots.
             "sState": "READY", // String, human-readable state ("ERROR", "NOT_FORMATTED_OR_FORMAT_UNSUPPORTED", "FORMATTING", "NOT_MOUNTED", "MOUNTED", "CONFIGURED", "INDEXING", "READY")
             "iStatsSizeBytes": 1000000000, // Integer, total size
             "iStatsFreeBytes": 500000000, // Integer, free space
+            "iQuotaPreservedBytes": 0, // Integer, space preserved for system use
             "iQuotaLimitBytes": 100000000, // Integer
             "iQuotaUsedBytes": 10000000, // Integer|null if unknown
             "bQuotaRotate": true // Boolean

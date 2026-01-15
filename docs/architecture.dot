@@ -5,9 +5,15 @@ digraph G {
   compound=true;
   newrank=true;
   splines=ortho;
-  nodesep=0.6;
-  ranksep=1.0;
-  concentrate=true;
+  nodesep=0.5;
+  ranksep=0.9;
+
+  // ============================================================
+  // Rank Constraints for Vertical Layering
+  // ============================================================
+  { rank=same; app; http_client; }
+  { rank=same; svc_core; svc_media; svc_infer; http_rule; http_storage; http_capture; }
+  { rank=same; hal_media; hal_gpio; hal_storage; hal_basic; hal_tty; }
 
   // ============================================================
   // Client / Integration Layer
@@ -251,25 +257,27 @@ digraph G {
   // ============================================================
 
   // HTTP Client → Endpoint Controllers (sync, blue)
-  http_client -> rule_ep [color=blue, style=bold, lhead=cluster_rule_endpoint];
+  http_client -> rule_ep [color=blue, style=bold, weight=2, lhead=cluster_rule_endpoint];
   http_client -> storage_cfg_ep [color=blue, style=bold, lhead=cluster_storage_endpoint];
   http_client -> capture_status_ep [color=blue, style=bold, lhead=cluster_capture_endpoint];
 
   // Host App → Service C Interface (sync, blue)
-  app -> svc_core [color=blue, style=bold, lhead=cluster_service_api];
+  app -> svc_core [color=blue, style=bold, weight=3, lhead=cluster_service_api];
+  app -> svc_media [color=blue, style=bold, weight=2];
+  app -> svc_infer [color=blue, style=bold];
 
   // ============================================================
   // EDGES: Service API → Internal Components
   // ============================================================
 
   // Vigil Service owns endpoints and context
-  vigil_svc -> ctx [color=blue, xlabel="owns"];
-  vigil_svc -> rule_ep [color=blue, lhead=cluster_rule_endpoint];
+  vigil_svc -> ctx [color=blue, xlabel="owns", weight=3];
+  vigil_svc -> rule_ep [color=blue, weight=2, lhead=cluster_rule_endpoint];
   vigil_svc -> storage_cfg_ep [color=blue, lhead=cluster_storage_endpoint];
   vigil_svc -> capture_status_ep [color=blue, lhead=cluster_capture_endpoint];
 
   // HTTP API Bindings → Endpoint Controllers
-  http_rule -> rule_ep [color=blue, lhead=cluster_rule_endpoint];
+  http_rule -> rule_ep [color=blue, weight=2, lhead=cluster_rule_endpoint];
   http_storage -> storage_cfg_ep [color=blue, lhead=cluster_storage_endpoint];
   http_capture -> capture_status_ep [color=blue, lhead=cluster_capture_endpoint];
 
@@ -278,11 +286,11 @@ digraph G {
   storage_cfg_ep -> config_store [color=blue];
 
   // Service API → Core Context
-  svc_core -> vigil_svc [color=blue, xlabel="create/destroy"];
-  svc_media -> slot_media_buf [color=blue, xlabel="enqueue", lhead=cluster_ctx_queues];
+  svc_core -> vigil_svc [color=blue, xlabel="create/destroy", weight=3];
+  svc_media -> slot_media_buf [color=blue, xlabel="enqueue", weight=2, lhead=cluster_ctx_queues];
   svc_media -> ctrl_media_paused [color=blue, xlabel="suspend/resume"];
-  svc_media -> ctrl_writers_active [color=blue, xlabel="wait active=0"];
-  svc_infer -> infer_q [color=blue, xlabel="enqueue"];
+  svc_media -> ctrl_writers_active [color=blue, xlabel="wait"];
+  svc_infer -> infer_q [color=blue, xlabel="enqueue", weight=2];
 
   // ============================================================
   // EDGES: Endpoint Controllers → Internal Modules
@@ -303,22 +311,22 @@ digraph G {
   // EDGES: HAL Callbacks (invoked by Vigil internals)
   // ============================================================
 
-  image_writer -> hal_media [color=green, style=dashed, xlabel="image_capture_cb"];
+  image_writer -> hal_media [color=green, style=dashed, xlabel="image_capture_cb", minlen=2];
   video_writer -> hal_media [color=green, style=dashed, xlabel="video_file_*_cb"];
-  rule_gpio -> hal_gpio [color=green, style=dashed, xlabel="acquire/release"];
-  storage -> hal_storage [color=green, style=dashed, xlabel="mount/unmount"];
+  rule_gpio -> hal_gpio [color=green, style=dashed, xlabel="acquire/release", minlen=2];
+  storage -> hal_storage [color=green, style=dashed, xlabel="mount/unmount", minlen=2];
   ctx -> hal_basic [color=green, style=dashed, xlabel="log/events"];
-  rule_tty -> hal_tty [color=green, style=dashed, xlabel="socket path"];
+  rule_tty -> hal_tty [color=green, style=dashed, xlabel="socket path", minlen=2];
 
   // ============================================================
   // EDGES: Context Internal Relationships
   // ============================================================
 
-  ctx -> shared_time [color=blue, xlabel="tick()"];
-  ctx -> ctrl_rule_enabled [color=blue];
+  ctx -> shared_time [color=blue, xlabel="tick()", weight=2];
+  ctx -> ctrl_rule_enabled [color=blue, weight=2];
   ctx -> ctrl_infer_subs [color=blue];
-  infer_q -> shared_infer_result [color=orange, style=dashed, xlabel="pop & move"];
-  rule_thread -> ctx [color=blue, xlabel="tick()"];
+  infer_q -> shared_infer_result [color=orange, style=dashed, xlabel="pop & move", weight=2];
+  rule_thread -> ctx [color=blue, xlabel="tick()", weight=3];
   rule_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="tryUpdateRuleEvent()"];
 
   // ============================================================
@@ -352,30 +360,30 @@ digraph G {
   // EDGES: Async/Queue Data Flow (orange dashed)
   // ============================================================
 
-  slot_media_buf -> slot_adapter [color=orange, style=dashed, xlabel="frames"];
-  capture_media_buf -> capture_adapter [color=orange, style=dashed, xlabel="frames"];
-  shared_rule_evt -> writer_thread [color=orange, style=dashed, xlabel="getCurrent()"];
-  writer_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="reset()"];
+  slot_media_buf -> slot_adapter [color=orange, style=dashed, xlabel="frames", weight=2];
+  capture_media_buf -> capture_adapter [color=orange, style=dashed, xlabel="frames", weight=2];
+  shared_rule_evt -> writer_thread [color=orange, style=dashed, xlabel="getCurrent()", weight=2];
+  writer_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="reset()", constraint=false];
 
   // Writer thread reads shared settings
   writer_thread -> shared_writer_cfg [color=blue, xlabel="get()"];
-  writer_thread -> ctrl_media_paused [color=blue];
+  writer_thread -> ctrl_media_paused [color=blue, xlabel="check"];
 
   // ============================================================
   // EDGES: Writer Framework Relationships
   // ============================================================
 
-  writer_base -> slot_adapter [color=gray, style=dotted, xlabel="CRTP"];
-  writer_base -> capture_adapter [color=gray, style=dotted];
+  writer_base -> slot_adapter [color=gray, style=dotted, xlabel="CRTP", weight=2];
+  writer_base -> capture_adapter [color=gray, style=dotted, weight=2];
   slot_adapter -> image_writer [color=gray, style=dotted];
-  slot_adapter -> video_writer [color=gray, style=dotted];
+  slot_adapter -> video_writer [color=gray, style=dotted, weight=2];
   capture_adapter -> image_writer [color=gray, style=dotted];
   capture_adapter -> video_writer [color=gray, style=dotted];
   writer_thread -> image_writer [color=orange, style=dashed];
-  writer_thread -> video_writer [color=orange, style=dashed];
+  writer_thread -> video_writer [color=orange, style=dashed, weight=2];
 
   // VideoWriter tracks active writers count
-  video_writer -> ctrl_writers_active [color=blue, xlabel="inc/dec"];
+  video_writer -> ctrl_writers_active [color=blue, xlabel="inc/dec", minlen=2];
 
   // ============================================================
   // EDGES: Capture Endpoint Relationships
@@ -397,24 +405,24 @@ digraph G {
   // EDGES: Storage Internal Relationships
   // ============================================================
 
-  storage -> slot_state [color=blue, xlabel="lifecycle"];
-  slot_state -> slot_ops [color=blue];
+  storage -> slot_state [color=blue, xlabel="lifecycle", weight=3];
+  slot_state -> slot_ops [color=blue, weight=2];
   slot_ops -> slot_quota [color=blue, xlabel="quota check"];
-  slot_quota -> indexer [color=blue, xlabel="usage query"];
-  indexer -> write_stats [color=blue];
-  slot_quota -> indexer [color=orange, style=dashed, xlabel="rotate"];
+  slot_quota -> indexer [color=blue, xlabel="usage query", weight=2];
+  indexer -> write_stats [color=blue, weight=2];
+  slot_quota -> indexer [color=orange, style=dashed, xlabel="rotate", constraint=false];
 
   // Slot owns writer thread
-  slot_ops -> writer_thread [color=blue, xlabel="spawn"];
-  slot_ops -> slot_writer [color=blue];
+  slot_ops -> writer_thread [color=blue, xlabel="spawn", weight=2];
+  slot_ops -> slot_writer [color=blue, weight=2];
 
   // Storage → Filesystem
-  slot_ops -> fs [color=blue, xlabel="mount/format"];
+  slot_ops -> fs [color=blue, xlabel="mount/format", weight=2];
   indexer -> fs [color=blue, xlabel="file ops"];
 
   // Relay relationships
   slot_ops -> relay [color=blue, xlabel="enable/disable"];
-  relay -> http_client [color=blue, xlabel="file fetch"];
+  relay -> http_client [color=blue, xlabel="file fetch", minlen=3, constraint=false];
 
   // ============================================================
   // Legend

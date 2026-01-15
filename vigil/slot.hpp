@@ -148,6 +148,7 @@ public:
             .writing = isWriting(),
             .state = state,
             .stats = _stats.load(std::memory_order_acquire),
+            .quota_preserved_bytes = isInternal() ? static_cast<FileSize>(kStorageMinFileSystemFreeBytesInternal) : 0,
             .quota_used_bytes = quota_used,
             .quota_limit_bytes = _quota_limit_bytes.load(std::memory_order_acquire),
             .quota_rotate = _quota_rotate.load(std::memory_order_acquire),
