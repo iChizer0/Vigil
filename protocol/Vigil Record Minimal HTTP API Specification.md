@@ -1,8 +1,8 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2026-01-14
-Version: 1.4.0
+Revised: 2026-01-15
+Version: 1.4.1
 
 ## Rule API
 
@@ -319,7 +319,7 @@ The Capture API provides manual control over media capture, independent of the r
 
 ### Capture Status
 
-Get the current capture status including any ongoing and last completed capture.
+Get the current capture status.
 
 **Path:** `.../vigil/capture/status`
 
@@ -329,22 +329,15 @@ Get the current capture status including any ongoing and last completed capture.
 
 ```json
 {
-    "dCurrent": { // Object|null, present only if a capture is in progress
+    "bReadyToStartNew": false, // Boolean, true if no capture is in progress and a new one can be started
+    "dLastCapture": { // Object|null, current capture if in progress, otherwise last completed capture
         "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
         "sFormat": "MP4", // String, capture format ("MP4", "JPG", "RAW")
         "iVideoClipLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
         "sStatus": "WRITING", // String, write event status ("PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", "UNKNOWN")
-        "sTimepoint": 1736870400000000000, // String, steady clock timepoint (nanoseconds since epoch)
+        "sTimepoint": 1736870400000000000, // Integer, steady clock timepoint (nanoseconds since epoch)
         "iTimestamp": 1736870400000, // Integer, Unix timestamp in milliseconds
-        "sFileName": "CAP 20260114 143000 123456.mp4" // String, generated file name
-    },
-    "dLast": { // Object|null, present only if a previous capture exists
-        "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
-        "sFormat": "JPG", // String, capture format
-        "sStatus": "COMPLETED", // String, write event status
-        "sTimepoint": 1736866800000000000, // String, steady clock timepoint
-        "iTimestamp": 1736866800000, // Integer, Unix timestamp in milliseconds
-        "sFileName": "CAP 20260114 133000 654321.jpg" // String, generated file name
+        "sFileName": "CAP20260114 143000 123456.mp4" // String, generated file name
     }
 }
 ```
