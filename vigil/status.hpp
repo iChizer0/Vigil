@@ -132,27 +132,27 @@ struct GPIOPinStatus
 
 struct CaptureStatus
 {
-    std::shared_ptr<CaptureEvent> current;
-    std::shared_ptr<CaptureEvent> last;
+    bool ready_to_start_new;
+    std::shared_ptr<CaptureEvent> capture;
 
-    CaptureStatus(std::shared_ptr<CaptureEvent> current_evt, std::shared_ptr<CaptureEvent> last_evt)
-        : current(std::move(current_evt)), last(std::move(last_evt))
+    CaptureStatus(bool ready, std::shared_ptr<CaptureEvent> capture_evt)
+        : ready_to_start_new(ready), capture(std::move(capture_evt))
     {
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
         auto fmt_event = [](const std::shared_ptr<CaptureEvent> &evt) -> std::optional<nlohmann::json> {
-            if (!evt)
+            if (!evt || !evt->settings)
                 return std::nullopt;
 
             auto ej = nlohmann::json::object();
             ej["sOutputDirectory"] = evt->output_directory;
             {
-                ej["sFormat"] = evt->settings.format;
-                if (evt->settings.type == FileWriterSettings::CaptureType::Video
-                    && evt->settings.video_clip_length != std::chrono::seconds::max())
-                    ej["iVideoClipLengthSeconds"] = evt->settings.video_clip_length.count();
+                ej["sFormat"] = evt->settings->format;
+                if (evt->settings->type == FileWriterSettings::CaptureType::Video
+                    && evt->settings->video_clip_length != std::chrono::seconds::max())
+                    ej["iVideoClipLengthSeconds"] = evt->settings->video_clip_length.count();
             }
             if (evt->event)
             {
@@ -164,8 +164,8 @@ struct CaptureStatus
             return ej;
         };
 
-        j["dCurrent"] = fmt_event(current);
-        j["dLast"] = fmt_event(last);
+        j["bReadyToStartNew"] = ready_to_start_new;
+        j["dLastCapture"] = fmt_event(capture);
     }
 };
 

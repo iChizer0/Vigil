@@ -9,6 +9,7 @@
 #include <deque>
 #include <functional>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
@@ -230,11 +231,14 @@ struct Context
     private:
         mutable std::shared_mutex mutex;
         alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> revision = 0;
-        FileWriterSettings settings = FileWriterSettings();
+        std::shared_ptr<FileWriterSettings> settings = FileWriterSettings::create(kRecordWriterDefaultFormat,
+            kRecordWriterDefaultIntervalMs, kRecordWriterPrefixDefault, kVideoClipLengthDefault);
 
     public:
-        void update(const FileWriterSettings &new_settings)
+        void update(const std::shared_ptr<FileWriterSettings> &new_settings)
         {
+            if (!new_settings)
+                throw Exception("New FileWriterSettings is null.");
             const std::unique_lock lock(mutex);
             if (settings != new_settings)
             {
@@ -243,7 +247,7 @@ struct Context
             }
         }
 
-        FileWriterSettingsWithRevision get() const noexcept
+        std::pair<size_t, std::shared_ptr<FileWriterSettings>> get() const noexcept
         {
             const std::shared_lock lock(mutex);
             return { revision.load(std::memory_order_acquire), settings };
@@ -252,7 +256,7 @@ struct Context
         WaterMarks getWaterMarks() const noexcept
         {
             const std::shared_lock lock(mutex);
-            return settings.watermarks;
+            return settings->watermarks;
         }
 
         size_t getRevision() const noexcept

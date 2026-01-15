@@ -649,49 +649,58 @@ private:
                 }
             }
 
-            const auto start = std::chrono::steady_clock::now();
-            const auto settings = _ctx.shared_writer_settings.get();
-            auto watermarks = settings.second.watermarks;
-            if (_internal)
-                watermarks += kStorageMinFileSystemFreeBytesInternal;
             std::shared_ptr<WriteEvent> event = nullptr;
-
-            // Check if slot status is ready to write
-            if (!isReadyToWrite())
-                goto l_continue_evt;
-
-            // Check if quota limit is exceeded
-            if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit > 0)
+            const auto start = std::chrono::steady_clock::now();
+            const auto [rev, settings] = _ctx.shared_writer_settings.get();
+            if (!settings)
             {
-                if ((_index_manager.usedBytes() + watermarks.critical_remain_bytes) > limit)
-                    goto l_continue_log;
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
+                    "FileWriterSettings is null in storage slot writer thread for device path ", _dev_path,
+                    ", cannot start new writer task");
+                goto l_continue_evt;
             }
 
-            // Check if free space is sufficient
-            if (doStats(); _stats.load(std::memory_order_acquire).free_bytes <= watermarks.critical_remain_bytes)
-                goto l_continue_log;
-
-            // Check if media is paused
-            if (_ctx.media_paused.load(std::memory_order_acquire))
-                goto l_continue_evt;
-
-            // Check for new write event
-            if (event = _ctx.shared_rule_event.getCurrent(); !event)
-                goto l_continue_evt;
-
-            // Start new writer task
             {
+                auto watermarks = settings->watermarks;
+                if (_internal)
+                    watermarks += kStorageMinFileSystemFreeBytesInternal;
+
+                // Check if slot status is ready to write
+                if (!isReadyToWrite())
+                    goto l_continue_evt;
+
+                // Check if quota limit is exceeded
+                if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit > 0)
+                {
+                    if ((_index_manager.usedBytes() + watermarks.critical_remain_bytes) > limit)
+                        goto l_continue_log;
+                }
+
+                // Check if free space is sufficient
+                if (doStats(); _stats.load(std::memory_order_acquire).free_bytes <= watermarks.critical_remain_bytes)
+                    goto l_continue_log;
+
+                // Check if media is paused
+                if (_ctx.media_paused.load(std::memory_order_acquire))
+                    goto l_continue_evt;
+
+                // Check for new write event
+                if (event = _ctx.shared_rule_event.getCurrent(); !event)
+                    goto l_continue_evt;
+
+                // Start new writer task
+
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting new writer task, dev path ", _dev_path);
                 try
                 {
-                    switch (settings.second.type)
+                    switch (settings->type)
                     {
                         case FileWriterSettings::CaptureType::Image:
-                            _writer_task = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
+                            _writer_task = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), rev,
                                 std::ref(_ctx), std::move(settings), std::move(event));
                             break;
                         case FileWriterSettings::CaptureType::Video:
-                            _writer_task = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
+                            _writer_task = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), rev,
                                 std::ref(_ctx), std::move(settings), std::move(event));
                             break;
                         default: {

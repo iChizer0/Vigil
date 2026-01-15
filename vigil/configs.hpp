@@ -421,20 +421,25 @@ struct ScheduleRuleConfig
 
 struct FileWriterConfig
 {
-    FileWriterSettings settings;
+    std::shared_ptr<FileWriterSettings> settings;
 
-    FileWriterConfig(const FileWriterSettings &s) : settings(s) { }
+    FileWriterConfig(const std::shared_ptr<FileWriterSettings> &s) : settings(s)
+    {
+        if (!settings)
+            throw Exception("FileWriterSettings is null while constructing FileWriterConfig");
+    }
 
     FileWriterConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
-        settings = FileWriterSettings(j.at("sFormat").get<std::string>(),
-            std::chrono::milliseconds(j.at("iIntervalMs").get<int>()));
+        settings = FileWriterSettings::create(j.at("sFormat").get<std::string>(),
+            std::chrono::milliseconds(j.at("iIntervalMs").get<int>()), kRecordWriterPrefixDefault,
+            kVideoClipLengthDefault);
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
-        j["sFormat"] = settings.format;
-        j["iIntervalMs"] = settings.interval.count();
+        j["sFormat"] = settings->format;
+        j["iIntervalMs"] = settings->interval.count();
     }
 
     bool operator==(const FileWriterConfig &other) const noexcept
@@ -556,7 +561,7 @@ struct StorageControlConfig
 struct CaptureConfig
 {
     std::filesystem::path output_directory;
-    FileWriterSettings settings;
+    std::shared_ptr<FileWriterSettings> settings;
 
     CaptureConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
@@ -565,8 +570,10 @@ struct CaptureConfig
             std::chrono::seconds video_length = std::chrono::seconds::max();
             if (j.contains("iVideoLengthSeconds"))
                 video_length = std::chrono::seconds(j.at("iVideoLengthSeconds").get<int>());
-            settings = FileWriterSettings(j.at("sFormat").get<std::string>(), std::chrono::milliseconds(0),
+            settings = FileWriterSettings::create(j.at("sFormat").get<std::string>(), std::chrono::milliseconds(0),
                 kCaptureWriterPrefixDefault, video_length);
+            if (!settings)
+                throw Exception("Failed to create FileWriterSettings while parsing CaptureConfig");
         }
     }
 };

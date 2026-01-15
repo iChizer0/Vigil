@@ -37,10 +37,12 @@ template<typename T>
 class AdaptableWriter
 {
 public:
-    AdaptableWriter(Context &ctx, FileWriterSettingsWithRevision settings, std::shared_ptr<WriteEvent> event)
+    AdaptableWriter(Context &ctx, std::shared_ptr<FileWriterSettings> settings, std::shared_ptr<WriteEvent> event)
         : _start_time(std::chrono::steady_clock::now()), _ctx(ctx), _settings(std::move(settings)),
           _event(std::move(event))
     {
+        if (!_settings)
+            throw Exception("AdaptableWriter initialized with null settings");
         if (!_event)
             throw Exception("AdaptableWriter initialized with null event");
         setEventStatus(WriteEvent::Status::Writing);
@@ -66,7 +68,7 @@ public:
 
     inline std::chrono::steady_clock::time_point endTime() const noexcept
     {
-        return _start_time + _settings.second.interval;
+        return _start_time + _settings->interval;
     }
 
 protected:
@@ -96,9 +98,9 @@ protected:
         return _ctx;
     }
 
-    inline const FileWriterSettingsWithRevision &settings() const noexcept
+    inline const FileWriterSettings &settings() const noexcept
     {
-        return _settings;
+        return *_settings;
     }
 
     inline void setEventStatus(WriteEvent::Status status) noexcept
@@ -121,7 +123,7 @@ protected:
 private:
     std::chrono::steady_clock::time_point _start_time;
     Context &_ctx;
-    FileWriterSettingsWithRevision _settings;
+    std::shared_ptr<FileWriterSettings> _settings;
     std::shared_ptr<WriteEvent> _event;
 };
 
@@ -132,9 +134,9 @@ class SlotAdaptedWriter: public AdaptableWriter<SlotAdaptedWriter<T>>
 {
 public:
     template<typename... Args>
-    SlotAdaptedWriter(T &slot, Args &&...args)
+    SlotAdaptedWriter(T &slot, size_t settings_revision, Args &&...args)
         : AdaptableWriter<SlotAdaptedWriter<T>>(std::forward<Args>(args)...), _slot(slot),
-          _cache_file_info(this->event())
+          _settings_revision(settings_revision), _cache_file_info(this->event())
     {
         if (!initPathsAndFileName())
         {
@@ -176,7 +178,7 @@ protected:
 
     inline bool shouldContinueWritingImpl() const noexcept
     {
-        return this->ctxRef().shared_writer_settings.getRevision() == this->settings().first && _slot.isReadyToWrite();
+        return this->ctxRef().shared_writer_settings.getRevision() == _settings_revision && _slot.isReadyToWrite();
     }
 
 private:
@@ -199,10 +201,9 @@ private:
         const auto cache_dir = _slot.getRecordCachePath();
         if (!IndexManager::ensureDirectoryExist(cache_dir, this->ctxRef()))
             return false;
-        auto fmt = std::string(this->settings().second.format);
+        auto fmt = std::string(this->settings().format);
         std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
-        _cache_file_info.path
-            = cache_dir / (std::string(this->settings().second.file_name_prefix) + ss.str() + '.' + fmt);
+        _cache_file_info.path = cache_dir / (std::string(this->settings().file_name_prefix) + ss.str() + '.' + fmt);
 
         VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "Initialized writer with 1st level directory '",
             _cache_file_info.first_level_dir_name, "', cache file path '", _cache_file_info.path, "'");
@@ -211,6 +212,7 @@ private:
 
 private:
     T &_slot;
+    size_t _settings_revision;
     CacheFileInfo _cache_file_info;
 };
 
@@ -301,7 +303,7 @@ private:
                 return false;
             }
             const FileSize free_bytes = stat.f_bavail * stat.f_frsize;
-            const FileSize required_bytes = this->settings().second.watermarks.critical_remain_bytes;
+            const FileSize required_bytes = this->settings().watermarks.critical_remain_bytes;
             if (free_bytes < required_bytes)
             {
                 VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
@@ -342,7 +344,7 @@ private:
     WriteEvent::Status waitUntilWriteFinish() noexcept override
     {
         const auto ret = this->ctxRef().c_api.media.image_capture_cb(this->getFilePath().c_str(),
-            this->settings().second.format.c_str(), this->ctxRef().c_api.media.user_data);
+            this->settings().format.c_str(), this->ctxRef().c_api.media.user_data);
         if (ret != 0)
         {
             VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "ImageWriter failed to capture image to file at path ",
@@ -361,7 +363,7 @@ class VideoWriter final: public T
 public:
     template<typename... Args>
     VideoWriter(Args &&...args)
-        : T(std::forward<Args>(args)...), _video_clip_length(this->settings().second.video_clip_length), _fd(-1),
+        : T(std::forward<Args>(args)...), _video_clip_length(this->settings().video_clip_length), _fd(-1),
           _is_clip_start(true), _is_clip_finish(false)
     {
         if (!this->ctxRef().c_api.media.video_file_create_cb || !this->ctxRef().c_api.media.video_file_finish_cb)
@@ -392,7 +394,7 @@ private:
     void startWrite()
     {
         if (auto ret = this->ctxRef().c_api.media.video_file_create_cb(&_fd, this->getFilePath().c_str(),
-                this->settings().second.format.c_str(), this->ctxRef().c_api.media.user_data);
+                this->settings().format.c_str(), this->ctxRef().c_api.media.user_data);
             ret != 0 || _fd < 0)
         {
             this->setEventStatus(WriteEvent::Status::Failed);
@@ -433,12 +435,12 @@ private:
                 std::this_thread::sleep_for(kVideoFrameWaitDelay);
                 continue;
             }
-            if (isClipFinished() && it->isKeyFrame())
+            if (isClipFinished() && it->isKeyFrame()) [[unlikely]]
             {
                 ctx_media_mutex.unlock();
                 return endWrite(); // Finish current clip on next key frame
             }
-            if (_is_clip_start)
+            if (_is_clip_start) [[unlikely]]
             {
                 if (!it->isKeyFrame())
                 {

@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -911,32 +912,12 @@ private:
 struct FileWriterSettings
 {
     enum class CaptureType { Video, Image };
-    CaptureType type;
-    std::string format;
-    std::chrono::milliseconds interval;
-    std::string_view file_name_prefix;
-    std::chrono::seconds video_clip_length;
-    WaterMarks watermarks;
-
-    FileWriterSettings(std::string fmt = kRecordWriterDefaultFormat,
-        std::chrono::milliseconds itv = kRecordWriterDefaultIntervalMs,
-        std::string_view fnp = kRecordWriterPrefixDefault, std::chrono::seconds vcl = kVideoClipLengthDefault)
-        : type(CaptureType::Video), format(std::move(fmt)), interval(itv), file_name_prefix(fnp),
-          video_clip_length(vcl), watermarks(WaterMarks::from(format))
-    {
-        if (format == "MP4")
-            type = CaptureType::Video;
-        else if (format == "JPG" || format == "RAW")
-            type = CaptureType::Image;
-        else
-            throw Exception("Unsupported file writer format: " + format);
-    }
-
-    FileWriterSettings(const FileWriterSettings &other) noexcept = default;
-    FileWriterSettings &operator=(const FileWriterSettings &other) noexcept = default;
-
-    FileWriterSettings(FileWriterSettings &&other) noexcept = default;
-    FileWriterSettings &operator=(FileWriterSettings &&other) noexcept = default;
+    const CaptureType type;
+    const std::string format;
+    const std::chrono::milliseconds interval;
+    const std::string_view file_name_prefix;
+    const std::chrono::seconds video_clip_length;
+    const WaterMarks watermarks;
 
     ~FileWriterSettings() = default;
 
@@ -944,9 +925,31 @@ struct FileWriterSettings
     {
         return type == other.type && format == other.format && interval == other.interval;
     }
-};
 
-using FileWriterSettingsWithRevision = std::pair<size_t, FileWriterSettings>;
+    static std::shared_ptr<FileWriterSettings> create(const std::string &fmt, std::chrono::milliseconds itv,
+        std::string_view fnp, std::chrono::seconds vcl)
+    {
+        return std::shared_ptr<FileWriterSettings>(new FileWriterSettings(fmt, itv, fnp, vcl));
+    }
+
+private:
+    FileWriterSettings(const std::string &fmt, std::chrono::milliseconds itv, std::string_view fnp,
+        std::chrono::seconds vcl)
+        : type(from(fmt)), format(fmt), interval(itv), file_name_prefix(fnp), video_clip_length(vcl),
+          watermarks(WaterMarks::from(format))
+    {
+    }
+
+    CaptureType from(const std::string &fmt) const
+    {
+        if (fmt == "MP4")
+            return CaptureType::Video;
+        else if (fmt == "JPG" || fmt == "RAW")
+            return CaptureType::Image;
+        else
+            throw Exception("Unsupported file writer format: " + fmt);
+    }
+};
 
 struct GPIOHelpers final
 {
@@ -1031,16 +1034,18 @@ struct GPIOHelpers final
 struct CaptureEvent
 {
     const std::filesystem::path output_directory;
-    const FileWriterSettings settings;
+    const std::shared_ptr<FileWriterSettings> settings;
     const std::shared_ptr<WriteEvent> event;
     const std::string file_name;
 
-    CaptureEvent(const std::filesystem::path &od, const FileWriterSettings &fws, std::shared_ptr<WriteEvent> evt,
-        std::string fn)
+    CaptureEvent(const std::filesystem::path &od, const std::shared_ptr<FileWriterSettings> &fws,
+        std::shared_ptr<WriteEvent> evt, std::string fn)
         : output_directory(od), settings(fws), event(std::move(evt)), file_name(std::move(fn))
     {
         if (output_directory.empty())
             throw Exception("Output directory cannot be empty");
+        if (!settings)
+            throw Exception("File writer settings cannot be null");
         if (!event)
             throw Exception("Write event cannot be null");
         if (file_name.empty())

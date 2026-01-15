@@ -934,7 +934,7 @@ public:
 
         auto get_capture_status = [&]() -> CaptureStatus {
             const std::shared_lock lock(_event_mutex);
-            return { _event_current, _event_last };
+            return _event_current ? CaptureStatus { false, _event_current } : CaptureStatus { true, _event_last };
         };
 
         try
@@ -1031,6 +1031,8 @@ private:
                     || (_ctx->c_api.storage.internal_mount_point
                         && ods.starts_with(_ctx->c_api.storage.internal_mount_point))))
                 throw Exception("Capture output directory must be under storage mount point");
+            if (!config.settings)
+                throw Exception("Capture settings cannot be null");
         }
 
         const auto steady_now = std::chrono::steady_clock::now();
@@ -1043,7 +1045,7 @@ private:
         std::string file_name;
         {
             std::stringstream ss;
-            ss << std::string(config.settings.file_name_prefix);
+            ss << std::string(config.settings->file_name_prefix);
 
             const auto local_time = LocalTime(system_now);
             auto tm = local_time.tm();
@@ -1054,7 +1056,7 @@ private:
             const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration - seconds);
             ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << micros.count();
 
-            auto fmt = std::string(config.settings.format);
+            auto fmt = std::string(config.settings->format);
             std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
             ss << '.' << fmt;
 
@@ -1101,18 +1103,18 @@ private:
 
     std::unique_ptr<CaptureAdaptedWriter<CaptureEndpoint>> getWriterFromEvent(std::shared_ptr<CaptureEvent> event)
     {
-        if (!event)
+        if (!event || !event->settings)
             return nullptr;
-        switch (event->settings.type)
+        switch (event->settings->type)
         {
             case FileWriterSettings::CaptureType::Image:
                 _ctx->capture_media_buffer.clearToLastKeyFrame();
                 return std::make_unique<ImageWriter<CaptureAdaptedWriter<CaptureEndpoint>>>(std::ref(*this), event,
-                    std::ref(*_ctx), FileWriterSettingsWithRevision { 0, event->settings }, event->event);
+                    std::ref(*_ctx), event->settings, event->event);
             case FileWriterSettings::CaptureType::Video:
                 _ctx->capture_media_buffer.clearToLastKeyFrame();
                 return std::make_unique<VideoWriter<CaptureAdaptedWriter<CaptureEndpoint>>>(std::ref(*this), event,
-                    std::ref(*_ctx), FileWriterSettingsWithRevision { 0, event->settings }, event->event);
+                    std::ref(*_ctx), event->settings, event->event);
             default:
                 return nullptr;
         }
