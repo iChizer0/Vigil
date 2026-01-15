@@ -431,30 +431,30 @@ struct FileWriterConfig
 
     FileWriterConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
-        settings = FileWriterSettings::create(j.at("sFormat").get<std::string>(),
-            std::chrono::milliseconds(j.at("iIntervalMs").get<int>()), kRecordWriterPrefixDefault,
-            kVideoClipLengthDefault);
+        if (settings = FileWriterSettings::create(j.at("sFormat").get<std::string>(),
+                std::chrono::milliseconds(j.at("iIntervalMs").get<int>()), kRecordWriterPrefixDefault,
+                kVideoClipLengthDefault);
+            !settings)
+            throw Exception("Failed to create FileWriterSettings while parsing FileWriterConfig");
+    }
+
+    static FileWriterConfig from(const Context &ctx)
+    {
+        return FileWriterConfig(ctx.shared_writer_settings.get().second);
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
-        j["sFormat"] = settings->format;
-        j["iIntervalMs"] = settings->interval.count();
-    }
-
-    bool operator==(const FileWriterConfig &other) const noexcept
-    {
-        return settings == other.settings;
+        if (auto s = settings; s)
+        {
+            j["sFormat"] = s->format;
+            j["iIntervalMs"] = s->interval.count();
+        }
     }
 
     void sync(Context &ctx) const
     {
         ctx.shared_writer_settings.update(settings);
-    }
-
-    static FileWriterConfig fromContext(const Context &ctx)
-    {
-        return ctx.shared_writer_settings.get().second;
     }
 };
 

@@ -263,7 +263,7 @@ public:
             res_j["bRuleEnabled"] = _ctx->rule_enabled.load(std::memory_order_relaxed);
             {
                 nlohmann::json writer_cfg_j;
-                const auto writer_cfg = FileWriterConfig::fromContext(*_ctx);
+                const auto writer_cfg = FileWriterConfig::from(*_ctx);
                 writer_cfg.to(writer_cfg_j, *_ctx);
                 res_j["dWriterConfig"] = writer_cfg_j;
             }
