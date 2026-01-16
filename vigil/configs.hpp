@@ -131,6 +131,9 @@ struct TimerRuleConfig
     TimerRuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
         j.at("iIntervalSeconds").get_to(interval_seconds);
+        if (interval_seconds <= 0)
+            throw Exception(
+                "Invalid interval seconds " + std::to_string(interval_seconds) + " while parsing timer rule");
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
