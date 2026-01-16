@@ -1035,6 +1035,7 @@ private:
 
         auto fmt = config.settings->format;
         std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
+        fmt = '.' + fmt;
 
         std::filesystem::path output_directory;
         std::string file_name;
@@ -1052,8 +1053,7 @@ private:
             const auto duration = steady_now.time_since_epoch();
             const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
             const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration - seconds);
-            ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << micros.count();
-            ss << '.' << fmt;
+            ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << micros.count() << fmt;
 
             file_name = ss.str();
         }

@@ -572,7 +572,13 @@ struct CaptureConfig
         {
             std::chrono::seconds video_length = std::chrono::seconds::max();
             if (j.contains("iVideoLengthSeconds"))
-                video_length = std::chrono::seconds(j.at("iVideoLengthSeconds").get<int>());
+            {
+                if (auto l = j.at("iVideoLengthSeconds").get<int>(); l > 0)
+                    video_length = std::chrono::seconds();
+                else
+                    throw Exception(
+                        "Invalid video length seconds " + std::to_string(l) + " while parsing CaptureConfig");
+            }
             settings = FileWriterSettings::create(j.at("sFormat").get<std::string>(), std::chrono::milliseconds(0),
                 kCaptureWriterPrefixDefault, video_length);
             if (!settings)
