@@ -134,41 +134,49 @@ struct GPIOPinStatus
 
 struct CaptureStatus
 {
-    bool ready_to_start_new;
-    std::shared_ptr<CaptureEvent> capture;
+    std::shared_ptr<CaptureEvent> active;
+    std::shared_ptr<CaptureEvent> last;
 
-    CaptureStatus(bool ready, std::shared_ptr<CaptureEvent> capture_evt)
-        : ready_to_start_new(ready), capture(std::move(capture_evt))
+    CaptureStatus(std::shared_ptr<CaptureEvent> active_evt, std::shared_ptr<CaptureEvent> last_evt)
+        : active(std::move(active_evt)), last(std::move(last_evt))
     {
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
-        auto fmt_event = [](const std::shared_ptr<CaptureEvent> &evt) -> std::optional<nlohmann::json> {
-            if (!evt || !evt->settings)
-                return std::nullopt;
-
-            auto ej = nlohmann::json::object();
-            ej["sOutputDirectory"] = evt->output_directory;
-            {
-                ej["sFormat"] = evt->settings->format;
-                if (evt->settings->type == FileWriterSettings::CaptureType::Video
-                    && evt->settings->video_clip_length != std::chrono::seconds::max())
-                    ej["iVideoClipLengthSeconds"] = evt->settings->video_clip_length.count();
-            }
-            if (evt->event)
-            {
-                ej["sStatus"] = WriteEvent::StatusString(evt->event->status.load(std::memory_order_relaxed));
-                ej["sTimepoint"] = evt->event->timepoint.time_since_epoch().count();
-                ej["iTimestamp"] = evt->event->timestamp;
-            }
-            ej["sFileName"] = evt->file_name;
-            return ej;
-        };
-
-        j["bReadyToStartNew"] = ready_to_start_new;
-        j["dLastCapture"] = fmt_event(capture);
+        {
+            auto oj = nlohmann::json::object();
+            formatEvent(oj, active);
+            j["dActiveCapture"] = oj;
+        }
+        {
+            auto oj = nlohmann::json::object();
+            formatEvent(oj, last);
+            j["dLastCapture"] = oj;
+        }
     }
+
+    static void formatEvent(nlohmann::json &j, const std::shared_ptr<CaptureEvent> &evt)
+    {
+        if (!evt || !evt->settings)
+            return;
+
+        j["sID"] = evt->id();
+        j["sOutputDirectory"] = evt->output_directory;
+        {
+            j["sFormat"] = evt->settings->format;
+            if (evt->settings->type == FileWriterSettings::CaptureType::Video
+                && evt->settings->video_clip_length != std::chrono::seconds::max())
+                j["iVideoClipLengthSeconds"] = evt->settings->video_clip_length.count();
+        }
+        if (evt->event)
+        {
+            j["sStatus"] = WriteEvent::StatusString(evt->event->status.load(std::memory_order_relaxed));
+            j["sTimepoint"] = evt->event->timepoint.time_since_epoch().count();
+            j["iTimestamp"] = evt->event->timestamp;
+        }
+        j["sFileName"] = evt->file_name;
+    };
 };
 
 } // namespace vigil::status

@@ -560,12 +560,12 @@ struct StorageControlConfig
 
 struct CaptureConfig
 {
-    std::filesystem::path output_directory;
+    std::filesystem::path output;
     std::shared_ptr<FileWriterSettings> settings;
 
     CaptureConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
-        j.at("sOutputDirectory").get_to(output_directory);
+        j.at("sOutput").get_to(output);
         {
             std::chrono::seconds video_length = std::chrono::seconds::max();
             if (j.contains("iVideoLengthSeconds"))

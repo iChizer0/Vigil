@@ -12,6 +12,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -249,6 +250,12 @@ public:
         }
 
         _output_file_path = _event->output_directory / _event->file_name;
+        if (std::error_code ec; std::filesystem::exists(_output_file_path, ec))
+        {
+            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_INFO,
+                "CaptureAdaptedWriter output file already exists at path: ", _output_file_path, ", overwriting");
+            std::filesystem::remove(_output_file_path, ec);
+        }
     }
 
     virtual ~CaptureAdaptedWriter() noexcept

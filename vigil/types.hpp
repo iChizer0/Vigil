@@ -16,6 +16,7 @@
 #include <exception>
 #include <filesystem>
 #include <iomanip>
+#include <ios>
 #include <memory>
 #include <new>
 #include <optional>
@@ -1050,9 +1051,23 @@ struct CaptureEvent
             throw Exception("Write event cannot be null");
         if (file_name.empty())
             throw Exception("File name cannot be empty");
+
+        {
+            std::ostringstream ss;
+            ss << std::hex << event->timestamp << event->timepoint.time_since_epoch().count();
+            _id = ss.str();
+        }
+    }
+
+    const std::string &id() const noexcept
+    {
+        return _id;
     }
 
     ~CaptureEvent() = default;
+
+private:
+    std::string _id;
 };
 
 } // namespace vigil::types

@@ -924,7 +924,7 @@ public:
 
         auto get_capture_status = [&]() -> CaptureStatus {
             const std::shared_lock lock(_event_mutex);
-            return _event_current ? CaptureStatus { false, _event_current } : CaptureStatus { true, _event_last };
+            return { _event_active, _event_last };
         };
 
         try
@@ -951,18 +951,23 @@ public:
         try
         {
             const std::unique_lock lock(_event_mutex);
-            if (_event_current)
+            if (_event_active)
             {
                 ret = EBUSY;
                 throw Exception("Capture is already in progress");
             }
 
             const auto config = CaptureConfig(j, *_ctx);
-            _event_current = getCaptureEvent(config);
-            if (!_event_current)
+            _event_active = getCaptureEvent(config);
+            if (!_event_active)
             {
                 ret = EFAULT;
                 throw Exception("Failed to create capture event from configuration");
+            }
+            {
+                auto oj = nlohmann::json::object();
+                CaptureStatus::formatEvent(oj, _event_active);
+                res_j["dCapture"] = oj;
             }
         }
         catch (const std::exception &e)
@@ -984,7 +989,7 @@ public:
         try
         {
             const std::unique_lock lock(_event_mutex);
-            if (!_event_current)
+            if (!_event_active)
             {
                 ret = ENOENT;
                 throw Exception("No ongoing capture to stop");
@@ -1013,17 +1018,17 @@ private:
 private:
     std::shared_ptr<CaptureEvent> getCaptureEvent(const CaptureConfig &config) const
     {
-        {
-            if (!config.output_directory.is_absolute())
-                throw Exception("Capture output directory must be an absolute path");
-            auto ods = config.output_directory.string();
-            if (!(ods.starts_with(kStorageMountBasePath)
-                    || (_ctx->c_api.storage.internal_mount_point
-                        && ods.starts_with(_ctx->c_api.storage.internal_mount_point))))
-                throw Exception("Capture output directory must be under storage mount point");
-            if (!config.settings)
-                throw Exception("Capture settings cannot be null");
-        }
+        if (!config.output.is_absolute())
+            throw Exception("Capture output must be an absolute path");
+
+        const auto output_str = config.output.string();
+        if (!(output_str.starts_with(kStorageMountBasePath)
+                || (_ctx->c_api.storage.internal_mount_point
+                    && output_str.starts_with(_ctx->c_api.storage.internal_mount_point))))
+            throw Exception("Capture output must be under storage mount point");
+
+        if (!config.settings)
+            throw Exception("Capture settings cannot be null");
 
         const auto steady_now = std::chrono::steady_clock::now();
         const auto system_now = std::chrono::system_clock::now();
@@ -1032,8 +1037,15 @@ private:
             static_cast<int64_t>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(system_now.time_since_epoch()).count()));
 
+        auto fmt = config.settings->format;
+        std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
+
+        std::filesystem::path output_directory;
         std::string file_name;
+        if (!output_str.ends_with(fmt))
         {
+            output_directory = config.output;
+
             std::stringstream ss;
             ss << std::string(config.settings->file_name_prefix);
 
@@ -1045,15 +1057,17 @@ private:
             const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
             const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration - seconds);
             ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << micros.count();
-
-            auto fmt = std::string(config.settings->format);
-            std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
             ss << '.' << fmt;
 
             file_name = ss.str();
         }
+        else
+        {
+            output_directory = config.output.parent_path();
+            file_name = config.output.filename().string();
+        }
 
-        return std::make_shared<CaptureEvent>(config.output_directory, config.settings, std::move(write_event),
+        return std::make_shared<CaptureEvent>(std::move(output_directory), config.settings, std::move(write_event),
             std::move(file_name));
     }
 
@@ -1088,7 +1102,7 @@ private:
     std::shared_ptr<CaptureEvent> getCaptureEvent() const noexcept
     {
         const std::shared_lock lock(_event_mutex);
-        return _event_current;
+        return _event_active;
     }
 
     std::unique_ptr<CaptureAdaptedWriter<CaptureEndpoint>> getWriterFromEvent(std::shared_ptr<CaptureEvent> event)
@@ -1116,10 +1130,10 @@ protected:
     void handleCompletedCaptureEvent(std::shared_ptr<CaptureEvent> event) noexcept
     {
         const std::unique_lock lock(_event_mutex);
-        if (event != _event_current)
+        if (event != _event_active)
             VG_LOG(_ctx->log, VG_LOG_LEVEL_WARN, "Completed capture event does not match current event pointer");
         _event_last = std::move(event);
-        _event_current.reset();
+        _event_active.reset();
         _finish_current_capture.store(false, std::memory_order_release);
     }
 
@@ -1140,8 +1154,8 @@ private:
     std::unique_ptr<std::thread> _capture_thread;
 
     mutable std::shared_mutex _event_mutex;
-    std::shared_ptr<CaptureEvent> _event_current = nullptr;
-    std::shared_ptr<CaptureEvent> _event_last = nullptr;
+    std::shared_ptr<CaptureEvent> _event_active;
+    std::shared_ptr<CaptureEvent> _event_last;
 
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _finish_current_capture = false;
 };
