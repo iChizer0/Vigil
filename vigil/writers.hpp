@@ -1,4 +1,5 @@
 #pragma once
+#include <iterator>
 #ifndef VIGIL_WRITERS_HPP
 #define VIGIL_WRITERS_HPP
 
@@ -370,7 +371,7 @@ public:
     template<typename... Args>
     VideoWriter(Args &&...args)
         : T(std::forward<Args>(args)...), _video_clip_length(this->settings().video_clip_length), _fd(-1),
-          _is_clip_start(true), _is_clip_finish(false)
+          _is_clip_finish(false)
     {
         if (!this->ctxRef().c_api.media.video_file_create_cb || !this->ctxRef().c_api.media.video_file_finish_cb)
         {
@@ -433,6 +434,50 @@ private:
         auto &ctx_media_mutex = this->mediaMutex();
         auto &ctx_media_queue = this->mediaQueue();
 
+#ifdef __VIGIL_WRITER_WRITE_FRAME_INTERNAL__
+#warning "__VIGIL_WRITER_WRITE_FRAME_INTERNAL__ is already defined, undefining to avoid conflicts"
+#undef __VIGIL_WRITER_WRITE_FRAME_INTERNAL__
+#endif
+#define __VIGIL_WRITER_WRITE_FRAME_INTERNAL__                                                                          \
+    if (!writeMediaFrame(frame)) [[unlikely]]                                                                          \
+    {                                                                                                                  \
+        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "VideoWriter failed to write media frame to file at path ",     \
+            this->getFilePath());                                                                                      \
+        endWrite();                                                                                                    \
+        return WriteEvent::Status::Failed;                                                                             \
+    }
+
+        for (;;)
+        {
+            if (isClipFinished()) [[unlikely]]
+                return endWrite();
+
+            ctx_media_mutex.lock();
+            auto s = ctx_media_queue.begin();
+            auto e = s;
+            for (; e != ctx_media_queue.end(); ++e)
+            {
+                if (e->isKeyFrame())
+                    break;
+            }
+            if (e == ctx_media_queue.end())
+            {
+                ctx_media_queue.erase(s, e);
+                ctx_media_mutex.unlock();
+                if (!this->shouldContinueWriting()) [[unlikely]]
+                    return WriteEvent::Status::Interrupted;
+                std::this_thread::sleep_for(kVideoFrameWaitDelay);
+                continue;
+            }
+            e->transferTo(frame);
+            ctx_media_queue.erase(s, std::next(e, 1));
+            ctx_media_mutex.unlock();
+
+            __VIGIL_WRITER_WRITE_FRAME_INTERNAL__;
+
+            break;
+        }
+
         do
         {
             ctx_media_mutex.lock();
@@ -448,28 +493,15 @@ private:
                 ctx_media_mutex.unlock();
                 return endWrite(); // Finish current clip on next key frame
             }
-            if (_is_clip_start) [[unlikely]]
-            {
-                if (!it->isKeyFrame())
-                {
-                    ctx_media_queue.pop_front();
-                    ctx_media_mutex.unlock();
-                    continue; // Discard frames until key frame is found
-                }
-                _is_clip_start = false;
-            }
             it->transferTo(frame);
             ctx_media_queue.erase(it);
             ctx_media_mutex.unlock();
-            if (!writeMediaFrame(frame)) [[unlikely]]
-            {
-                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
-                    "VideoWriter failed to write media frame to file at path ", this->getFilePath());
-                endWrite();
-                return WriteEvent::Status::Failed;
-            }
+
+            __VIGIL_WRITER_WRITE_FRAME_INTERNAL__;
         }
         while (this->shouldContinueWriting());
+
+#undef __VIGIL_WRITER_WRITE_FRAME_INTERNAL__
 
         return WriteEvent::Status::Interrupted;
     }
@@ -530,7 +562,6 @@ private:
 private:
     std::chrono::seconds _video_clip_length;
     int _fd;
-    bool _is_clip_start;
     bool _is_clip_finish;
 };
 
