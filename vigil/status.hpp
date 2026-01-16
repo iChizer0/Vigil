@@ -2,6 +2,7 @@
 #ifndef VIGIL_STATUS_HPP
 #define VIGIL_STATUS_HPP
 
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -167,12 +168,14 @@ struct CaptureStatus
             j["sFormat"] = evt->settings->format;
             if (evt->settings->type == FileWriterSettings::CaptureType::Video
                 && evt->settings->video_clip_length != std::chrono::seconds::max())
-                j["iVideoClipLengthSeconds"] = evt->settings->video_clip_length.count();
+                j["iVideoLengthSeconds"] = evt->settings->video_clip_length.count();
         }
         if (evt->event)
         {
             j["sStatus"] = WriteEvent::StatusString(evt->event->status.load(std::memory_order_relaxed));
-            j["sTimepoint"] = evt->event->timepoint.time_since_epoch().count();
+            j["sTimepoint"]
+                = std::chrono::duration_cast<std::chrono::milliseconds>(evt->event->timepoint.time_since_epoch())
+                      .count();
             j["iTimestamp"] = evt->event->timestamp;
         }
         j["sFileName"] = evt->file_name;

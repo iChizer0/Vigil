@@ -330,15 +330,25 @@ Get the current capture status.
 
 ```json
 {
-    "bReadyToStartNew": false, // Boolean, true if no capture is in progress and a new one can be started
-    "dLastCapture": { // Object|null, current capture if in progress, otherwise last completed capture
+    "dActiveCapture": { // Object, current capture if in progress; empty object if none
+        "sID": "194e8b2c0000194e8b2c0001", // String, unique capture event ID
         "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
         "sFormat": "MP4", // String, capture format ("MP4", "JPG", "RAW")
-        "iVideoClipLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
+        "iVideoLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
         "sStatus": "WRITING", // String, write event status ("PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", "UNKNOWN")
-        "sTimepoint": 1736870400000000000, // Integer, steady clock timepoint (nanoseconds since epoch)
+        "sTimepoint": 1736870400000, // Integer, steady clock timepoint (milliseconds since epoch)
         "iTimestamp": 1736870400000, // Integer, Unix timestamp in milliseconds
-        "sFileName": "CAP20260114 143000 123456.mp4" // String, generated file name
+        "sFileName": "Capture 20260114 143000 123456.mp4" // String, generated file name
+    },
+    "dLastCapture": { // Object, last completed capture; empty object if none
+        "sID": "194e8b2c0000194e8b2c0000", // String, unique capture event ID
+        "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
+        "sFormat": "MP4", // String, capture format ("MP4", "JPG", "RAW")
+        "iVideoLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
+        "sStatus": "COMPLETED", // String, write event status
+        "sTimepoint": 1736870300000, // Integer, steady clock timepoint (milliseconds since epoch)
+        "iTimestamp": 1736870300000, // Integer, Unix timestamp in milliseconds
+        "sFileName": "Capture 20260114 142800 654321.mp4" // String, generated file name
     }
 }
 ```
@@ -355,7 +365,7 @@ Start a new capture session.
 
 ```json
 {
-    "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, absolute path under storage mount point
+    "sOutput": "/mnt/sdcard/DCIM/20260114", // String, absolute path under storage mount point (directory or full file path)
     "sFormat": "MP4", // String, capture format: "MP4" (video), "JPG" (image), "RAW" (image)
     "iVideoLengthSeconds": 60 // Integer, optional, video clip length in seconds; omit for continuous recording
 }
@@ -365,13 +375,23 @@ Start a new capture session.
 
 ```json
 {
+    "dCapture": { // Object, the started capture event
+        "sID": "194e8b2c0000194e8b2c0001", // String, unique capture event ID
+        "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
+        "sFormat": "MP4", // String, capture format
+        "iVideoLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
+        "sStatus": "PENDING", // String, initial write event status
+        "sTimepoint": 1736870400000, // Integer, steady clock timepoint (milliseconds since epoch)
+        "iTimestamp": 1736870400000, // Integer, Unix timestamp in milliseconds
+        "sFileName": "Capture 20260114 143000 123456.mp4" // String, generated file name
+    },
     "code": 0 // Integer, 0 on success, errors return 30000 + |errno|
 }
 ```
 
 **Notes:**
 - Returns error `EBUSY` (30016) if a capture is already in progress.
-- The output directory must be an absolute path under the configured storage mount point.
+- The output path must be an absolute path under the configured storage mount point.
 
 ### Stop Capture
 
