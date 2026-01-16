@@ -145,41 +145,37 @@ struct CaptureStatus
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
-        {
-            auto oj = nlohmann::json::object();
-            formatEvent(oj, active);
-            j["dActiveCapture"] = oj;
-        }
-        {
-            auto oj = nlohmann::json::object();
-            formatEvent(oj, last);
-            j["dLastCapture"] = oj;
-        }
+        j["dActiveCapture"] = formatEvent(active);
+        j["dLastCapture"] = formatEvent(last);
     }
 
-    static void formatEvent(nlohmann::json &j, const std::shared_ptr<CaptureEvent> &evt)
+    static std::optional<nlohmann::json> formatEvent(const std::shared_ptr<CaptureEvent> &evt)
     {
         if (!evt || !evt->settings)
-            return;
+            return std::nullopt;
 
-        j["sID"] = evt->id();
-        j["sOutputDirectory"] = evt->output_directory;
+        auto oj = nlohmann::json::object();
+
+        oj["sID"] = evt->id();
+        oj["sOutputDirectory"] = evt->output_directory;
         {
-            j["sFormat"] = evt->settings->format;
+            oj["sFormat"] = evt->settings->format;
             if (evt->settings->type == FileWriterSettings::CaptureType::Video
                 && evt->settings->video_clip_length != std::chrono::seconds::max())
-                j["iVideoLengthSeconds"] = evt->settings->video_clip_length.count();
+                oj["iVideoLengthSeconds"] = evt->settings->video_clip_length.count();
         }
         if (evt->event)
         {
-            j["sStatus"] = WriteEvent::StatusString(evt->event->status.load(std::memory_order_relaxed));
-            j["sTimepoint"]
+            oj["sStatus"] = WriteEvent::StatusString(evt->event->status.load(std::memory_order_relaxed));
+            oj["sTimepoint"]
                 = std::chrono::duration_cast<std::chrono::milliseconds>(evt->event->timepoint.time_since_epoch())
                       .count();
-            j["iTimestamp"] = evt->event->timestamp;
+            oj["iTimestamp"] = evt->event->timestamp;
         }
-        j["sFileName"] = evt->file_name;
-    };
+        oj["sFileName"] = evt->file_name;
+
+        return oj;
+    }
 };
 
 } // namespace vigil::status

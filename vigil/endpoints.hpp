@@ -964,11 +964,7 @@ public:
                 ret = EFAULT;
                 throw Exception("Failed to create capture event from configuration");
             }
-            {
-                auto oj = nlohmann::json::object();
-                CaptureStatus::formatEvent(oj, _event_active);
-                res_j["dCapture"] = oj;
-            }
+            res_j["dCapture"] = CaptureStatus::formatEvent(_event_active);
         }
         catch (const std::exception &e)
         {
