@@ -137,9 +137,10 @@ struct CaptureStatus
 {
     std::shared_ptr<CaptureEvent> active;
     std::shared_ptr<CaptureEvent> last;
+    bool stop_requested;
 
-    CaptureStatus(std::shared_ptr<CaptureEvent> active_evt, std::shared_ptr<CaptureEvent> last_evt)
-        : active(std::move(active_evt)), last(std::move(last_evt))
+    CaptureStatus(std::shared_ptr<CaptureEvent> active_evt, std::shared_ptr<CaptureEvent> last_evt, bool sr)
+        : active(std::move(active_evt)), last(std::move(last_evt)), stop_requested(sr)
     {
     }
 
@@ -147,6 +148,7 @@ struct CaptureStatus
     {
         j["dActiveCapture"] = formatEvent(active);
         j["dLastCapture"] = formatEvent(last);
+        j["bStopRequested"] = stop_requested;
     }
 
     static std::optional<nlohmann::json> formatEvent(const std::shared_ptr<CaptureEvent> &evt)

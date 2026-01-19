@@ -924,7 +924,7 @@ public:
 
         auto get_capture_status = [&]() -> CaptureStatus {
             const std::shared_lock lock(_event_mutex);
-            return { _event_active, _event_last };
+            return { _event_active, _event_last, _finish_current_capture.load(std::memory_order_acquire) };
         };
 
         try

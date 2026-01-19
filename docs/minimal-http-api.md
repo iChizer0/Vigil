@@ -349,7 +349,8 @@ Get the current capture status.
         "sTimepoint": 1736870300000, // Integer, steady clock timepoint (milliseconds since epoch)
         "iTimestamp": 1736870300000, // Integer, Unix timestamp in milliseconds
         "sFileName": "Capture 20260114 142800 654321.mp4" // String, generated file name
-    }
+    },
+    "bStopRequested": false, // Boolean, whether a stop capture request is pending
 }
 ```
 
