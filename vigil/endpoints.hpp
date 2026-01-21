@@ -343,20 +343,27 @@ public:
         try
         {
             const auto rule_type_str = j.at("sCurrentSelected").get<std::string>();
-            const auto rule_type = BaseRule::TypeFromString(rule_type_str);
             const std::unique_lock lock(_record_rule_mutex);
-            if (rule_type == VG_RULE_TYPE_INFERENCE_SET)
-                swapTypedRecordRule<InferenceRuleSet>(InferenceRuleSetConfig(j.at("lInferenceSet"), *_ctx));
-            else if (rule_type == VG_RULE_TYPE_TIMER)
-                swapTypedRecordRule<TimerRule>(TimerRuleConfig(j.at("dTimer"), *_ctx));
-            else if (rule_type == VG_RULE_TYPE_GPIO)
-                swapTypedRecordRule<GPIORule>(GPIORuleConfig(j.at("dGPIO"), *_ctx));
-            else if (rule_type == VG_RULE_TYPE_TTY)
-                swapTypedRecordRule<TTYRule>(TTYRuleConfig(j.at("dTTY"), *_ctx));
-            else if (rule_type == VG_RULE_TYPE_HTTP)
-                swapTypedRecordRule<HTTPRule>(HTTPRuleConfig());
+            if (rule_type_str.empty())
+            {
+                _record_rule.reset();
+                _record_rule_config_variant = std::monostate {};
+            }
             else
-                throw Exception("Invalid rule type while updating record rule config '" + rule_type_str + "'");
+            {
+                if (auto rule_type = BaseRule::TypeFromString(rule_type_str); rule_type == VG_RULE_TYPE_INFERENCE_SET)
+                    swapTypedRecordRule<InferenceRuleSet>(InferenceRuleSetConfig(j.at("lInferenceSet"), *_ctx));
+                else if (rule_type == VG_RULE_TYPE_TIMER)
+                    swapTypedRecordRule<TimerRule>(TimerRuleConfig(j.at("dTimer"), *_ctx));
+                else if (rule_type == VG_RULE_TYPE_GPIO)
+                    swapTypedRecordRule<GPIORule>(GPIORuleConfig(j.at("dGPIO"), *_ctx));
+                else if (rule_type == VG_RULE_TYPE_TTY)
+                    swapTypedRecordRule<TTYRule>(TTYRuleConfig(j.at("dTTY"), *_ctx));
+                else if (rule_type == VG_RULE_TYPE_HTTP)
+                    swapTypedRecordRule<HTTPRule>(HTTPRuleConfig());
+                else
+                    throw Exception("Invalid rule type while updating record rule config '" + rule_type_str + "'");
+            }
 
             _record_rule_config = j;
 

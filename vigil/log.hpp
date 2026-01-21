@@ -33,7 +33,7 @@ inline decltype(auto) getCurrentTimeStamp() noexcept
 #define VG_LOG(logf, lvl, ...)                                                                                         \
     do                                                                                                                 \
     {                                                                                                                  \
-        if (lvl >= VG_LOG_LEVEL)                                                                                       \
+        if constexpr (lvl >= VG_LOG_LEVEL)                                                                             \
             logf(lvl, "[", getCurrentTimeStamp(), "] ", __FILE__, ":", __LINE__, ": ", __VA_ARGS__);                   \
     }                                                                                                                  \
     while (0)
