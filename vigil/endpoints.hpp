@@ -643,6 +643,7 @@ private:
     template<typename T, typename C>
     void swapTypedRecordRule(const C &new_config)
     {
+        bool roollback_needed = false;
         try
         {
             if (_record_rule)
@@ -653,7 +654,19 @@ private:
         catch (std::exception &e)
         {
             VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Failed to create record rule from config: ", e.what());
+            roollback_needed = true;
+        }
+        if (!roollback_needed)
+            return;
+        try
+        {
             rollbackRecordRule();
+        }
+        catch (std::exception &e)
+        {
+            VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Failed to rollback record rule after creation failure: ", e.what());
+            _record_rule.reset();
+            _record_rule_config_variant = std::monostate {};
         }
     }
 
