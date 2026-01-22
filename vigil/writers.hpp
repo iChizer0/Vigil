@@ -226,7 +226,8 @@ public:
     template<typename... Args>
     CaptureAdaptedWriter(T &capture, std::shared_ptr<CaptureEvent> event, Args &&...args)
         : AdaptableWriter<CaptureAdaptedWriter<T>>(std::forward<Args>(args)...), _capture(capture),
-          _event(std::move(event)), _output_file_path(), _last_stats_time(std::chrono::steady_clock::time_point::min())
+          _event(std::move(event)), _output_file_path(), _output_cache_path(),
+          _last_stats_time(std::chrono::steady_clock::time_point::min())
     {
         if (!_event)
             throw Exception("CaptureAdaptedWriter initialized with null event");
@@ -251,16 +252,33 @@ public:
         }
 
         _output_file_path = _event->output_directory / _event->file_name;
-        if (std::error_code ec; std::filesystem::exists(_output_file_path, ec))
+        _output_cache_path = _event->output_directory / (std::string(".") + _event->file_name + ".tmp");
+        if (std::error_code ec; std::filesystem::exists(_output_cache_path, ec))
         {
             VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_INFO,
-                "CaptureAdaptedWriter output file already exists at path: ", _output_file_path, ", overwriting");
-            std::filesystem::remove(_output_file_path, ec);
+                "CaptureAdaptedWriter output cache already exists at path: ", _output_cache_path, ", overwriting");
+            std::filesystem::remove(_output_cache_path, ec);
         }
     }
 
     virtual ~CaptureAdaptedWriter() noexcept
     {
+        if (std::error_code ec; std::filesystem::exists(_output_cache_path, ec))
+        {
+            std::filesystem::rename(_output_cache_path, _output_file_path, ec);
+            if (ec)
+            {
+                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                    "CaptureAdaptedWriter failed to rename cache file from path ", _output_cache_path,
+                    " to final output path ", _output_file_path, ": ", ec.message());
+                std::filesystem::remove_all(_output_cache_path, ec);
+            }
+        }
+        else
+        {
+            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                "CaptureAdaptedWriter cache file does not exist at path: ", _output_cache_path);
+        }
         _capture.handleCompletedCaptureEvent(_event);
     }
 
@@ -279,7 +297,7 @@ protected:
 
     inline std::filesystem::path getFilePathImpl() const noexcept
     {
-        return _output_file_path;
+        return _output_cache_path;
     }
 
     inline bool shouldFinishWritingImpl() const noexcept
@@ -326,6 +344,7 @@ private:
     T &_capture;
     std::shared_ptr<CaptureEvent> _event;
     std::filesystem::path _output_file_path;
+    std::filesystem::path _output_cache_path;
     mutable std::chrono::steady_clock::time_point _last_stats_time;
 };
 
