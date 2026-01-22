@@ -1,5 +1,4 @@
 #pragma once
-#include <iterator>
 #ifndef VIGIL_WRITERS_HPP
 #define VIGIL_WRITERS_HPP
 
