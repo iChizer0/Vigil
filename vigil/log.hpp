@@ -3,6 +3,11 @@
 #define VIGIL_LOG_HPP
 
 #include <chrono>
+#include <cstddef>
+#include <iomanip>
+#include <sstream>
+#include <string>
+#include <utility>
 
 #ifndef VG_LOG_LEVEL
 #define VG_LOG_LEVEL (vg_log_level_e::VG_LOG_LEVEL_DEBUG)
@@ -21,13 +26,28 @@
 #endif
 
 namespace {
+
+template<typename T>
+inline std::string fmtToHex(T &&value, size_t width) noexcept
+{
+    std::ostringstream oss;
+    oss << "0x" << std::setfill('0') << std::setw(width) << std::hex << std::uppercase << std::forward<T>(value);
+    return oss.str();
+}
+
 inline decltype(auto) getCurrentTimeStamp() noexcept
 {
     auto current_time = std::chrono::steady_clock::now().time_since_epoch();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(current_time).count();
     return ms;
 }
+
 } // namespace
+
+#ifdef VG_HEX
+#error "Duplicate definition of VG_HEX"
+#endif
+#define VG_HEX(value, width) fmtToHex(value, width)
 
 #if VG_LOG_TRACE_ENABLED
 #define VG_LOG(logf, lvl, ...)                                                                                         \
@@ -41,7 +61,7 @@ inline decltype(auto) getCurrentTimeStamp() noexcept
 #define VG_LOG(logf, lvl, ...)                                                                                         \
     do                                                                                                                 \
     {                                                                                                                  \
-        if (lvl >= VG_LOG_LEVEL)                                                                                       \
+        if constexpr (lvl >= VG_LOG_LEVEL)                                                                             \
             logf(lvl, __VA_ARGS__);                                                                                    \
     }                                                                                                                  \
     while (0)
