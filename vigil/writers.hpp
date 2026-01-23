@@ -251,7 +251,7 @@ public:
         }
 
         _output_file_path = _event->output_directory / _event->file_name;
-        _output_cache_path = _event->output_directory / (std::string(".") + _event->file_name + ".tmp");
+        _output_cache_path = _event->output_directory / (std::string(".") + _event->file_name);
         if (std::error_code ec; std::filesystem::exists(_output_cache_path, ec))
         {
             VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_INFO,
