@@ -643,8 +643,7 @@ private:
                 {
                     do
                     {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                        std::this_thread::yield();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
                         if (_stop_token.load(std::memory_order_acquire))
                         {
                             _ctx.shared_rule_event.reset(result->status);
