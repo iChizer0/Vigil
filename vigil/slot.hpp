@@ -230,15 +230,13 @@ public:
             if (_writer_thread)
             {
                 // Stop writer thread
-                if (_writer_thread->joinable())
-                    _writer_thread->join();
+                _writer_thread->join();
                 _writer_thread.reset();
             }
             if (_manager_thread)
             {
                 // Stop manager thread
-                if (_writer_thread->joinable())
-                    _manager_thread->join();
+                _manager_thread->join();
                 _manager_thread.reset();
             }
         }
@@ -250,16 +248,7 @@ public:
         }
 
         // Reset index manager
-        {
-            auto idx_mgr = _index_manager.load(std::memory_order_acquire);
-            if (idx_mgr)
-            {
-                _index_manager.store(nullptr, std::memory_order_release);
-                while (idx_mgr.use_count() > 1)
-                    std::this_thread::yield();
-                idx_mgr.reset();
-            }
-        }
+        _index_manager.store(nullptr, std::memory_order_release);
 
         // Unmount and set state to unmounted
         if (!ensureStateForceUnmounted())

@@ -379,7 +379,7 @@ private:
 
     void shutdown() noexcept
     {
-        if (bool expected = false; !_shutdown.compare_exchange_strong(expected, true))
+        if (bool expected = false; !_shutdown.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
             return; // Already shut down
 
         _indexer_cv.notify_all();
