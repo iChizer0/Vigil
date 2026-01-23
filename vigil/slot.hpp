@@ -1218,8 +1218,10 @@ private:
                 _index_manager.store(std::make_shared<IndexManager>(std::ref(_ctx), getRecordRootPath()),
                     std::memory_order_release);
             }
-            catch (...)
+            catch (const std::exception &e)
             {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create IndexManager for storage slot with device path ",
+                    _dev_path, ": ", e.what());
                 return false;
             }
         }

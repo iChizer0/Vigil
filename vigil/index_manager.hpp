@@ -192,19 +192,13 @@ public:
           _generation_target(1)
     {
         if (!fs::exists(_watch_path))
-        {
             throw std::runtime_error("Watch directory does not exist: " + _watch_path.string());
-        }
         if (!fs::is_directory(_watch_path))
-        {
             throw std::runtime_error("Watch path is not a directory: " + _watch_path.string());
-        }
         // Open fd to mount point for use with open_by_handle_at
         if (_mount_fd = ::open(_mount_point.c_str(), O_RDONLY); _mount_fd < 0)
-        {
             throw std::runtime_error(
                 "Failed to open mount point: " + _mount_point.string() + ", errno: " + std::to_string(errno));
-        }
 
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "IndexManager watching path: ", _watch_path,
             ", mount point: ", _mount_point);
@@ -313,9 +307,7 @@ private:
         const fs::path abs_path = fs::absolute(path);
         struct stat path_stat;
         if (::stat(abs_path.c_str(), &path_stat) != 0)
-        {
             throw std::runtime_error("Failed to stat path: " + abs_path.string() + ", errno: " + std::to_string(errno));
-        }
 
         const dev_t target_dev = path_stat.st_dev;
         fs::path current = abs_path;
@@ -421,9 +413,7 @@ private:
         _fanotify_fd = ::fanotify_init(FAN_CLOEXEC | FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME | FAN_UNLIMITED_QUEUE,
             O_RDONLY | O_LARGEFILE);
         if (_fanotify_fd < 0)
-        {
             throw std::runtime_error("Failed to initialize fanotify: " + std::to_string(errno));
-        }
 
         auto try_mark = [this](uint64_t mark_flag) {
             const uint64_t event_mask = FAN_CLOSE_WRITE | FAN_CREATE | FAN_DELETE | FAN_MOVE | FAN_MODIFY | FAN_ONDIR
@@ -464,13 +454,9 @@ private:
         const auto &path_str = path.native();
         // Allow exact match (for watch path itself) or proper subpath
         if (auto ord = path_str.length() <=> watch_str.length(); ord == std::strong_ordering::less)
-        {
             return false;
-        }
         else if (ord == std::strong_ordering::equal)
-        {
             return path_str == watch_str;
-        }
         return path_str.compare(0, watch_str.length(), watch_str) == 0 && (path_str[watch_str.length()] == '/');
     }
 
@@ -489,9 +475,7 @@ private:
         for (const auto &component: rel)
         {
             if (component.native().starts_with('.'))
-            {
                 return true;
-            }
         }
         return false;
     }
@@ -504,35 +488,25 @@ private:
                 std::unique_lock lock(_indexer_mutex);
                 _indexer_cv.wait(lock, [this] {
                     if (_shutdown.load(std::memory_order_acquire)) [[unlikely]]
-                    {
                         return true;
-                    }
                     if (!_indexable.load(std::memory_order_acquire)) [[unlikely]]
-                    {
                         return false;
-                    }
                     if (_generation_current.load(std::memory_order_acquire)
                         != _generation_target.load(std::memory_order_acquire))
-                    {
                         return true;
-                    }
                     {
                         const std::shared_lock entries_lock(_entries_mutex);
                         for (const auto &[_, entry]: _entries)
                         {
                             if (!entry->isValid())
-                            {
                                 return true;
-                            }
                         }
                     }
                     return false;
                 });
             }
             if (_shutdown.load(std::memory_order_acquire))
-            {
                 break;
-            }
             performIndex();
         }
     }
@@ -558,9 +532,7 @@ private:
                 try
                 {
                     if (indexRootEntries(*dir, _watch_path))
-                    {
                         _generation_current.store(generation, std::memory_order_release);
-                    }
                 }
                 catch (const std::exception &e)
                 {
@@ -594,9 +566,7 @@ private:
         {
             const std::string name = entry->d_name;
             if (name.starts_with('.'))
-            {
                 continue; // Skip ., .. and hidden files and directories
-            }
 
             seen_entries.insert(name);
 
@@ -610,13 +580,9 @@ private:
                     entry_index = it->second;
                 }
                 else if (it->second->isValid())
-                {
                     continue; // Already indexed and valid
-                }
                 else
-                {
                     entry_index = it->second;
-                }
             }
 
             const fs::path full_path = dir_path / name;
@@ -658,9 +624,7 @@ private:
                     partial_index = true;
                 }
                 else
-                {
                     ++it;
-                }
             }
         }
 
@@ -670,9 +634,7 @@ private:
     IndexStatus indexSubdirectory(const fs::path &dir_path, size_t &total) const noexcept
     {
         if (_shutdown.load(std::memory_order_acquire))
-        {
             return IndexStatus::CANCELED;
-        }
 
         DIR *dir = ::opendir(dir_path.c_str());
         if (!dir)
@@ -687,9 +649,8 @@ private:
         {
             const std::string_view name = entry->d_name;
             if (name.starts_with('.'))
-            {
                 continue; // Skip ., .. and hidden files and directories
-            }
+
             const fs::path full_path = dir_path / name;
             status = indexFileOrSubdirectory(full_path, total);
         }
@@ -701,9 +662,7 @@ private:
     IndexStatus indexFileOrSubdirectory(const fs::path &path, size_t &total) const noexcept
     {
         if (_shutdown.load(std::memory_order_acquire))
-        {
             return IndexStatus::CANCELED;
-        }
 
         struct stat st;
         if (::lstat(path.c_str(), &st) != 0)
@@ -719,9 +678,7 @@ private:
         if (S_ISDIR(st.st_mode))
         {
             if (auto sta = indexSubdirectory(path, total); sta != IndexStatus::SUCCESS)
-            {
                 return sta;
-            }
         }
 
         return IndexStatus::SUCCESS;
@@ -740,9 +697,7 @@ private:
             if (int ret = ::poll(&pfd, 1, kFanotifyPoolTimeoutMs); ret < 0)
             {
                 if (int err = errno; err == EINTR)
-                {
                     continue;
-                }
                 else
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Poll error in watcher loop: ", std::strerror(err));
@@ -752,22 +707,16 @@ private:
                 }
             }
             else if (ret == 0)
-            {
                 continue; // Timeout
-            }
 
             if (!(pfd.revents & POLLIN))
-            {
                 continue;
-            }
 
             const ssize_t len = ::read(_fanotify_fd, buffer, sizeof(buffer));
             if (len <= 0)
             { // 0 on EOF
                 if (int err = errno; err == EINTR || err == EAGAIN)
-                {
                     continue;
-                }
                 else
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Read error in watcher loop: ", std::strerror(err));
@@ -839,9 +788,7 @@ private:
 
             // Close fd if present
             if (metadata->fd >= 0)
-            {
                 ::close(metadata->fd);
-            }
 
             VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Event processed with result: ", static_cast<int>(result));
             switch (result)
@@ -874,9 +821,7 @@ private:
     {
         struct fanotify_event_info_fid *fid = reinterpret_cast<struct fanotify_event_info_fid *>(metadata + 1);
         if (fid->hdr.info_type != FAN_EVENT_INFO_TYPE_DFID_NAME) [[unlikely]]
-        {
             throw std::runtime_error("Unexpected fanotify FID event info type: " + std::to_string(fid->hdr.info_type));
-        }
 
         struct file_handle *file_handle = reinterpret_cast<struct file_handle *>(fid->handle);
         // Filename follows the file handle data (f_handle array)
@@ -891,9 +836,7 @@ private:
         // Get the directory path from the file handle
         int dir_fd = ::open_by_handle_at(_mount_fd, file_handle, O_RDONLY | O_DIRECTORY);
         if (dir_fd < 0)
-        {
             throw std::runtime_error("FID open_by_handle_at failed: " + std::to_string(errno));
-        }
 
         fs::path full_path;
 
@@ -907,11 +850,9 @@ private:
             const ssize_t path_len = ::readlink(proc_path, dir_path, sizeof(dir_path) - 1);
 
             ::close(dir_fd);
-
             if (path_len < 0)
-            {
                 throw std::runtime_error("FID readlink failed: " + std::to_string(errno));
-            }
+
             dir_path[path_len] = '\0';
             full_path = fs::path(dir_path) / filename;
         }
@@ -933,9 +874,8 @@ private:
             char file_path[PATH_MAX];
             const ssize_t path_len = ::readlink(proc_path, file_path, sizeof(file_path) - 1);
             if (path_len < 0)
-            {
                 throw std::runtime_error("FD readlink failed: " + std::to_string(errno));
-            }
+
             file_path[path_len] = '\0';
             full_path = fs::path(file_path);
         }
@@ -946,13 +886,9 @@ private:
     EventResult handleEvent(uint64_t mask, const fs::path &path) noexcept
     {
         if (path == _watch_path)
-        {
             return EventResult::REINDEX_IMMEDIATELY;
-        }
         if (!isUnderWatchPath(path) || containsHiddenComponent(path))
-        {
             return EventResult::SKIPPED;
-        }
         return tryIncrementalUpdate(mask, path);
     }
 
@@ -980,9 +916,7 @@ private:
             return EventResult::REINDEX;
         }
         if (rel_path.empty() || rel_path == ".")
-        {
             return EventResult::REINDEX; // Path is the watch path itself
-        }
 
         // Get the first component (entry name) and check if it's nested
         auto it = rel_path.begin();
@@ -993,21 +927,15 @@ private:
 
         // Handle deletion
         if (mask & (FAN_DELETE | FAN_MOVED_FROM))
-        {
             return handleIncrementalRemove(entry_name, is_nested, path);
-        }
 
         // Handle creation
         if (mask & (FAN_CREATE | FAN_MOVED_TO))
-        {
             return handleIncrementalAdd(entry_name, is_nested, path);
-        }
 
         // Handle modification
         if (mask & FAN_MODIFY)
-        {
             return handleIncrementalModify(entry_name, is_nested, path);
-        }
 
         // Other cases - fall back to reindex
         return EventResult::REINDEX;
@@ -1091,9 +1019,7 @@ private:
         {
             std::shared_lock entries_lock(_entries_mutex);
             for (auto &[_, entry]: _entries)
-            {
                 entry->markInvalidated();
-            }
         }
         _generation_target.fetch_add(1, std::memory_order_release);
         _indexer_cv.notify_one();
