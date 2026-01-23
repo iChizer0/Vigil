@@ -1,4 +1,5 @@
 #pragma once
+#include "vigil_ctypes.h"
 #ifndef VIGIL_SLOT_HPP
 #define VIGIL_SLOT_HPP
 
@@ -54,8 +55,8 @@ public:
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
           _internal(internal), _data_dir_name(data_dir_name), _info_mutex(), _label(), _uuid(), _type(), _mutex(),
           _op_mutex(), _stop_token(false), _manager_thread(nullptr), _writer_thread(nullptr), _state(SlotState::Error),
-          _stats(), _quota_limit_bytes(0), _quota_rotate(false), _index_manager(_ctx, _mount_path / _data_dir_name),
-          _writer_task_count(0), _write_stats(), _relay(ctx, _mount_path / _data_dir_name)
+          _stats(), _quota_limit_bytes(0), _quota_rotate(false), _index_manager(nullptr), _writer_task_count(0),
+          _write_stats(), _relay(ctx, _mount_path / _data_dir_name)
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Creating storage slot for device path ", _dev_path, " at mount path ",
             _mount_path, ", removable: ", _removable ? "true" : "false");
@@ -123,19 +124,15 @@ public:
     SlotStatus getStatus() const
     {
         const auto is_enabled = isEnabled();
-        auto state = _state.load(std::memory_order_acquire);
+        const auto state = is_enabled ? _state.load(std::memory_order_acquire) : probeInitialStatusAndGetState();
         std::optional<std::string> label, uuid, format;
-        std::optional<FileSize> quota_used;
-        if (!is_enabled) // Passively update stats when not enabled
-            state = probeInitialStatusAndGetState();
-        else if (state >= SlotState::Ready)
-            quota_used = _index_manager.usedBytes();
         {
             std::shared_lock lock(_info_mutex);
             label = _label;
             uuid = _uuid;
             format = _type;
         }
+        const auto idx_mgr = _index_manager.load(std::memory_order_acquire);
         return SlotStatus {
             .dev_path = _dev_path,
             .mount_path = _mount_path,
@@ -145,11 +142,19 @@ public:
             .uuid = std::move(uuid),
             .type = std::move(format),
             .enabled = is_enabled,
+            .syncing = idx_mgr ? idx_mgr->indexing() : false,
             .writing = isWriting(),
             .state = state,
             .stats = _stats.load(std::memory_order_acquire),
             .quota_preserved_bytes = isInternal() ? static_cast<FileSize>(kStorageMinFileSystemFreeBytesInternal) : 0,
-            .quota_used_bytes = quota_used,
+            .quota_used_bytes = [&idx_mgr]() -> std::optional<FileSize> {
+                if (idx_mgr)
+                {
+                    if (auto sz = idx_mgr->size(); sz.valid)
+                        return sz.size;
+                }
+                return std::nullopt;
+            }(),
             .quota_limit_bytes = _quota_limit_bytes.load(std::memory_order_acquire),
             .quota_rotate = _quota_rotate.load(std::memory_order_acquire),
         };
@@ -225,13 +230,15 @@ public:
             if (_writer_thread)
             {
                 // Stop writer thread
-                _writer_thread->join();
+                if (_writer_thread->joinable())
+                    _writer_thread->join();
                 _writer_thread.reset();
             }
             if (_manager_thread)
             {
                 // Stop manager thread
-                _manager_thread->join();
+                if (_writer_thread->joinable())
+                    _manager_thread->join();
                 _manager_thread.reset();
             }
         }
@@ -239,11 +246,20 @@ public:
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to safely shutdown threads for storage slot for device path ",
                 _dev_path, ": ", e.what());
-            ret = EFAULT; // Should not goto since there are remaining cleanup steps
+            ret = EFAULT;
         }
 
         // Reset index manager
-        _index_manager.reset();
+        {
+            auto idx_mgr = _index_manager.load(std::memory_order_acquire);
+            if (idx_mgr)
+            {
+                _index_manager.store(nullptr, std::memory_order_release);
+                while (idx_mgr.use_count() > 1)
+                    std::this_thread::yield();
+                idx_mgr.reset();
+            }
+        }
 
         // Unmount and set state to unmounted
         if (!ensureStateForceUnmounted())
@@ -290,26 +306,64 @@ public:
 
     vg_sta_e removeFileOrDirectory(const std::filesystem::path &relative_path)
     {
-        if (auto state = _state.load(std::memory_order_acquire);
-            state < SlotState::Configured || state == SlotState::Indexing)
+        if (auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
             return EPERM;
-        const auto ret = _index_manager.removeFileOrDirectory(relative_path);
-        if (ret != 0)
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove file or directory at relative path ", relative_path,
-                ": ", ret);
-        return ret;
+
+        if (auto p = getRecordRootPath(); IsPathUnderRoot(p, relative_path))
+        {
+            std::error_code ec;
+            if (std::filesystem::remove_all(p / relative_path, ec); ec)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove file or directory ", relative_path,
+                    " under record root ", p, ": ", ec.message());
+                return EIO;
+            }
+        }
+        else
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Path ", relative_path, " is outside record root ", p,
+                ", cannot remove");
+            return EACCES;
+        }
+
+        return 0;
     }
 
     vg_sta_e freeUpUsedSpace()
     {
-        if (auto state = _state.load(std::memory_order_acquire);
-            state < SlotState::Configured || state == SlotState::Indexing)
+        if (auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
             return EPERM;
-        const auto used = _index_manager.usedBytes();
-        if (used <= 0)
-            return 0;
-        const auto freed = _index_manager.freeUpStaledFiles(used);
-        return freed > 0 ? 0 : EIO; // At least some space should be freed
+
+        vg_sta_e ret = 0;
+        try
+        {
+            for (const auto &entry: std::filesystem::directory_iterator(getRecordRootPath(),
+                     std::filesystem::directory_options::skip_permission_denied))
+            {
+                try
+                {
+                    const auto &file_name = entry.path().filename().string();
+                    if (file_name.starts_with('.'))
+                        continue; // Skip hidden files and dirs
+                    std::filesystem::remove_all(entry.path());
+                }
+                catch (const std::exception &e)
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove file or directory: ", entry.path(),
+                        ", error: ", e.what());
+                    continue;
+                }
+            }
+        }
+        catch (const std::exception &e)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to iterate record root path for freeing up space: ", e.what());
+            ret = EIO;
+        }
+        if (auto idx_mgr = _index_manager.load(std::memory_order_acquire); idx_mgr)
+            idx_mgr->requestReindex(true);
+
+        return ret;
     }
 
     inline std::filesystem::path getRecordRootPath() const
@@ -361,43 +415,58 @@ protected:
 
     void moveAndAddCacheFile(const CacheFileInfo &cache_file_info) noexcept
     {
-        if (auto result = _index_manager.moveAndAddCacheFile(cache_file_info); result)
+        if (cache_file_info.path.empty())
         {
-            if (result->second > 0)
-                _write_stats.addNewWriteStat(result->second);
-            if (_ctx.c_api.basic.on_file_event_cb)
-            {
-                const auto path_str = result->first.string();
-                const auto attrs_str
-                    = cache_file_info.event ? WriteEvent::StatusString(cache_file_info.event->status) : "";
-                const auto file_evt = vg_file_evt_t {
-                    .op_type = VG_FILE_EVT_OP_ADDED,
-                    .path = path_str.c_str(),
-                    .size_bytes = result->second > 0 ? static_cast<size_t>(result->second) : 0,
-                    .attrs = attrs_str,
-                    .timestamp = _ctx.shared_time.unixTime(),
-                };
-                _ctx.c_api.basic.on_file_event_cb(&file_evt);
-            }
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
+                "Cache file info has empty path, first-level dir name: ", cache_file_info.first_level_dir_name);
+            return;
         }
-        else
+
+        const auto target_dir_path = getRecordRootPath() / cache_file_info.first_level_dir_name;
+        const auto target_file_path = target_dir_path / cache_file_info.path.filename();
+
+        size_t size = 0;
+        std::error_code ec;
+        if (size = std::filesystem::file_size(cache_file_info.path, ec); ec)
         {
-            std::error_code ec;
-            if (std::filesystem::exists(cache_file_info.path, ec))
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to move and add cache file ", cache_file_info.path,
-                    " to index, removing cache file");
-                std::filesystem::remove_all(cache_file_info.path, ec);
-            }
-            else if (ec)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Unable to check cache file existence for ", cache_file_info.path,
-                    ": ", ec.message());
-            }
-            else
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Cache file ", cache_file_info.path,
-                    " missing after move failure, skipping resync");
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to get file size for cache file ", cache_file_info.path, ": ",
+                ec.message());
+            goto l_fail_add_cache_file;
         }
+        _write_stats.addNewWriteStat(size);
+        if (!EnsureDirectoryExists(target_dir_path))
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to ensure directory exists: ", target_dir_path);
+            goto l_fail_add_cache_file;
+        }
+        if (std::filesystem::rename(cache_file_info.path, target_file_path, ec); ec)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to move file from ", cache_file_info.path, " to ",
+                target_file_path, ": ", ec.message());
+            goto l_fail_add_cache_file;
+        }
+
+        VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Created new record file at ", target_file_path, ", size: ", size,
+            " bytes");
+
+        if (_ctx.c_api.basic.on_file_event_cb)
+        {
+            const auto path_str = target_file_path.string();
+            const auto attrs_str = cache_file_info.event ? WriteEvent::StatusString(cache_file_info.event->status) : "";
+            const auto file_evt = vg_file_evt_t {
+                .op_type = VG_FILE_EVT_OP_ADDED,
+                .path = path_str.c_str(),
+                .size_bytes = size,
+                .attrs = attrs_str,
+                .timestamp = _ctx.shared_time.unixTime(),
+            };
+            _ctx.c_api.basic.on_file_event_cb(&file_evt);
+        }
+        return;
+
+    l_fail_add_cache_file:
+        std::filesystem::remove_all(cache_file_info.path, ec);
+        return;
     }
 
     std::filesystem::path getRecordQuotaLimitPath() const
@@ -441,20 +510,13 @@ private:
 
     void doRotateStaledFilesAndSync() const
     {
-        // Sync the index first
-        if (auto now = std::chrono::steady_clock::now(); now - _index_manager.lastIndexTime() >= kIndexSyncInterval)
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Syncing index for storage slot for device path ", _dev_path);
-            if (!_index_manager.trySync())
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Trying sync index for storage slot for device path ", _dev_path,
-                    " again");
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Resynced index took ",
-                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now).count(),
-                " ms for storage slot for device path ", _dev_path);
-        }
-
         // Check if we need to free up space
         if (!_quota_rotate.load(std::memory_order_acquire))
+            return;
+
+        // Get index manager
+        auto idx_mgr = _index_manager.load(std::memory_order_acquire);
+        if (!idx_mgr)
             return;
 
         const auto limit = _quota_limit_bytes.load(std::memory_order_acquire);
@@ -465,7 +527,9 @@ private:
         // Check if quota limit is exceeded
         if (limit > 0)
         {
-            if ((_index_manager.usedBytes() + watermarks.high_remain_bytes) > limit)
+            if (auto index_result = idx_mgr->size(); !index_result.valid)
+                return;
+            else if (index_result.size + watermarks.high_remain_bytes > limit)
                 goto l_free_up_space;
         }
 
@@ -478,14 +542,12 @@ private:
     l_free_up_space:
         const auto estimated_write_bytes_in_period
             = _write_stats.getEstimatedWriteBytesIn(kManagerEstimatedWriteBytesPeriod);
-
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Storage slot for device path ", _dev_path,
             " is low on free space, quota limit: ", limit, " bytes, estimated write bytes in next ",
             kManagerEstimatedWriteBytesPeriod.count(), " minutes: ", estimated_write_bytes_in_period,
             " bytes, will free up ", watermarks.recycle_bytes, " bytes");
 
-        const auto freed = _index_manager.freeUpStaledFiles(watermarks.recycle_bytes);
-
+        const auto freed = idx_mgr->removeEntries(watermarks.recycle_bytes);
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Freed up ", freed, " bytes on storage slot for device path", _dev_path);
     }
 
@@ -633,8 +695,11 @@ private:
                 // Check if quota limit is exceeded
                 if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit > 0)
                 {
-                    if ((_index_manager.usedBytes() + watermarks.critical_remain_bytes) > limit)
-                        goto l_continue_log;
+                    if (auto idx_mgr = _index_manager.load(std::memory_order_acquire); idx_mgr)
+                        goto l_continue_evt;
+                    else if (auto index_result = idx_mgr->size();
+                        !index_result.valid || (index_result.size + watermarks.critical_remain_bytes > limit))
+                        goto l_continue_evt;
                 }
 
                 // Check if free space is sufficient
@@ -862,7 +927,7 @@ private:
             VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Mount path ", _mount_path,
                 " does not exist, recreating before mount probe");
             const std::unique_lock lock(_op_mutex);
-            if (!IndexManager::ensureDirectoryExist(_mount_path, _ctx))
+            if (!EnsureDirectoryExists(_mount_path, &_ctx))
                 return false;
         }
 
@@ -916,7 +981,7 @@ private:
     bool doMount() const
     {
         const std::unique_lock lock(_op_mutex);
-        if (!IndexManager::ensureDirectoryExist(_mount_path, _ctx))
+        if (!EnsureDirectoryExists(_mount_path, &_ctx))
             return false;
         const auto cmd = "mount '" + _dev_path.string() + "' '" + _mount_path.string() + "' > /dev/null 2>&1";
         if (auto ret = std::system(cmd.c_str()); ret != 0)
@@ -1112,9 +1177,9 @@ private:
 
     bool doConfigureDirectories() const
     {
-        if (!IndexManager::ensureDirectoryExist(getRecordRootPath(), _ctx))
+        if (!EnsureDirectoryExists(getRecordRootPath(), &_ctx))
             return false;
-        if (!IndexManager::ensureDirectoryExist(getRecordCachePath(), _ctx))
+        if (!EnsureDirectoryExists(getRecordCachePath(), &_ctx))
             return false;
         return true;
     }
@@ -1155,6 +1220,38 @@ private:
         return false;
     }
 
+    bool doCreateIndexManager()
+    {
+        if (!_index_manager.load(std::memory_order_acquire))
+        {
+            try
+            {
+                _index_manager.store(std::make_shared<IndexManager>(std::ref(_ctx), getRecordRootPath()),
+                    std::memory_order_release);
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool doSyncIndex()
+    {
+        auto idx_mgr = _index_manager.load(std::memory_order_acquire);
+        if (!idx_mgr)
+            return false;
+        idx_mgr->requestReindex();
+        while (!_stop_token.load(std::memory_order_acquire))
+        {
+            std::this_thread::sleep_for(kIndexSyncInterval);
+            if (idx_mgr->indexed())
+                return true;
+        }
+        return false;
+    }
+
     bool ensureStateReady()
     {
         auto state = _state.load(std::memory_order_acquire);
@@ -1164,7 +1261,9 @@ private:
                 std::memory_order_acquire))
             return false;            // Early return if state changed, indexing should only be done by one thread
         state = SlotState::Indexing; // Update expected state
-        if (!_index_manager.trySync())
+        if (!doCreateIndexManager())
+            goto l_index_again;
+        if (!doSyncIndex())
             goto l_index_again;
         return _state.compare_exchange_strong(state, SlotState::Ready, std::memory_order_acq_rel,
             std::memory_order_acquire);
@@ -1186,7 +1285,7 @@ private:
     static inline constexpr const std::chrono::minutes kManagerEstimatedWriteBytesPeriod = std::chrono::minutes(30);
     static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);
     static inline constexpr const std::chrono::milliseconds kWriterRotatePullDelay = std::chrono::milliseconds(50);
-    static inline constexpr const std::chrono::minutes kIndexSyncInterval = std::chrono::minutes(5);
+    static inline constexpr const std::chrono::milliseconds kIndexSyncInterval = std::chrono::milliseconds(100);
     static inline constexpr const std::string_view kRecordCacheDirName = ".cache";
     static inline constexpr const std::string_view kRecordQuotaLimitFileName = ".quota_limit";
     static inline constexpr const std::string_view kRecordQuotaRotateFileName = ".quota_rotate";
@@ -1232,7 +1331,7 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _quota_rotate;
 
     // Index manager, e.g., 'YYYY-MM-DD' directories
-    mutable IndexManager _index_manager;
+    mutable std::atomic<std::shared_ptr<IndexManager>> _index_manager;
 
     // Writer task count
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> _writer_task_count;

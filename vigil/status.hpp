@@ -47,6 +47,7 @@ struct SlotStatus
     std::optional<std::string> uuid;
     std::optional<std::string> type;
     bool enabled;
+    bool syncing;
     bool writing;
     SlotState state;
     SlotStats stats;
@@ -65,6 +66,7 @@ struct SlotStatus
         j["sUUID"] = uuid;
         j["sType"] = type;
         j["bEnabled"] = enabled;
+        j["bSyncing"] = syncing;
         j["bWriting"] = writing;
         j["eState"] = static_cast<int>(state);
         j["sState"] = SlotStateString(state);

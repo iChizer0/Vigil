@@ -199,7 +199,7 @@ private:
         ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << micros.count();
 
         const auto cache_dir = _slot.getRecordCachePath();
-        if (!IndexManager::ensureDirectoryExist(cache_dir, this->ctxRef()))
+        if (!EnsureDirectoryExists(cache_dir, &this->ctxRef()))
             return false;
         auto fmt = std::string(this->settings().format);
         std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -243,7 +243,7 @@ public:
             throw Exception("CaptureAdaptedWriter detected insufficient remaining space");
         }
 
-        if (!IndexManager::ensureDirectoryExist(_event->output_directory, this->ctxRef()))
+        if (!EnsureDirectoryExists(_event->output_directory, &this->ctxRef()))
         {
             this->setEventStatus(WriteEvent::Status::Failed);
             throw Exception(

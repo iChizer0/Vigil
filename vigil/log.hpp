@@ -28,14 +28,14 @@
 namespace {
 
 template<typename T>
-inline std::string fmtToHex(T &&value, size_t width) noexcept
+inline std::string FmtToHex(T &&value, size_t width) noexcept
 {
     std::ostringstream oss;
     oss << "0x" << std::setfill('0') << std::setw(width) << std::hex << std::uppercase << std::forward<T>(value);
     return oss.str();
 }
 
-inline decltype(auto) getCurrentTimeStamp() noexcept
+inline decltype(auto) GetCurrentTimeStamp() noexcept
 {
     auto current_time = std::chrono::steady_clock::now().time_since_epoch();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(current_time).count();
@@ -47,14 +47,14 @@ inline decltype(auto) getCurrentTimeStamp() noexcept
 #ifdef VG_HEX
 #error "Duplicate definition of VG_HEX"
 #endif
-#define VG_HEX(value, width) fmtToHex(value, width)
+#define VG_HEX(value, width) FmtToHex(value, width)
 
 #if VG_LOG_TRACE_ENABLED
 #define VG_LOG(logf, lvl, ...)                                                                                         \
     do                                                                                                                 \
     {                                                                                                                  \
         if constexpr (lvl >= VG_LOG_LEVEL)                                                                             \
-            logf(lvl, "[", getCurrentTimeStamp(), "] ", __FILE__, ":", __LINE__, ": ", __VA_ARGS__);                   \
+            logf(lvl, "[", GetCurrentTimeStamp(), "] ", __FILE__, ":", __LINE__, ": ", __VA_ARGS__);                   \
     }                                                                                                                  \
     while (0)
 #else
