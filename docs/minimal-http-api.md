@@ -67,7 +67,8 @@ Get the information about the rule system.
             "iBufferSize": 1024 // Integer, buffer size in bytes
         }
     },
-    "bMediaPaused": false // Boolean, whether media capture is currently paused
+    "bMediaPaused": false, // Boolean, whether media capture is currently paused
+    "bVideoClipLengthSeconds": 60 // Integer, configured video clip length in seconds (estimated)
 }
 ```
 
@@ -242,12 +243,13 @@ Get the current status of all storage slots.
             "bWriting": false, // Boolean
             "eState": 8, // Integer, SlotState enum value (1: ERROR, 2: NOT_FORMATTED_OR_FORMAT_UNSUPPORTED, 3: FORMATTING, 4: NOT_MOUNTED, 5: MOUNTED, 6: CONFIGURED, 7: INDEXING, 8: READY)
             "sState": "READY", // String, human-readable state ("ERROR", "NOT_FORMATTED_OR_FORMAT_UNSUPPORTED", "FORMATTING", "NOT_MOUNTED", "MOUNTED", "CONFIGURED", "INDEXING", "READY")
-            "iStatsSizeBytes": 1000000000, // Integer, total size
-            "iStatsFreeBytes": 500000000, // Integer, free space
+            "iStatsSizeBytes": 1000000000, // Integer|null if eState < MOUNTED, total size
+            "iStatsFreeBytes": 500000000, // Integer|null if eState < MOUNTED, free space
+            "iQuotaMinimumRecommendBytes": 200000000, // Integer, minimum recommended quota limit
             "iQuotaPreservedBytes": 0, // Integer, space preserved for system use
-            "iQuotaLimitBytes": 100000000, // Integer
-            "iQuotaUsedBytes": 10000000, // Integer|null if unknown
-            "bQuotaRotate": true // Boolean
+            "iQuotaUsedBytes": 10000000, // Integer|null if eState < INDEXING
+            "iQuotaLimitBytes": 100000000, // Integer|null if eState < CONFIGURED
+            "bQuotaRotate": true // Boolean|null if eState < CONFIGURED
         }
     ],
     "sDataDirName": "DCIM", // String

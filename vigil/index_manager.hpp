@@ -242,19 +242,17 @@ public:
         if (!_indexable.load(std::memory_order_acquire))
             return { false, 0 };
         const auto generation = _generation_current.load(std::memory_order_acquire);
-        if (generation != _generation_target.load(std::memory_order_acquire))
-            return { false, 0 };
+        bool valid = true;
         FileSize total_size = 0;
         {
             const std::shared_lock entries_lock(_entries_mutex);
             for (const auto &[_, entry]: _entries)
             {
-                if (!entry->isValid())
-                    return { false, 0 };
+                valid = valid && entry->isValid();
                 total_size += entry->size();
             }
         }
-        return { _indexable.load(std::memory_order_acquire)
+        return { valid && _indexable.load(std::memory_order_acquire)
                      && generation == _generation_target.load(std::memory_order_acquire),
             total_size };
     }
