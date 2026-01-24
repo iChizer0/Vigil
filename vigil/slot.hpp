@@ -1,5 +1,4 @@
 #pragma once
-#include "vigil_ctypes.h"
 #ifndef VIGIL_SLOT_HPP
 #define VIGIL_SLOT_HPP
 
@@ -84,17 +83,17 @@ public:
         }
     }
 
-    std::filesystem::path devPath() const
+    const std::filesystem::path &devPath() const noexcept
     {
         return _dev_path;
     }
 
-    std::filesystem::path mountPath() const
+    const std::filesystem::path &mountPath() const noexcept
     {
         return _mount_path;
     }
 
-    bool isWriting() const
+    inline bool isWriting() const noexcept
     {
         return _writer_task_count.load(std::memory_order_acquire) > 0;
     }
@@ -146,6 +145,11 @@ public:
             .writing = isWriting(),
             .state = state,
             .stats = _stats.load(std::memory_order_acquire),
+            .quota_minimum_recommend_bytes = [this]() -> FileSize {
+                const auto watermarks = _ctx.shared_writer_settings.getWaterMarks();
+                return std::max(watermarks.high_remain_bytes + watermarks.recycle_bytes,
+                    static_cast<FileSize>(kStorageMinSupportedFileSystemBytes));
+            }(),
             .quota_preserved_bytes = isInternal() ? static_cast<FileSize>(kStorageMinFileSystemFreeBytesInternal) : 0,
             .quota_used_bytes = [&idx_mgr]() -> std::optional<FileSize> {
                 if (idx_mgr)
@@ -371,7 +375,7 @@ public:
         return 0;
     }
 
-    vg_sta_e enableOrHeartbeatNginxRelay() 
+    vg_sta_e enableOrHeartbeatNginxRelay()
     {
         return _relay.enableOrHeartbeatNginxRelay();
     }
@@ -509,9 +513,7 @@ private:
             return;
 
         const auto limit = _quota_limit_bytes.load(std::memory_order_acquire);
-        auto watermarks = _ctx.shared_writer_settings.getWaterMarks();
-        if (_internal)
-            watermarks += kStorageMinFileSystemFreeBytesInternal;
+        const auto watermarks = _ctx.shared_writer_settings.getWaterMarks();
 
         // Check if quota limit is exceeded
         if (limit > 0)
@@ -523,7 +525,10 @@ private:
         }
 
         // Check if free space is sufficient
-        if (doStats(); _stats.load(std::memory_order_acquire).free_bytes <= watermarks.high_remain_bytes)
+        if (doStats(); _stats.load(std::memory_order_acquire).free_bytes
+                       < (isInternal() ? static_cast<FileSize>(
+                                             watermarks.high_remain_bytes + kStorageMinFileSystemFreeBytesInternal)
+                                       : watermarks.high_remain_bytes))
             goto l_free_up_space;
 
         return;
@@ -672,9 +677,7 @@ private:
             }
 
             {
-                auto watermarks = settings->watermarks;
-                if (_internal)
-                    watermarks += kStorageMinFileSystemFreeBytesInternal;
+                const auto watermarks = settings->watermarks;
 
                 // Check if slot status is ready to write
                 if (!isReadyToWrite())
@@ -784,7 +787,7 @@ private:
         if (auto ret = blkid_do_probe(pr); ret != 0)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to probe device ", _dev_path, " for device info, code: ", ret,
-                ", errno: ", std::strerror(errno));
+                ", errno: ", static_cast<int>(errno));
             blkid_free_probe(pr);
             return false;
         }
@@ -900,7 +903,7 @@ private:
             if (::stat(_dev_path.c_str(), &dev_sb) != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to stat device path ", _dev_path, ": ",
-                    std::strerror(errno));
+                    static_cast<int>(errno));
                 return false;
             }
 
@@ -915,7 +918,7 @@ private:
             else
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Failed to stat mount path ", _mount_path, ": ",
-                    std::strerror(errno));
+                    static_cast<int>(errno));
                 return false;
             }
         }
@@ -935,7 +938,7 @@ private:
             if (::stat(_mount_path.c_str(), &mnt_sb) != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Failed to stat mount path ", _mount_path, ": ",
-                    std::strerror(errno));
+                    static_cast<int>(errno));
                 return false;
             }
         }
@@ -949,17 +952,17 @@ private:
         return true;
     }
 
-    bool doUnmount() const
+    bool doUnmount() const noexcept
     {
         const std::unique_lock lock(_op_mutex);
         // Sync the filesystem before unmounting (syncfs)
         if (auto fd = ::open(_mount_path.c_str(), O_RDONLY); fd < 0)
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open mount path ", _mount_path,
-                " for syncing before unmounting: ", std::strerror(errno));
+                " for syncing before unmounting: ", static_cast<int>(errno));
         else if (::syncfs(fd) != 0)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to sync filesystem at mount path ", _mount_path,
-                " before unmounting: ", std::strerror(errno));
+                " before unmounting: ", static_cast<int>(errno));
             ::close(fd);
         }
         else
@@ -968,7 +971,7 @@ private:
         if (::umount2(_mount_path.c_str(), MNT_DETACH) != 0)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to unmount storage slot at path ", _mount_path, ": ",
-                std::strerror(errno));
+                static_cast<int>(errno));
             return false;
         }
         if (_ctx.c_api.storage.on_unmount_cb)
@@ -1000,7 +1003,7 @@ private:
         if (::statvfs(_mount_path.c_str(), &vfs) != 0)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to get filesystem stats for mount path ", _mount_path, ": ",
-                std::strerror(errno));
+                static_cast<int>(errno));
             return false;
         }
         const auto new_stats = SlotStats(static_cast<FileSize>(vfs.f_blocks * vfs.f_frsize),
@@ -1119,14 +1122,14 @@ private:
         if (!quota_file.is_open())
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open quota limit file at ", quota_limit_path,
-                " for writing: ", std::strerror(errno));
+                " for writing: ", static_cast<int>(errno));
             return false;
         }
         quota_file << std::to_string(quota_limit) << std::endl;
         if (quota_file.fail())
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to write quota limit to file at ", quota_limit_path, ": ",
-                std::strerror(errno));
+                static_cast<int>(errno));
             return false;
         }
         quota_file.close();
@@ -1147,7 +1150,7 @@ private:
             if (!quota_file.is_open())
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open quota rotate file at ", quota_rotate_path,
-                    " for writing: ", std::strerror(errno));
+                    " for writing: ", static_cast<int>(errno));
                 return false;
             }
             quota_file.close();

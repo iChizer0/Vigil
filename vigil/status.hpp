@@ -51,6 +51,7 @@ struct SlotStatus
     bool writing;
     SlotState state;
     SlotStats stats;
+    FileSize quota_minimum_recommend_bytes;
     FileSize quota_preserved_bytes;
     std::optional<FileSize> quota_used_bytes;
     FileSize quota_limit_bytes;
@@ -72,6 +73,7 @@ struct SlotStatus
         j["sState"] = SlotStateString(state);
         j["iStatsSizeBytes"] = stats.size_bytes;
         j["iStatsFreeBytes"] = stats.free_bytes;
+        j["iQuotaMinimumRecommendBytes"] = quota_minimum_recommend_bytes;
         j["iQuotaPreservedBytes"] = quota_preserved_bytes;
         j["iQuotaUsedBytes"] = quota_used_bytes;
         j["iQuotaLimitBytes"] = quota_limit_bytes;

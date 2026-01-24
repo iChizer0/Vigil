@@ -335,7 +335,7 @@ struct ScheduleRuleConfig
     bool enabled;
     std::vector<TimeRange> active_weekdays;
 
-    ScheduleRuleConfig() : active_weekdays() { }
+    ScheduleRuleConfig() : enabled(false), active_weekdays() { }
 
     ScheduleRuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {

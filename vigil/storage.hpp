@@ -334,7 +334,7 @@ private:
         {
             _netlink_fd = ::socket(AF_NETLINK, SOCK_RAW, NETLINK_KOBJECT_UEVENT);
             if (_netlink_fd < 0)
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create netlink socket: ", std::strerror(errno));
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create netlink socket: ", static_cast<int>(errno));
             else
             {
                 struct sockaddr_nl sa = {};
@@ -342,7 +342,7 @@ private:
                 sa.nl_groups = 1;
                 if (::bind(_netlink_fd, reinterpret_cast<sockaddr *>(&sa), sizeof(sa)) < 0)
                 {
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to bind netlink socket: ", std::strerror(errno));
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to bind netlink socket: ", static_cast<int>(errno));
                     ::close(_netlink_fd);
                     _netlink_fd = -1;
                 }
@@ -403,7 +403,7 @@ private:
                 if (len < 0)
                 {
                     if (errno != EAGAIN && errno != EWOULDBLOCK)
-                        VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Netlink recv error: ", std::strerror(errno));
+                        VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Netlink recv error: ", static_cast<int>(errno));
                     break;
                 }
                 std::string action, devname, subsystem, devtype;

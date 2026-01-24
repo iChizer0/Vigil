@@ -292,7 +292,7 @@ public:
             if (!_schedule_rule_config || *schedule_rule_config != *_schedule_rule_config)
             {
                 _schedule_rule_config = std::move(schedule_rule_config);
-                _schedule_rule.reset(); // If fail in the following steps, the previous rule is changed
+                _schedule_rule.reset();
                 _schedule_rule = std::make_unique<ScheduleRule>(*_schedule_rule_config, *_ctx);
 
                 if (store)
