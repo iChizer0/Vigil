@@ -99,29 +99,29 @@ public:
         return _writer_task_count.load(std::memory_order_acquire) > 0;
     }
 
-    inline bool isEnabled() const
+    inline bool isEnabled() const noexcept
     {
         const std::shared_lock lock(_mutex);
         return _manager_thread && _writer_thread;
     }
 
-    inline bool isReadyToWrite() const
+    inline bool isReadyToWrite() const noexcept
     {
         return !_stop_token.load(std::memory_order_acquire)
                && _state.load(std::memory_order_acquire) == SlotState::Ready;
     }
 
-    inline bool isRemovable() const
+    inline bool isRemovable() const noexcept
     {
         return _removable;
     }
 
-    inline bool isInternal() const
+    inline bool isInternal() const noexcept
     {
         return _internal;
     }
 
-    SlotStatus getStatus() const
+    SlotStatus getStatus() const noexcept
     {
         const auto is_enabled = isEnabled();
         const auto state = is_enabled ? _state.load(std::memory_order_acquire) : probeInitialStatusAndGetState();
@@ -355,12 +355,12 @@ public:
         return ret;
     }
 
-    inline std::filesystem::path getRecordRootPath() const
+    inline std::filesystem::path getRecordRootPath() const noexcept
     {
         return _mount_path / _data_dir_name;
     }
 
-    vg_sta_e formatFileSystem()
+    vg_sta_e formatFileSystem() noexcept
     {
         const std::unique_lock lock(_mutex);
         if (const auto state = _state.load(std::memory_order_acquire);
@@ -371,12 +371,12 @@ public:
         return 0;
     }
 
-    vg_sta_e enableOrHeartbeatNginxRelay()
+    vg_sta_e enableOrHeartbeatNginxRelay() 
     {
         return _relay.enableOrHeartbeatNginxRelay();
     }
 
-    vg_sta_e statusOfNginxRelay(RelayStatus &status)
+    vg_sta_e statusOfNginxRelay(RelayStatus &status) noexcept
     {
         status = _relay.getStatus();
         return 0;
@@ -492,12 +492,12 @@ private:
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to clear record cache at ", cache_path, ": ", ec.message());
     }
 
-    bool probeStateHealth() const
+    bool probeStateHealth() const noexcept
     {
         return probeDeviceOnline() && probeCorrectlyMounted() && probeCorrectlyConfigured();
     }
 
-    void doRotateStaledFilesAndSync() const
+    void doRotateStaledFilesAndSync() const noexcept
     {
         // Check if we need to free up space
         if (!_quota_rotate.load(std::memory_order_acquire))
@@ -540,7 +540,7 @@ private:
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Freed up ", freed, " bytes on storage slot for device path", _dev_path);
     }
 
-    void managerThreadTask()
+    void managerThreadTask() noexcept
     {
         while (!_stop_token.load(std::memory_order_acquire))
         {
@@ -632,7 +632,7 @@ private:
         }
     }
 
-    void writerThreadTask()
+    void writerThreadTask() noexcept
     {
         auto handle_write = [this](SlotAdaptedWriter<Slot> &writer) -> bool {
             const auto result = writer.operator()();
@@ -685,9 +685,10 @@ private:
                 {
                     if (auto idx_mgr = _index_manager.load(std::memory_order_acquire); idx_mgr)
                         goto l_continue_evt;
-                    else if (auto index_result = idx_mgr->size();
-                        !index_result.valid || (index_result.size + watermarks.critical_remain_bytes > limit))
+                    else if (auto index_result = idx_mgr->size(); !index_result.valid)
                         goto l_continue_evt;
+                    else if (index_result.size + watermarks.critical_remain_bytes > limit)
+                        goto l_continue_log;
                 }
 
                 // Check if free space is sufficient
@@ -758,7 +759,7 @@ private:
     // - MARK: Slot Private Methods
 
 private:
-    bool probeDeviceOnline() const
+    bool probeDeviceOnline() const noexcept
     {
         std::error_code ec;
         if (std::filesystem::exists(_dev_path, ec))
@@ -768,7 +769,7 @@ private:
         return false;
     }
 
-    bool doUpdatePartionInfo() const
+    bool doUpdatePartionInfo() const noexcept
     {
         const std::shared_lock lock(_op_mutex);
         blkid_probe pr = blkid_new_probe_from_filename(_dev_path.c_str());
@@ -807,13 +808,13 @@ private:
         return true;
     }
 
-    bool probeDeviceFileSystemSupported() const
+    bool probeDeviceFileSystemSupported() const noexcept
     {
         const std::shared_lock lock(_info_mutex);
         return _type.has_value() && kSupportedFileSystemTypes.find(*_type) != kSupportedFileSystemTypes.end();
     }
 
-    SlotState probeInitialStatusAndGetState() const
+    SlotState probeInitialStatusAndGetState() const noexcept
     {
         if (!probeDeviceOnline())
             return SlotState::Error;
@@ -834,28 +835,37 @@ private:
         return SlotState::Configured;
     }
 
-    bool ensureStateResetToInitial()
+    bool ensureStateResetToInitial() noexcept
     {
         auto state = _state.load(std::memory_order_acquire);
         return _state.compare_exchange_strong(state, probeInitialStatusAndGetState(), std::memory_order_acq_rel,
             std::memory_order_acquire);
     }
 
-    bool doFormat() const
+    bool doFormat() const noexcept
     {
         const std::unique_lock lock(_op_mutex);
         const auto cmd
             = "mkfs.vfat -F 32 -I '" + _dev_path.string() + "' > /dev/null 2>&1"; // Format the device using mkfs.vfat
-        if (int ret = std::system(cmd.c_str()); ret != 0)
+        try
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to format storage slot device ", _dev_path,
-                " with mkfs.vfat, return code: ", ret);
+            if (int ret = std::system(cmd.c_str()); ret != 0)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to format storage slot device ", _dev_path,
+                    " with mkfs.vfat, return code: ", ret);
+                return false;
+            }
+        }
+        catch (const std::exception &e)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Exception occurred while formatting storage slot device ", _dev_path,
+                ": ", e.what());
             return false;
         }
         return true;
     }
 
-    bool ensureStateFormatted() // Never auto-format, must be called explicitly
+    bool ensureStateFormatted() noexcept // Never auto-format, must be called explicitly
     {
         auto state = _state.load(std::memory_order_acquire);
         if (state != SlotState::NotFormattedOrFormatUnsupported || state == SlotState::Formatting)
@@ -878,7 +888,7 @@ private:
         return false;
     }
 
-    bool probeCorrectlyMounted() const
+    bool probeCorrectlyMounted() const noexcept
     {
         struct stat dev_sb {};
         struct stat mnt_sb {};
@@ -966,7 +976,7 @@ private:
         return true;
     }
 
-    bool doMount() const
+    bool doMount() const noexcept
     {
         const std::unique_lock lock(_op_mutex);
         if (!EnsureDirectoryExists(_mount_path, &_ctx))
@@ -983,7 +993,7 @@ private:
         return true;
     }
 
-    bool doStats() const
+    bool doStats() const noexcept
     {
         struct statvfs vfs {};
         const std::shared_lock lock(_op_mutex);
@@ -1005,7 +1015,7 @@ private:
         return true;
     }
 
-    bool ensureStateMounted()
+    bool ensureStateMounted() noexcept
     {
         // Only mount if not mounted
         auto state = _state.load(std::memory_order_acquire);
@@ -1026,7 +1036,7 @@ private:
         return false;
     }
 
-    bool ensureStateForceUnmounted()
+    bool ensureStateForceUnmounted() noexcept
     {
         auto state = _state.load(std::memory_order_acquire);
         if (isRemovable() && !isInternal())
@@ -1047,7 +1057,7 @@ private:
         return false;
     }
 
-    FileSize readQuotaLimitFromFile() const
+    FileSize readQuotaLimitFromFile() const noexcept
     {
         std::error_code ec;
         if (auto quota_file = getRecordQuotaLimitPath(); !std::filesystem::is_regular_file(quota_file, ec))
@@ -1091,7 +1101,7 @@ private:
         return 0;
     }
 
-    bool writeQuotaLimitToFile(FileSize quota_limit) const
+    bool writeQuotaLimitToFile(FileSize quota_limit) const noexcept
     {
         const auto quota_limit_path = getRecordQuotaLimitPath();
         if (std::error_code ec;
@@ -1123,7 +1133,7 @@ private:
         return true;
     }
 
-    bool writeQuotaRotateToFile(bool rotate) const
+    bool writeQuotaRotateToFile(bool rotate) const noexcept
     {
         const auto quota_rotate_path = getRecordQuotaRotatePath();
         // If true, create an empty file; else, remove the file if exists
@@ -1155,7 +1165,7 @@ private:
         return true;
     }
 
-    bool probeCorrectlyConfigured() const
+    bool probeCorrectlyConfigured() const noexcept
     {
         std::error_code ec;
         if (auto record_root_dir = getRecordRootPath(); !std::filesystem::is_directory(record_root_dir, ec))
@@ -1163,7 +1173,7 @@ private:
         return true;
     }
 
-    bool doConfigureDirectories() const
+    bool doConfigureDirectories() const noexcept
     {
         if (!EnsureDirectoryExists(getRecordRootPath(), &_ctx))
             return false;
@@ -1172,14 +1182,14 @@ private:
         return true;
     }
 
-    bool doSyncQuotaLimit() const
+    bool doSyncQuotaLimit() const noexcept
     {
         if (auto quota_limit = readQuotaLimitFromFile(); quota_limit > 0)
             _quota_limit_bytes.store(quota_limit, std::memory_order_release);
         return true;
     }
 
-    bool doSyncQuotaRotate() const
+    bool doSyncQuotaRotate() const noexcept
     {
         std::error_code ec;
         _quota_rotate.store(std::filesystem::is_regular_file(getRecordQuotaRotatePath(), ec),
@@ -1187,7 +1197,7 @@ private:
         return true;
     }
 
-    bool ensureStateConfigured()
+    bool ensureStateConfigured() noexcept
     {
         auto state = _state.load(std::memory_order_acquire);
         if (state != SlotState::Mounted)
@@ -1208,7 +1218,7 @@ private:
         return false;
     }
 
-    bool doCreateIndexManager()
+    bool doCreateIndexManager() noexcept
     {
         if (!_index_manager.load(std::memory_order_acquire))
         {
@@ -1227,7 +1237,7 @@ private:
         return true;
     }
 
-    bool doSyncIndex()
+    bool doSyncIndex() noexcept
     {
         auto idx_mgr = _index_manager.load(std::memory_order_acquire);
         if (!idx_mgr)
@@ -1242,7 +1252,7 @@ private:
         return false;
     }
 
-    bool ensureStateReady()
+    bool ensureStateReady() noexcept
     {
         auto state = _state.load(std::memory_order_acquire);
         if (state != SlotState::Configured || state == SlotState::Indexing)

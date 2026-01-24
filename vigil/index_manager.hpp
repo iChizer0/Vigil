@@ -210,7 +210,7 @@ public:
         _indexer_thread = std::thread(&IndexManager::indexerLoop, this);
     }
 
-    ~IndexManager()
+    ~IndexManager() noexcept
     {
         shutdown();
     }
@@ -221,17 +221,17 @@ public:
     IndexManager(IndexManager &&) = delete;
     IndexManager &operator=(IndexManager &&) = delete;
 
-    const fs::path &mountPoint() const
+    const fs::path &mountPoint() const noexcept
     {
         return _mount_point;
     }
 
-    bool indexing() const
+    bool indexing() const noexcept
     {
         return _indexing.load(std::memory_order_acquire);
     }
 
-    bool indexed() const
+    bool indexed() const noexcept
     {
         return _generation_current.load(std::memory_order_acquire)
                == _generation_target.load(std::memory_order_acquire);

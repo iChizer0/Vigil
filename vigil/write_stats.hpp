@@ -39,7 +39,7 @@ public:
         _hourly_write_bytes_per_minutes[index] += bytes;
     }
 
-    FileSize getEstimatedWriteBytesIn(const std::chrono::minutes &period)
+    FileSize getEstimatedWriteBytesIn(const std::chrono::minutes &period) noexcept
     {
         const std::unique_lock lock(_write_stats_mutex);
         const auto now_since_start = std::chrono::duration_cast<std::chrono::minutes>(
@@ -62,7 +62,7 @@ public:
     }
 
 private:
-    std::chrono::minutes syncWriteStatsAndGetDurationUnsafe(const std::chrono::minutes &now_since_start)
+    std::chrono::minutes syncWriteStatsAndGetDurationUnsafe(const std::chrono::minutes &now_since_start) noexcept
     {
         const auto cur = now_since_start.count();
         const auto prv = _write_stats_time_last_sync.count();
