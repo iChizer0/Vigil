@@ -574,7 +574,7 @@ struct CaptureConfig
             if (j.contains("iVideoLengthSeconds"))
             {
                 if (auto l = j.at("iVideoLengthSeconds").get<int>(); l > 0)
-                    video_length = std::chrono::seconds();
+                    video_length = std::chrono::seconds(l);
                 else
                     throw Exception(
                         "Invalid video length seconds " + std::to_string(l) + " while parsing CaptureConfig");

@@ -22,6 +22,7 @@
 #include <nlohmann/json.hpp>
 
 #include "configs.hpp"
+#include "constants.hpp"
 #include "context.hpp"
 #include "log.hpp"
 #include "rules.hpp"
@@ -522,6 +523,9 @@ public:
             {
                 const bool media_paused = _ctx->media_paused.load(std::memory_order_relaxed);
                 res_j["bMediaPaused"] = media_paused;
+            }
+            {
+                res_j["bVideoClipLengthSeconds"] = kVideoClipLengthDefault.count();
             }
         }
         catch (const std::exception &e)
