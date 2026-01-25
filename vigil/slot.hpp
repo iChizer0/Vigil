@@ -55,7 +55,7 @@ public:
           _internal(internal), _data_dir_name(data_dir_name), _info_mutex(), _label(), _uuid(), _type(), _mutex(),
           _op_mutex(), _stop_token(false), _manager_thread(nullptr), _writer_thread(nullptr), _state(SlotState::Error),
           _stats(), _quota_limit_bytes(0), _quota_rotate(false), _index_manager(nullptr), _writer_task_count(0),
-          _write_stats(), _relay(ctx, _mount_path / _data_dir_name)
+          _rotating(false), _write_stats(), _relay(ctx, _mount_path / _data_dir_name)
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Creating storage slot for device path ", _dev_path, " at mount path ",
             _mount_path, ", removable: ", _removable ? "true" : "false");
@@ -93,9 +93,14 @@ public:
         return _mount_path;
     }
 
-    inline bool isWriting() const noexcept
+    inline bool isRemovable() const noexcept
     {
-        return _writer_task_count.load(std::memory_order_acquire) > 0;
+        return _removable;
+    }
+
+    inline bool isInternal() const noexcept
+    {
+        return _internal;
     }
 
     inline bool isEnabled() const noexcept
@@ -110,14 +115,14 @@ public:
                && _state.load(std::memory_order_acquire) == SlotState::Ready;
     }
 
-    inline bool isRemovable() const noexcept
+    inline bool isWriting() const noexcept
     {
-        return _removable;
+        return _writer_task_count.load(std::memory_order_acquire) > 0;
     }
 
-    inline bool isInternal() const noexcept
+    inline bool isRotating() const noexcept
     {
-        return _internal;
+        return _rotating.load(std::memory_order_acquire);
     }
 
     SlotStatus getStatus() const noexcept
@@ -143,6 +148,7 @@ public:
             .enabled = is_enabled,
             .syncing = idx_mgr ? idx_mgr->indexing() : false,
             .writing = isWriting(),
+            .rotating = isRotating(),
             .state = state,
             .stats = _stats.load(std::memory_order_acquire),
             .quota_minimum_recommend_bytes = [this]() -> FileSize {
@@ -153,10 +159,7 @@ public:
             .quota_preserved_bytes = isInternal() ? static_cast<FileSize>(kStorageMinFileSystemFreeBytesInternal) : 0,
             .quota_used_bytes = [&idx_mgr]() -> std::optional<FileSize> {
                 if (idx_mgr)
-                {
-                    if (auto sz = idx_mgr->size(); sz.valid)
-                        return sz.size;
-                }
+                    return idx_mgr->size().size;
                 return std::nullopt;
             }(),
             .quota_limit_bytes = _quota_limit_bytes.load(std::memory_order_acquire),
@@ -253,6 +256,9 @@ public:
 
         // Reset index manager
         _index_manager.store(nullptr, std::memory_order_release);
+
+        // Reset rotating status
+        _rotating.store(false, std::memory_order_release);
 
         // Unmount and set state to unmounted
         if (!ensureStateForceUnmounted())
@@ -505,12 +511,18 @@ private:
     {
         // Check if we need to free up space
         if (!_quota_rotate.load(std::memory_order_acquire))
+        {
+            _rotating.store(false, std::memory_order_release);
             return;
+        }
 
         // Get index manager
         auto idx_mgr = _index_manager.load(std::memory_order_acquire);
         if (!idx_mgr)
+        {
+            _rotating.store(false, std::memory_order_release);
             return;
+        }
 
         const auto limit = _quota_limit_bytes.load(std::memory_order_acquire);
         const auto watermarks = _ctx.shared_writer_settings.getWaterMarks();
@@ -531,9 +543,12 @@ private:
                                        : watermarks.high_remain_bytes))
             goto l_free_up_space;
 
+        _rotating.store(false, std::memory_order_release);
         return;
 
     l_free_up_space:
+        _rotating.store(true, std::memory_order_release);
+
         const auto estimated_write_bytes_in_period
             = _write_stats.getEstimatedWriteBytesIn(kManagerEstimatedWriteBytesPeriod);
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Storage slot for device path ", _dev_path,
@@ -1334,10 +1349,13 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _quota_rotate;
 
     // Index manager, e.g., 'YYYY-MM-DD' directories
-    mutable std::atomic<std::shared_ptr<IndexManager>> _index_manager;
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<std::shared_ptr<IndexManager>> _index_manager;
 
     // Writer task count
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> _writer_task_count;
+
+    // Rotating status
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _rotating;
 
     // Write stats
     mutable WriteStats _write_stats;

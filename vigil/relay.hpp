@@ -171,10 +171,17 @@ private:
     void disableRelayUnsafe() noexcept
     {
         stopRelay();
-        if (_relay_thread)
+        try
         {
-            _relay_thread->join();
-            _relay_thread.reset();
+            if (_relay_thread)
+            {
+                _relay_thread->join();
+                _relay_thread.reset();
+            }
+        }
+        catch (const std::exception &e)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to safely shutdown relay threads: ", e.what());
         }
     }
 

@@ -241,15 +241,16 @@ Get the current status of all storage slots.
             "sType": "ext4", // String|null
             "bEnabled": true, // Boolean
             "bWriting": false, // Boolean
+            "bRotating": false, // Boolean
             "eState": 8, // Integer, SlotState enum value (1: ERROR, 2: NOT_FORMATTED_OR_FORMAT_UNSUPPORTED, 3: FORMATTING, 4: NOT_MOUNTED, 5: MOUNTED, 6: CONFIGURED, 7: INDEXING, 8: READY)
             "sState": "READY", // String, human-readable state ("ERROR", "NOT_FORMATTED_OR_FORMAT_UNSUPPORTED", "FORMATTING", "NOT_MOUNTED", "MOUNTED", "CONFIGURED", "INDEXING", "READY")
-            "iStatsSizeBytes": 1000000000, // Integer|null if eState < MOUNTED, total size
-            "iStatsFreeBytes": 500000000, // Integer|null if eState < MOUNTED, free space
+            "iStatsSizeBytes": 1000000000, // Integer, total size, not accurate if eState < MOUNTED 
+            "iStatsFreeBytes": 500000000, // Integer, free space, not accurate if eState < MOUNTED
             "iQuotaMinimumRecommendBytes": 200000000, // Integer, minimum recommended quota limit
             "iQuotaPreservedBytes": 0, // Integer, space preserved for system use
             "iQuotaUsedBytes": 10000000, // Integer|null if eState < INDEXING
-            "iQuotaLimitBytes": 100000000, // Integer|null if eState < CONFIGURED
-            "bQuotaRotate": true // Boolean|null if eState < CONFIGURED
+            "iQuotaLimitBytes": 100000000, // Integer, not accurate if eState < CONFIGURED
+            "bQuotaRotate": true // Boolean, not accurate if eState < CONFIGURED
         }
     ],
     "sDataDirName": "DCIM", // String

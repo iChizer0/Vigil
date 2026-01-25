@@ -49,13 +49,14 @@ struct SlotStatus
     bool enabled;
     bool syncing;
     bool writing;
+    bool rotating;
     SlotState state;
-    std::optional<SlotStats> stats;
+    SlotStats stats;
     FileSize quota_minimum_recommend_bytes;
     FileSize quota_preserved_bytes;
     std::optional<FileSize> quota_used_bytes;
-    std::optional<FileSize> quota_limit_bytes;
-    std::optional<bool> quota_rotate;
+    FileSize quota_limit_bytes;
+    bool quota_rotate;
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
@@ -69,34 +70,16 @@ struct SlotStatus
         j["bEnabled"] = enabled;
         j["bSyncing"] = syncing;
         j["bWriting"] = writing;
+        j["bRotating"] = rotating;
         j["eState"] = static_cast<int>(state);
         j["sState"] = SlotStateString(state);
-        if (state >= SlotState::Mounted && stats)
-        {
-            j["iStatsSizeBytes"] = stats->size_bytes;
-            j["iStatsFreeBytes"] = stats->free_bytes;
-        }
-        else
-        {
-            j["iStatsSizeBytes"] = nullptr;
-            j["iStatsFreeBytes"] = nullptr;
-        }
+        j["iStatsSizeBytes"] = stats.size_bytes;
+        j["iStatsFreeBytes"] = stats.free_bytes;
         j["iQuotaMinimumRecommendBytes"] = quota_minimum_recommend_bytes;
         j["iQuotaPreservedBytes"] = quota_preserved_bytes;
-        if (state >= SlotState::Indexing)
-            j["iQuotaUsedBytes"] = quota_used_bytes;
-        else
-            j["iQuotaUsedBytes"] = nullptr;
-        if (state >= SlotState::Configured)
-        {
-            j["iQuotaLimitBytes"] = quota_limit_bytes;
-            j["bQuotaRotate"] = quota_rotate;
-        }
-        else
-        {
-            j["iQuotaLimitBytes"] = nullptr;
-            j["bQuotaRotate"] = nullptr;
-        }
+        j["iQuotaUsedBytes"] = quota_used_bytes;
+        j["iQuotaLimitBytes"] = quota_limit_bytes;
+        j["bQuotaRotate"] = quota_rotate;
     }
 };
 
