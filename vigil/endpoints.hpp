@@ -626,7 +626,7 @@ private:
                 type = _schedule_rule->type();
                 id = _schedule_rule->id();
             }
-            else
+            else if (_schedule_rule)
                 return;
         }
         {

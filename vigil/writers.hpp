@@ -205,8 +205,8 @@ private:
         std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
         _cache_file_info.path = cache_dir / (std::string(this->settings().file_name_prefix) + ss.str() + '.' + fmt);
 
-        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "Initialized writer with 1st level directory '",
-            _cache_file_info.first_level_dir_name, "', cache file path '", _cache_file_info.path, "'");
+        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "Initialized writer with 1st level directory \"",
+            _cache_file_info.first_level_dir_name, "\", cache file path ", _cache_file_info.path);
         return true;
     }
 
@@ -443,6 +443,9 @@ private:
             }
             _fd = -1;
         }
+
+        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "VideoWriter finished writing file at path ",
+            this->getFilePath());
         return WriteEvent::Status::Completed;
     }
 
@@ -465,6 +468,7 @@ private:
         return WriteEvent::Status::Failed;                                                                             \
     }
 
+        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "VideoWriter waiting for starting key frame, fd: ", _fd);
         for (;;)
         {
             if (isClipFinished()) [[unlikely]]
@@ -496,6 +500,7 @@ private:
             break;
         }
 
+        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "VideoWriter started writing frames, fd: ", _fd);
         do
         {
             ctx_media_mutex.lock();
