@@ -415,8 +415,8 @@ private:
             throw std::runtime_error("Failed to initialize fanotify: " + std::to_string(errno));
 
         auto try_mark = [this](uint64_t mark_flag) {
-            const uint64_t event_mask = FAN_CLOSE_WRITE | FAN_CREATE | FAN_DELETE | FAN_MOVE | FAN_MODIFY | FAN_ONDIR
-                                        | FAN_DELETE_SELF | FAN_MOVE_SELF;
+            const uint64_t event_mask
+                = FAN_CLOSE_WRITE | FAN_CREATE | FAN_DELETE | FAN_MOVE | FAN_ONDIR | FAN_DELETE_SELF | FAN_MOVE_SELF;
             return ::fanotify_mark(_fanotify_fd, FAN_MARK_ADD | mark_flag, event_mask, AT_FDCWD, _mount_point.c_str());
         };
 
@@ -748,7 +748,7 @@ private:
             {
                 // Handle FID events (directory change notifications)
                 if (metadata->mask
-                    & (FAN_CREATE | FAN_DELETE | FAN_MOVE | FAN_MODIFY | FAN_DELETE_SELF | FAN_MOVE_SELF))
+                    & (FAN_CLOSE_WRITE | FAN_CREATE | FAN_DELETE | FAN_MOVE | FAN_DELETE_SELF | FAN_MOVE_SELF))
                 {
                     // For FID-based events, extract the path
                     if (metadata->event_len > sizeof(struct fanotify_event_metadata))
@@ -933,7 +933,7 @@ private:
             return handleIncrementalAdd(entry_name, is_nested, path);
 
         // Handle modification
-        if (mask & FAN_MODIFY)
+        if (mask & FAN_CLOSE_WRITE)
             return handleIncrementalModify(entry_name, is_nested, path);
 
         // Other cases - fall back to reindex
