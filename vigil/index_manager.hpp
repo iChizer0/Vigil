@@ -282,6 +282,7 @@ public:
                     ++it;
                 }
             }
+            _generation_target.fetch_add(1, std::memory_order_release);
         }
         return removed_size;
     }
