@@ -759,7 +759,7 @@ private:
             }
 
         l_continue_log:
-            if (!_quota_rotate.load())
+            if (_quota_rotate.load())
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Writer thread for ", _dev_path,
                     " reached critical watermark, skipping new writer task start");
