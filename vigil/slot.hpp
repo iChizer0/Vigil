@@ -701,7 +701,7 @@ private:
                 // Check if quota limit is exceeded
                 if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit > 0)
                 {
-                    if (auto idx_mgr = _index_manager.load(std::memory_order_acquire); idx_mgr)
+                    if (auto idx_mgr = _index_manager.load(std::memory_order_acquire); !idx_mgr)
                         goto l_continue_evt;
                     else if (auto index_result = idx_mgr->size(); !index_result.valid)
                         goto l_continue_evt;
@@ -761,7 +761,7 @@ private:
         l_continue_log:
             if (_quota_rotate.load())
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Writer thread for ", _dev_path,
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Writer thread for ", _dev_path,
                     " reached critical watermark, skipping new writer task start");
             }
 
