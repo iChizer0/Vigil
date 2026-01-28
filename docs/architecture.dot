@@ -63,7 +63,7 @@ digraph G {
       style="rounded,dashed";
       color=gray50;
       storage_cfg_ep [label="Storage Config\nTarget Slot Selection", shape=box];
-      storage_status_ep [label="Storage Status\nSlot States/Stats", shape=box];
+      storage_status_ep [label="Storage Status\nSlot States/Stats\nSyncing/Rotating Status", shape=box];
       storage_ctrl_ep [label="Storage Control\nFormat/Eject/FreeUp\nRelay Enable/Disable\nRemove Files", shape=box];
     }
 
@@ -236,15 +236,18 @@ digraph G {
 
       slot_state [label="Slot State Machine\nError→Initial→Formatted\n→Mounted→Configured→Ready", shape=box];
       slot_ops [label="Slot Operations\nMount/Unmount/Format\nEnable/Disable\nSuspend/Resume Write", shape=box];
-      slot_quota [label="Quota Manager\nLimit Bytes\nRotate Policy", shape=box];
+      slot_quota [label="Quota Manager\nLimit Bytes\nRotate Policy\nMinimum Recommend Bytes", shape=box];
+      slot_rotating [label="Rotating Flag\nstd::atomic<bool>", shape=note];
 
       subgraph cluster_slot_components {
         label="Slot Components";
         style="rounded,dotted";
         color=gray70;
-        indexer [label="IndexManager\nFirst-Level Dir Stats (YYYY-MM-DD)\nFile Size Tracking\nStaled File Cleanup", shape=box];
+        indexer [label="IndexManager\nstd::atomic<shared_ptr>\nfanotify Real-Time Watch\nMount Point Auto-Detect\nGeneration Counter Sync", shape=box];
+        indexer_threads [label="IndexManager Threads\nWatcher (fanotify poll)\nIndexer (lazy reindex)\nIncremental Event Handling", shape=box, style=filled, fillcolor=lightsalmon];
+        entry_index [label="EntryIndex\nLock-Free Atomic Size\nRevision Tracking\nCAS-Based Updates", shape=note];
         write_stats [label="WriteStats\nHourly Bytes/Minute\nEstimated Write Rate", shape=box];
-        slot_writer [label="Slot::writerThreadTask\nCache→Target Move\nAsync Write Operations", shape=box];
+        slot_writer [label="Slot::writerThreadTask\nCache→Target Move\nDirect Filesystem Ops", shape=box];
         relay [label="Relay\nUUID Symlink Export\nTimeout Auto-Disable (5m)\nNginx Integration", shape=box];
       }
     }
@@ -399,7 +402,7 @@ digraph G {
   // ============================================================
 
   slot_adapter -> slot_writer [color=orange, style=dashed, xlabel="cache file"];
-  slot_writer -> indexer [color=orange, style=dashed, xlabel="move & index"];
+  slot_writer -> fs [color=blue, xlabel="move file"];
 
   // ============================================================
   // EDGES: Storage Internal Relationships
@@ -408,9 +411,10 @@ digraph G {
   storage -> slot_state [color=blue, xlabel="lifecycle", weight=3];
   slot_state -> slot_ops [color=blue, weight=2];
   slot_ops -> slot_quota [color=blue, xlabel="quota check"];
-  slot_quota -> indexer [color=blue, xlabel="usage query", weight=2];
+  slot_quota -> indexer [color=blue, xlabel="size() query", weight=2];
+  slot_quota -> slot_rotating [color=blue, xlabel="set flag"];
   indexer -> write_stats [color=blue, weight=2];
-  slot_quota -> indexer [color=orange, style=dashed, xlabel="rotate", constraint=false];
+  slot_quota -> fs [color=blue, xlabel="remove_all", constraint=false];
 
   // Slot owns writer thread
   slot_ops -> writer_thread [color=blue, xlabel="spawn", weight=2];
@@ -418,7 +422,13 @@ digraph G {
 
   // Storage → Filesystem
   slot_ops -> fs [color=blue, xlabel="mount/format", weight=2];
-  indexer -> fs [color=blue, xlabel="file ops"];
+  indexer -> fs [color=green, style=dashed, xlabel="fanotify watch"];
+  indexer_threads -> fs [color=orange, style=dashed, xlabel="poll/stat"];
+
+  // IndexManager internal relationships
+  indexer -> indexer_threads [color=blue, xlabel="owns"];
+  indexer -> entry_index [color=blue, xlabel="manages"];
+  indexer_threads -> entry_index [color=orange, style=dashed, xlabel="update size"];
 
   // Relay relationships
   slot_ops -> relay [color=blue, xlabel="enable/disable"];
