@@ -62,7 +62,6 @@ public:
         if (ensureStateResetToInitial())
         {
             ensureStateMounted();
-            ensureStateConfigured();
             ensureStateResetToInitial(); // Reset to initial state after mounting
         }
     }
@@ -128,7 +127,9 @@ public:
     SlotStatus getStatus() const noexcept
     {
         const auto is_enabled = isEnabled();
-        const auto state = is_enabled ? _state.load(std::memory_order_acquire) : probeInitialStatusAndGetState();
+        auto state = _state.load(std::memory_order_acquire);
+        if (!is_enabled && state != SlotState::Formatting)
+            state = probeInitialStatusAndGetState();
         std::optional<std::string> label, uuid, format;
         {
             std::shared_lock lock(_info_mutex);
@@ -801,10 +802,19 @@ private:
             BLKID_SUBLKS_LABEL | BLKID_SUBLKS_UUID | BLKID_SUBLKS_TYPE | BLKID_SUBLKS_USAGE);
         if (auto ret = blkid_do_probe(pr); ret != 0)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to probe device ", _dev_path, " for device info, code: ", ret,
-                ", errno: ", static_cast<int>(errno));
+            if (ret == 1)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "No recognizable filesystem found on device ", _dev_path);
+                const std::unique_lock lock2(_info_mutex);
+                _label.reset();
+                _uuid.reset();
+                _type.reset();
+            }
+            else
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to probe device ", _dev_path,
+                    " for device info, code: ", ret, ", errno: ", static_cast<int>(errno));
             blkid_free_probe(pr);
-            return false;
+            return ret == 1;
         }
         {
             const char *val = nullptr;
@@ -863,10 +873,11 @@ private:
     bool doFormat() const noexcept
     {
         const std::unique_lock lock(_op_mutex);
-        const auto cmd
-            = "mkfs.vfat -F 32 -I '" + _dev_path.string() + "' > /dev/null 2>&1"; // Format the device using mkfs.vfat
         try
         {
+            std::string cmd = "umount '" + _dev_path.string() + "' > /dev/null 2>&1";
+            std::system(cmd.c_str()); // Ignore return code, just try to unmount first
+            cmd = "mkfs.vfat -F 32 -I '" + _dev_path.string() + "' > /dev/null 2>&1";
             if (int ret = std::system(cmd.c_str()); ret != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to format storage slot device ", _dev_path,
