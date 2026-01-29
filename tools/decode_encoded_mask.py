@@ -7,6 +7,8 @@ where hex_data is the little-endian byte representation of the mask bitmap.
 """
 
 import sys
+import os
+import re
 
 
 def decode_mask(encoded: str) -> list[list[int]]:
@@ -20,6 +22,9 @@ def decode_mask(encoded: str) -> list[list[int]]:
     height = int(parts[0])
     width = int(parts[1])
     hex_data = parts[2]
+
+    # trim non-hex characters (like newlines)
+    hex_data = re.sub(r"[^0-9a-fA-F]", "", hex_data)
 
     # Convert hex string to bytes
     data_bytes = bytes.fromhex(hex_data)
@@ -82,13 +87,25 @@ def print_mask(mask: list[list[int]], use_unicode: bool = True) -> None:
 
 def main() -> int:
     if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <encoded_mask> [--ascii]", file=sys.stderr)
-        print("  encoded_mask: height,width,hex_data", file=sys.stderr)
+        print(f"Usage: {sys.argv[0]} <encoded_mask_or_file> [--ascii]", file=sys.stderr)
+        print(
+            "  encoded_mask_or_file: height,width,hex_data OR path to file", file=sys.stderr
+        )
         print("  --ascii: use ASCII characters instead of Unicode", file=sys.stderr)
         return 1
 
-    encoded = sys.argv[1]
+    arg = sys.argv[1]
     use_unicode = "--ascii" not in sys.argv
+
+    if os.path.isfile(arg):
+        try:
+            with open(arg, "r") as f:
+                encoded = f.read().strip()
+        except OSError as e:
+            print(f"Error reading file '{arg}': {e}", file=sys.stderr)
+            return 1
+    else:
+        encoded = arg
 
     try:
         mask = decode_mask(encoded)
