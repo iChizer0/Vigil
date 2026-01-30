@@ -472,10 +472,6 @@ struct SlotConfig
             j.at("iQuotaLimitBytes").get_to(quota_limit_bytes);
             if (quota_limit_bytes < -1)
                 throw Exception("Invalid quota limit bytes " + std::to_string(quota_limit_bytes));
-            if (quota_limit_bytes > static_cast<FileSize>(kStorageMaxSupportedFileSystemBytes))
-                throw Exception("Quota limit bytes " + std::to_string(quota_limit_bytes)
-                                + " exceeds maximum supported file system size of "
-                                + std::to_string(kStorageMaxSupportedFileSystemBytes));
         }
         j.at("bQuotaRotate").get_to(quota_rotate);
     }
@@ -505,8 +501,10 @@ struct StorageConfig
         auto selector_j = j.at("dSelectSlotToEnable");
         if (enabled = !selector_j.is_null(); enabled)
         {
-            selector_j.at("sByDevPath").get_to(target_enabled_slot_dev_path);
-            selector_j.at("sByUUID").get_to(target_enabled_slot_uuid);
+            if (auto vj = selector_j.at("sByDevPath"); !vj.is_null())
+                vj.get_to(target_enabled_slot_dev_path);
+            if (auto vj = selector_j.at("sByUUID"); !vj.is_null())
+                vj.get_to(target_enabled_slot_uuid);
             if (target_enabled_slot_dev_path.empty() && target_enabled_slot_uuid.empty())
                 throw Exception("At least one of target enabled slot device path or UUID must be specified");
         }
