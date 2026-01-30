@@ -233,11 +233,18 @@ Get or set the storage configuration.
 
 ```json
 {
-    "sTargetEnabledSlotDevPath": "/dev/sda1", // String, device path to enable, empty string means disable all storage slots
+    "sTargetEnabledSlotDevPath": "/dev/sda1", // String, device path to enable
+    "sTargetEnabledSlotUUID": "550e8400-e29b-41d4-a716-446655440000", // String, volume UUID to enable (PARTUUID)
     "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
     "message": "" // String, optional, present only on failure
 }
 ```
+
+Notes:
+
+- If both `sTargetEnabledSlotDevPath` and `sTargetEnabledSlotUUID` are provided, the storage slot must match both fields to be selected.
+- If both `sTargetEnabledSlotDevPath` and `sTargetEnabledSlotUUID` are empty, no storage slot will be enabled.
+- If one of the fields is empty in `sTargetEnabledSlotDevPath` and `sTargetEnabledSlotUUID`, the filter will ignore that field when selecting the storage slot to enable.
 
 ### Storage Status
 
@@ -260,6 +267,7 @@ Get the current status of all storage slots.
             "sLabel": "MyDrive", // String (optional), volume label, null if not available or not formatted yet, may not exist if eState < NOT_MOUNTED
             "sUUID": "550e8400-e29b-41d4-a716-446655440000", // String (optional), volume UUID, null if not available or not formatted yet, may not exist if eState < NOT_MOUNTED
             "sType": "ext4", // String (optional), filesystem type, null if not available or not formatted yet, may not exist if eState < NOT_MOUNTED
+            "bSelected": true, // Boolean, whether this slot is the target enabled slot according to current configuration
             "bEnabled": true, // Boolean, whether this slot is currently enabled
             "bWriting": false, // Boolean, whether this slot currently has activate writing tasks (e.g., recording videos, writing images)
             "bRotating": false, // Boolean, whether this slot is currently performing quota rotation
@@ -270,14 +278,12 @@ Get the current status of all storage slots.
             "iQuotaMinimumRecommendBytes": 200000000, // Integer, minimum recommended quota limit, may not work well if quota limit is set below this value
             "iQuotaPreservedBytes": 0, // Integer, space preserved for system use of the partition, the size of quota limit exceeds (iStatsSizeBytes - iQuotaPreservedBytes) may not be fully usable
             "iQuotaUsedBytes": 10000000, // Integer (optional), current used space under quota, null if eState < CONFIGURED, not accurate if eState < READY
-            "iQuotaLimitBytes": 100000000, // Integer, configured quota limit, 0 means no limit, not accurate or uses the default if eState < CONFIGURED
+            "iQuotaLimitBytes": 100000000, // Integer, configured quota limit, -1 means no limit, not accurate or uses the default if eState < CONFIGURED
             "bQuotaRotate": true // Boolean, whether quota rotation is enabled, not accurate or uses the default if eState < CONFIGURED
         },
         // ... More storage slots, dynamically updated
     ],
-    "sDataDirName": "DCIM", // String, name of the record data directory under each storage mount point
-    "sCurrentEnabledSlotDevPath": "/dev/sda1", // String, currently enabled slot
-    "sTargetEnabledSlotDevPath": "/dev/sda1" // String, target slot to enable from config
+    "sDataDirName": "DCIM" // String, name of the record data directory under each storage mount point
 }
 ```
 

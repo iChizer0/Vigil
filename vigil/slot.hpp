@@ -54,7 +54,7 @@ public:
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
           _internal(internal), _data_dir_name(data_dir_name), _info_mutex(), _label(), _uuid(), _type(), _mutex(),
           _op_mutex(), _stop_token(false), _manager_thread(nullptr), _writer_thread(nullptr), _state(SlotState::Error),
-          _stats(), _quota_limit_bytes(0), _quota_rotate(false), _index_manager(nullptr), _writer_task_count(0),
+          _stats(), _quota_limit_bytes(-1), _quota_rotate(false), _index_manager(nullptr), _writer_task_count(0),
           _rotating(false), _write_stats(), _relay(ctx, _mount_path / _data_dir_name)
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Creating storage slot for device path ", _dev_path, " at mount path ",
@@ -124,6 +124,12 @@ public:
         return _rotating.load(std::memory_order_acquire);
     }
 
+    std::optional<std::string> getUUID() const noexcept
+    {
+        std::shared_lock lock(_info_mutex);
+        return _uuid;
+    }
+
     SlotStatus getStatus() const noexcept
     {
         const auto is_enabled = isEnabled();
@@ -146,6 +152,7 @@ public:
             .label = std::move(label),
             .uuid = std::move(uuid),
             .type = std::move(format),
+            .selected = false,
             .enabled = is_enabled,
             .syncing = idx_mgr ? idx_mgr->indexing() : false,
             .writing = isWriting(),
@@ -278,7 +285,7 @@ public:
 
     vg_sta_e setQuotaLimitBytes(FileSize bytes)
     {
-        if (bytes < 0 || bytes > _stats.load(std::memory_order_acquire).size_bytes)
+        if (bytes < -1 || bytes > _stats.load(std::memory_order_acquire).size_bytes)
             return EINVAL;
         const std::unique_lock lock(_mutex);
         if (_state.load(std::memory_order_acquire) == SlotState::Mounted && !ensureStateConfigured())
@@ -529,7 +536,7 @@ private:
         const auto watermarks = _ctx.shared_writer_settings.getWaterMarks();
 
         // Check if quota limit is exceeded
-        if (limit > 0)
+        if (limit >= 0)
         {
             if (auto index_result = idx_mgr->size(); !index_result.valid)
                 return;
@@ -700,7 +707,7 @@ private:
                     goto l_continue_evt;
 
                 // Check if quota limit is exceeded
-                if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit > 0)
+                if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit >= 0)
                 {
                     if (auto idx_mgr = _index_manager.load(std::memory_order_acquire); !idx_mgr)
                         goto l_continue_evt;
@@ -823,7 +830,7 @@ private:
                 _label = std::string(val);
             else
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "No LABEL found for device ", _dev_path);
-            if (blkid_probe_lookup_value(pr, "UUID", &val, nullptr) == 0 && val)
+            if (blkid_probe_lookup_value(pr, "PARTUUID", &val, nullptr) == 0 && val)
                 _uuid = std::string(val);
             else
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "No UUID found for device ", _dev_path);
@@ -1092,7 +1099,7 @@ private:
         if (auto quota_file = getRecordQuotaLimitPath(); !std::filesystem::is_regular_file(quota_file, ec))
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "No valid quota file found at ", quota_file);
-            return 0;
+            return -1;
         }
         else
         {
@@ -1100,7 +1107,7 @@ private:
             if (!ifs)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to open quota file ", quota_file, ": ", ec.message());
-                return 0;
+                return -1;
             }
             std::string line;
             if (std::getline(ifs, line))
@@ -1109,12 +1116,11 @@ private:
                 {
                     const FileSize quota_limit = std::stoll(line);
                     const auto stats = _stats.load(std::memory_order_acquire);
-                    if (quota_limit <= 0 || quota_limit >= stats.size_bytes)
+                    if (quota_limit < -1 || quota_limit >= stats.size_bytes)
                     {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Quota limit ", quota_limit,
-                            " bytes exceeds or equals 0 or total size ", stats.size_bytes,
-                            " bytes, ignoring quota limit");
-                        return 0;
+                            " bytes exceeds -1 or total size ", stats.size_bytes, " bytes, ignoring quota limit");
+                        return -1;
                     }
                     return quota_limit;
                 }
@@ -1122,12 +1128,12 @@ private:
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to parse quota limit from file ", quota_file, ": ",
                         e.what());
-                    return 0;
+                    return -1;
                 }
             }
             ifs.close();
         }
-        return 0;
+        return -1;
     }
 
     bool writeQuotaLimitToFile(FileSize quota_limit) const noexcept
@@ -1213,8 +1219,7 @@ private:
 
     bool doSyncQuotaLimit() const noexcept
     {
-        if (auto quota_limit = readQuotaLimitFromFile(); quota_limit > 0)
-            _quota_limit_bytes.store(quota_limit, std::memory_order_release);
+        _quota_limit_bytes.store(readQuotaLimitFromFile(), std::memory_order_release);
         return true;
     }
 

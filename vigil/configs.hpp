@@ -468,7 +468,15 @@ struct SlotConfig
 
     SlotConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
-        j.at("iQuotaLimitBytes").get_to(quota_limit_bytes);
+        {
+            j.at("iQuotaLimitBytes").get_to(quota_limit_bytes);
+            if (quota_limit_bytes < -1)
+                throw Exception("Invalid quota limit bytes " + std::to_string(quota_limit_bytes));
+            if (quota_limit_bytes > static_cast<FileSize>(kStorageMaxSupportedFileSystemBytes))
+                throw Exception("Quota limit bytes " + std::to_string(quota_limit_bytes)
+                                + " exceeds maximum supported file system size of "
+                                + std::to_string(kStorageMaxSupportedFileSystemBytes));
+        }
         j.at("bQuotaRotate").get_to(quota_rotate);
     }
 
@@ -487,22 +495,26 @@ struct SlotConfig
 struct StorageConfig
 {
     std::string target_enabled_slot_dev_path;
+    std::string target_enabled_slot_uuid;
 
-    StorageConfig() noexcept : target_enabled_slot_dev_path() { }
+    StorageConfig() noexcept : target_enabled_slot_dev_path(), target_enabled_slot_uuid() { }
 
     StorageConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
         j.at("sTargetEnabledSlotDevPath").get_to(target_enabled_slot_dev_path);
+        j.at("sTargetEnabledSlotUUID").get_to(target_enabled_slot_uuid);
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
         j["sTargetEnabledSlotDevPath"] = target_enabled_slot_dev_path;
+        j["sTargetEnabledSlotUUID"] = target_enabled_slot_uuid;
     }
 
     bool operator==(const StorageConfig &other) const noexcept
     {
-        return target_enabled_slot_dev_path == other.target_enabled_slot_dev_path;
+        return target_enabled_slot_dev_path == other.target_enabled_slot_dev_path
+               && target_enabled_slot_uuid == other.target_enabled_slot_uuid;
     }
 };
 

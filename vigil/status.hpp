@@ -46,6 +46,7 @@ struct SlotStatus
     std::optional<std::string> label;
     std::optional<std::string> uuid;
     std::optional<std::string> type;
+    bool selected;
     bool enabled;
     bool syncing;
     bool writing;
@@ -67,6 +68,7 @@ struct SlotStatus
         j["sLabel"] = label;
         j["sUUID"] = uuid;
         j["sType"] = type;
+        j["bSelected"] = selected;
         j["bEnabled"] = enabled;
         j["bSyncing"] = syncing;
         j["bWriting"] = writing;
@@ -87,13 +89,8 @@ struct StorageStatus
 {
     std::vector<SlotStatus> slots_status;
     std::string_view data_dir_name;
-    std::string current_enabled_slot_dev_path;
-    std::string target_enabled_slot_dev_path;
 
-    StorageStatus(std::string_view ddn)
-        : slots_status(), data_dir_name(ddn), current_enabled_slot_dev_path(), target_enabled_slot_dev_path()
-    {
-    }
+    StorageStatus(std::string_view ddn) : slots_status(), data_dir_name(ddn) { }
 
     ~StorageStatus() = default;
 
@@ -108,8 +105,6 @@ struct StorageStatus
         }
         j["lSlots"] = slots_dict;
         j["sDataDirName"] = data_dir_name;
-        j["sCurrentEnabledSlotDevPath"] = current_enabled_slot_dev_path;
-        j["sTargetEnabledSlotDevPath"] = target_enabled_slot_dev_path;
     }
 };
 

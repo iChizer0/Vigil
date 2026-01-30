@@ -72,10 +72,6 @@ public:
 
         // Start manager thread
         _manager_thread = std::make_unique<std::thread>(&Storage::managerThreadTask, this);
-        // Set initial config
-        const auto ret = setConfig(cfg);
-        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Storage initial configuration ",
-            ret == 0 ? "succeeded" : "failed with code: " + std::to_string(ret));
     }
 
     ~Storage() noexcept
@@ -106,11 +102,11 @@ public:
         {
             if (!slot)
                 continue;
-            status.slots_status.emplace_back(slot->getStatus());
-            if (slot->isEnabled())
-                status.current_enabled_slot_dev_path = slot->devPath().string();
+            auto sta = slot->getStatus();
+            sta.selected = isSelectedSlot(slot, current_cfg);
+            status.slots_status.emplace_back(std::move(sta));
         }
-        status.target_enabled_slot_dev_path = current_cfg.target_enabled_slot_dev_path;
+        status.data_dir_name = _data_dir_name;
         return status;
     }
 
@@ -462,21 +458,37 @@ private:
         }
     }
 
+    bool isSelectedSlot(const std::shared_ptr<Slot> &slot, const StorageConfig &config) const noexcept
+    {
+        if (!slot) [[unlikely]]
+            return false;
+        if (config.target_enabled_slot_dev_path.empty() && config.target_enabled_slot_uuid.empty())
+            return false;
+        bool dev_path_match = config.target_enabled_slot_dev_path.empty()
+                                  ? true
+                                  : slot->devPath() == config.target_enabled_slot_dev_path;
+        bool uuid_match = false;
+        if (config.target_enabled_slot_uuid.empty())
+            uuid_match = true;
+        else
+        {
+            const auto slot_uuid_opt = slot->getUUID();
+            uuid_match = slot_uuid_opt.has_value() ? (*slot_uuid_opt == config.target_enabled_slot_uuid) : false;
+        }
+        return dev_path_match && uuid_match;
+    }
+
     vg_sta_e syncEnabledSlotWithConfig()
     {
-        StorageConfig cfg;
-        {
-            const std::shared_lock lock(_config_mutex);
-            cfg = _config;
-        }
+        const auto current_cfg = getConfig();
         std::vector<std::shared_ptr<Slot>> enabled_slots_without_target;
         std::shared_ptr<Slot> target_slot;
         const std::unique_lock lock(_manager_action_mutex); // Ensure no ejection during this operation
         {
             const std::shared_lock lock2(_slots_mutex);
-            for (const auto &[dev_path, s]: _slots)
+            for (const auto &[_, s]: _slots)
             {
-                if (dev_path == cfg.target_enabled_slot_dev_path)
+                if (isSelectedSlot(s, current_cfg))
                     target_slot = s;
                 else if (s->isEnabled())
                     enabled_slots_without_target.emplace_back(s);
@@ -492,7 +504,7 @@ private:
             }
         }
         if (!target_slot)
-            return cfg.target_enabled_slot_dev_path.empty() ? 0 : ENOENT;
+            return 0;
         else if (!target_slot->isEnabled())
         {
             if (auto ret = target_slot->enable(); ret != 0)
