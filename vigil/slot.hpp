@@ -33,6 +33,7 @@
 #include "relay.hpp"
 #include "status.hpp"
 #include "types.hpp"
+#include "utils.hpp"
 #include "write_stats.hpp"
 #include "writers.hpp"
 
@@ -45,6 +46,7 @@ using namespace vigil::index_manager;
 using namespace vigil::write_stats;
 using namespace vigil::relay;
 using namespace vigil::writers;
+using namespace vigil::utils;
 
 class Slot final
 {
@@ -882,10 +884,9 @@ private:
         const std::unique_lock lock(_op_mutex);
         try
         {
-            std::string cmd = "umount '" + _dev_path.string() + "' > /dev/null 2>&1";
-            std::system(cmd.c_str()); // Ignore return code, just try to unmount first
-            cmd = "mkfs.vfat -F 32 -I '" + _dev_path.string() + "' > /dev/null 2>&1";
-            if (int ret = std::system(cmd.c_str()); ret != 0)
+            int ret = Execute("umount", { _dev_path.string() })();
+            ret = Execute("mkfs.vfat", { "-F", "32", "-I", _dev_path.string() })();
+            if (ret != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to format storage slot device ", _dev_path,
                     " with mkfs.vfat, return code: ", ret);
@@ -1017,11 +1018,20 @@ private:
         const std::unique_lock lock(_op_mutex);
         if (!EnsureDirectoryExists(_mount_path, &_ctx))
             return false;
-        const auto cmd = "mount '" + _dev_path.string() + "' '" + _mount_path.string() + "' > /dev/null 2>&1";
-        if (auto ret = std::system(cmd.c_str()); ret != 0)
+        try
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to mount storage slot device ", _dev_path, " to ", _mount_path,
-                ", code: ", ret);
+            int ret = Execute("mount", { _dev_path.string(), _mount_path.string() })();
+            if (ret != 0)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to mount storage slot device ", _dev_path, " to ",
+                    _mount_path, ", code: ", ret);
+                return false;
+            }
+        }
+        catch (const std::exception &e)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Exception occurred while mounting storage slot device ", _dev_path,
+                " to ", _mount_path, ": ", e.what());
             return false;
         }
         if (_ctx.c_api.storage.on_mount_cb)
