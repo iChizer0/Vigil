@@ -507,6 +507,8 @@ struct StorageConfig
         {
             selector_j.at("sByDevPath").get_to(target_enabled_slot_dev_path);
             selector_j.at("sByUUID").get_to(target_enabled_slot_uuid);
+            if (target_enabled_slot_dev_path.empty() && target_enabled_slot_uuid.empty())
+                throw Exception("At least one of target enabled slot device path or UUID must be specified");
         }
     }
 
