@@ -199,7 +199,7 @@ private:
         ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << micros.count();
 
         const auto cache_dir = _slot.getRecordCachePath();
-        if (!EnsureDirectoryExists(cache_dir, &this->ctxRef()))
+        if (!EnsureDirectoryExists(cache_dir, true, false, &this->ctxRef()))
             return false;
         auto fmt = std::string(this->settings().format);
         std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -243,7 +243,7 @@ public:
             throw Exception("CaptureAdaptedWriter detected insufficient remaining space");
         }
 
-        if (!EnsureDirectoryExists(_event->output_directory, &this->ctxRef()))
+        if (!EnsureDirectoryExists(_event->output_directory, true, false, &this->ctxRef()))
         {
             this->setEventStatus(WriteEvent::Status::Failed);
             throw Exception(
@@ -264,6 +264,10 @@ public:
     {
         if (std::error_code ec; std::filesystem::exists(_output_cache_path, ec))
         {
+            EnsureOwnerAndPermissions(_output_cache_path, kStorageDefaultUid, kStorageDefaultGid,
+                fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
+                    | fs::perms::others_read,
+                &this->ctxRef());
             std::filesystem::rename(_output_cache_path, _output_file_path, ec);
             if (ec)
             {

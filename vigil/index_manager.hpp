@@ -78,11 +78,41 @@ inline bool IsPathUnderRoot(const fs::path &root, const fs::path &path) noexcept
     }
 }
 
-inline bool EnsureDirectoryExists(const fs::path &path, Context *ctx = nullptr) noexcept
+inline bool EnsureOwnerAndPermissions(const fs::path &path, uid_t owner_uid, gid_t owner_gid, fs::perms permissions,
+    Context *ctx = nullptr) noexcept
+{
+    std::error_code ec;
+    std::filesystem::permissions(path, permissions, ec);
+    if (ec)
+    {
+        if (ctx)
+        {
+            VG_LOG(ctx->log, VG_LOG_LEVEL_ERROR, "Failed to set permissions for ", path, ": ", ec.message());
+        }
+        return false;
+    }
+    if (::chown(path.c_str(), owner_uid, owner_gid) != 0)
+    {
+        if (ctx)
+        {
+            VG_LOG(ctx->log, VG_LOG_LEVEL_ERROR, "Failed to set owner for ", path, ": ", static_cast<int>(errno));
+        }
+        return false;
+    }
+    return true;
+}
+
+inline bool EnsureDirectoryExists(const fs::path &path, bool update_permissions = false,
+    bool override_permissions = false, Context *ctx = nullptr) noexcept
 {
     std::error_code ec;
     if (std::filesystem::is_directory(path, ec))
+    {
+        if (override_permissions)
+            EnsureOwnerAndPermissions(path, kStorageDefaultUid, kStorageDefaultGid,
+                fs::perms::owner_all | fs::perms::group_all | fs::perms::others_read | fs::perms::others_exec, ctx);
         return true;
+    }
     else
         std::filesystem::remove_all(path, ec);
     if (std::filesystem::create_directories(path, ec); ec)
@@ -92,6 +122,11 @@ inline bool EnsureDirectoryExists(const fs::path &path, Context *ctx = nullptr) 
             VG_LOG(ctx->log, VG_LOG_LEVEL_ERROR, "Failed to create directory ", path, ": ", ec.message());
         }
         return false;
+    }
+    if (update_permissions)
+    {
+        EnsureOwnerAndPermissions(path, kStorageDefaultUid, kStorageDefaultGid,
+            fs::perms::owner_all | fs::perms::group_all | fs::perms::others_read | fs::perms::others_exec, ctx);
     }
     return true;
 }

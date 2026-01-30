@@ -443,11 +443,14 @@ protected:
             goto l_fail_add_cache_file;
         }
         _write_stats.addNewWriteStat(size);
-        if (!EnsureDirectoryExists(target_dir_path))
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to ensure directory exists: ", target_dir_path);
+        if (!EnsureDirectoryExists(target_dir_path, true, false, &_ctx))
             goto l_fail_add_cache_file;
-        }
+
+        EnsureOwnerAndPermissions(cache_file_info.path, kStorageDefaultUid, kStorageDefaultGid,
+            fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
+                | fs::perms::others_read,
+            &this->ctxRef());
+
         if (std::filesystem::rename(cache_file_info.path, target_file_path, ec); ec)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to move file from ", cache_file_info.path, " to ",
@@ -962,7 +965,7 @@ private:
             VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Mount path ", _mount_path,
                 " does not exist, recreating before mount probe");
             const std::unique_lock lock(_op_mutex);
-            if (!EnsureDirectoryExists(_mount_path, &_ctx))
+            if (!EnsureDirectoryExists(_mount_path, true, false, &_ctx))
                 return false;
         }
 
@@ -1016,7 +1019,7 @@ private:
     bool doMount() const noexcept
     {
         const std::unique_lock lock(_op_mutex);
-        if (!EnsureDirectoryExists(_mount_path, &_ctx))
+        if (!EnsureDirectoryExists(_mount_path, true, true, &_ctx))
             return false;
         try
         {
@@ -1220,9 +1223,9 @@ private:
 
     bool doConfigureDirectories() const noexcept
     {
-        if (!EnsureDirectoryExists(getRecordRootPath(), &_ctx))
+        if (!EnsureDirectoryExists(getRecordRootPath(), true, true, &_ctx))
             return false;
-        if (!EnsureDirectoryExists(getRecordCachePath(), &_ctx))
+        if (!EnsureDirectoryExists(getRecordCachePath(), false, false, &_ctx))
             return false;
         return true;
     }

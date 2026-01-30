@@ -40,6 +40,8 @@ static inline constexpr const size_t kCaptureMediaMuxerBufferSize
     = kCaptureVideoFrameBufferSize + kCaptureAudioFrameBufferSize;
 static inline constexpr const size_t kCaptureMediaMuxerBufferPeriod = 10;
 
+static inline constexpr const int kStorageDefaultUid = 1000;
+static inline constexpr const int kStorageDefaultGid = 1000;
 static inline constexpr const std::string_view kStorageMountBasePath = "/mnt";
 static inline constexpr const char *kStorageFirstLevelDirNameTimeFormat = "%Y-%m-%d";
 static inline constexpr const char *kStorageFileNamePrefixTimeFormat = "%H-%M-%S";
