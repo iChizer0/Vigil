@@ -233,18 +233,14 @@ Get or set the storage configuration.
 
 ```json
 {
-    "sTargetEnabledSlotDevPath": "/dev/sda1", // String, device path to enable
-    "sTargetEnabledSlotUUID": "550e8400-e29b-41d4-a716-446655440000", // String, volume UUID to enable (PARTUUID)
+    "dSelectSlotToEnable": { // Object, set to null to disable enabled slots or not enable any slot
+        "sByDevPath": "/dev/sda1", // String, device path to filter the target enabled slot, empty string to skip this filter
+        "sByUUID": "550e8400-e29b-41d4-a716-446655440000" // String, UUID to filter the target enabled slot, empty string to skip this filter
+    },
     "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
     "message": "" // String, optional, present only on failure
 }
 ```
-
-Notes:
-
-- If both `sTargetEnabledSlotDevPath` and `sTargetEnabledSlotUUID` are provided, the storage slot must match both fields to be selected.
-- If both `sTargetEnabledSlotDevPath` and `sTargetEnabledSlotUUID` are empty, no storage slot will be enabled.
-- If one of the fields is empty in `sTargetEnabledSlotDevPath` and `sTargetEnabledSlotUUID`, the filter will ignore that field when selecting the storage slot to enable.
 
 ### Storage Status
 

@@ -494,21 +494,33 @@ struct SlotConfig
 
 struct StorageConfig
 {
+    bool enabled;
     std::string target_enabled_slot_dev_path;
     std::string target_enabled_slot_uuid;
 
-    StorageConfig() noexcept : target_enabled_slot_dev_path(), target_enabled_slot_uuid() { }
+    StorageConfig() noexcept : enabled(false), target_enabled_slot_dev_path(), target_enabled_slot_uuid() { }
 
-    StorageConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
+    StorageConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]]) : enabled(false)
     {
-        j.at("sTargetEnabledSlotDevPath").get_to(target_enabled_slot_dev_path);
-        j.at("sTargetEnabledSlotUUID").get_to(target_enabled_slot_uuid);
+        auto selector_j = j.at("dSelectSlotToEnable");
+        if (enabled = !selector_j.is_null(); enabled)
+        {
+            selector_j.at("sByDevPath").get_to(target_enabled_slot_dev_path);
+            selector_j.at("sByUUID").get_to(target_enabled_slot_uuid);
+        }
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
-        j["sTargetEnabledSlotDevPath"] = target_enabled_slot_dev_path;
-        j["sTargetEnabledSlotUUID"] = target_enabled_slot_uuid;
+        if (enabled)
+        {
+            nlohmann::json selector_j;
+            selector_j["sByDevPath"] = target_enabled_slot_dev_path;
+            selector_j["sByUUID"] = target_enabled_slot_uuid;
+            j["dSelectSlotToEnable"] = selector_j;
+        }
+        else
+            j["dSelectSlotToEnable"] = nullptr;
     }
 
     bool operator==(const StorageConfig &other) const noexcept

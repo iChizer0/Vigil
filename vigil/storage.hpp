@@ -462,19 +462,13 @@ private:
     {
         if (!slot) [[unlikely]]
             return false;
-        if (config.target_enabled_slot_dev_path.empty() && config.target_enabled_slot_uuid.empty())
+        if (!config.enabled)
             return false;
         bool dev_path_match = config.target_enabled_slot_dev_path.empty()
                                   ? true
                                   : slot->devPath() == config.target_enabled_slot_dev_path;
-        bool uuid_match = false;
-        if (config.target_enabled_slot_uuid.empty())
-            uuid_match = true;
-        else
-        {
-            const auto slot_uuid_opt = slot->getUUID();
-            uuid_match = slot_uuid_opt.has_value() ? (*slot_uuid_opt == config.target_enabled_slot_uuid) : false;
-        }
+        bool uuid_match
+            = config.target_enabled_slot_uuid.empty() ? true : slot->getUUID() == config.target_enabled_slot_uuid;
         return dev_path_match && uuid_match;
     }
 
