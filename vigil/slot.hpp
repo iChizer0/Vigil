@@ -830,7 +830,7 @@ private:
                 _label = std::string(val);
             else
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "No LABEL found for device ", _dev_path);
-            if (blkid_probe_lookup_value(pr, "PARTUUID", &val, nullptr) == 0 && val)
+            if (blkid_probe_lookup_value(pr, "UUID", &val, nullptr) == 0 && val)
                 _uuid = std::string(val);
             else
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "No UUID found for device ", _dev_path);
