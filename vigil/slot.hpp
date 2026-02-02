@@ -320,11 +320,10 @@ public:
 
         if (auto p = getRecordRootPath(); IsPathUnderRoot(p, relative_path))
         {
-            std::error_code ec;
-            if (std::filesystem::remove_all(p / relative_path, ec); ec)
+            if (!RemoveWithThumbnailCheck(p / relative_path))
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove file or directory ", relative_path,
-                    " under record root ", p, ": ", ec.message());
+                    " on slot with device path ", _dev_path);
                 return EIO;
             }
         }
