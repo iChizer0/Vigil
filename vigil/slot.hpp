@@ -432,6 +432,29 @@ protected:
 
         const auto target_dir_path = getRecordRootPath() / cache_file_info.first_level_dir_name;
         const auto target_file_path = target_dir_path / cache_file_info.path.filename();
+        const auto thumbnail_path = ThumbnailPathFrom(target_file_path);
+
+        if (cache_file_info.thumbnail && _ctx.c_api.media.thumbnail_generate_cb)
+        {
+            if (!EnsureDirectoryExists(thumbnail_path.parent_path(), true, false, &_ctx))
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create thumbnail directory at ",
+                    thumbnail_path.parent_path());
+            }
+            else if (auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
+                         cache_file_info.thumbnail.size, cache_file_info.thumbnail.format.c_str(),
+                         thumbnail_path.c_str(), kStorageThumbnailFileType.c_str(), kStorageThumbnailDownScaleFactor,
+                         _ctx.c_api.media.user_data);
+                ret != 0)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to generate thumbnail for cache file ",
+                    cache_file_info.path, ", code: ", static_cast<int>(ret));
+            }
+            EnsureOwnerAndPermissions(thumbnail_path, kStorageDefaultUid, kStorageDefaultGid,
+                fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
+                    | fs::perms::others_read,
+                &this->ctxRef());
+        }
 
         size_t size = 0;
         std::error_code ec;
@@ -476,6 +499,7 @@ protected:
         return;
 
     l_fail_add_cache_file:
+        std::filesystem::remove_all(thumbnail_path, ec);
         std::filesystem::remove_all(cache_file_info.path, ec);
         return;
     }

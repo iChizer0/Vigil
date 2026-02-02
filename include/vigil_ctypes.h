@@ -65,6 +65,11 @@ typedef struct vg_config_media_t
     vg_sta_e (*image_capture_cb)(const char *filepath, const char *format,
         void *user_data); /**< Handles on-demand still image capture for a given source, and write to file (parent
                              folder already exists). */
+    vg_sta_e (*thumbnail_generate_cb)(const void *src_data, size_t src_data_len, const char *src_format,
+        const char *thumb_filepath, const char *thumb_format, int scale_down_factor,
+        void *user_data); /**< Generates a thumbnail image from
+                         the source image data and writes to file */
+
 } vg_config_media_t;
 
 // - MARK: Config Enums and Types

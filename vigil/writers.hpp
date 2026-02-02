@@ -40,7 +40,7 @@ class AdaptableWriter
 public:
     AdaptableWriter(Context &ctx, std::shared_ptr<FileWriterSettings> settings, std::shared_ptr<WriteEvent> event)
         : _start_time(std::chrono::steady_clock::now()), _ctx(ctx), _settings(std::move(settings)),
-          _event(std::move(event))
+          _event(std::move(event)), _thumbnail()
     {
         if (!_settings)
             throw Exception("AdaptableWriter initialized with null settings");
@@ -121,11 +121,17 @@ protected:
         return static_cast<const T *>(this)->getFilePathImpl();
     }
 
+    inline ThumbnailBuffer &thumbnailBufferRef() noexcept
+    {
+        return _thumbnail;
+    }
+
 private:
     std::chrono::steady_clock::time_point _start_time;
     Context &_ctx;
     std::shared_ptr<FileWriterSettings> _settings;
     std::shared_ptr<WriteEvent> _event;
+    ThumbnailBuffer _thumbnail;
 };
 
 // - MARK: Slot Adapted Writer
@@ -149,6 +155,7 @@ public:
 
     virtual ~SlotAdaptedWriter() noexcept
     {
+        this->thumbnailBufferRef().transferTo(_cache_file_info.thumbnail);
         _slot.moveAndAddCacheFile(_cache_file_info);
         _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
     }
@@ -500,6 +507,9 @@ private:
             ctx_media_mutex.unlock();
 
             __VIGIL_WRITER_WRITE_FRAME_INTERNAL__;
+
+            if (auto p_vf = std::get_if<VideoFrame>(&*frame.frame); p_vf)
+                p_vf->transferTo(this->thumbnailBufferRef());
 
             break;
         }

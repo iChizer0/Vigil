@@ -579,20 +579,6 @@ private:
 
 using FileSize = int64_t;
 
-struct CacheFileInfo final
-{
-    std::filesystem::path path;
-    std::string first_level_dir_name;
-    std::filesystem::file_time_type creation_time;
-    std::shared_ptr<WriteEvent> event;
-
-    CacheFileInfo() : path(), first_level_dir_name(), creation_time(), event() { }
-
-    CacheFileInfo(std::shared_ptr<WriteEvent> evt) : path(), first_level_dir_name(), creation_time(), event(evt) { }
-
-    ~CacheFileInfo() = default;
-};
-
 enum class SlotState : int {
     Error = 1,
     NotFormattedOrFormatUnsupported = 2,
@@ -646,15 +632,45 @@ public:
     NonCopyable(const NonCopyable &) = delete;
     NonCopyable &operator=(const NonCopyable &) = delete;
 
+    NonCopyable(NonCopyable &&) noexcept = default;
+    NonCopyable &operator=(NonCopyable &&) noexcept = default;
+
 protected:
     NonCopyable() = default;
     ~NonCopyable() = default;
-
-    NonCopyable(NonCopyable &&) noexcept = default;
-    NonCopyable &operator=(NonCopyable &&) noexcept = default;
 };
 
-struct BaseFrame: private NonCopyable<BaseFrame>
+struct ThumbnailBuffer final: public NonCopyable<ThumbnailBuffer>
+{
+    void *data;
+    size_t size;
+    std::string format;
+
+    ThumbnailBuffer() noexcept : data(nullptr), size(0), format() { }
+
+    ~ThumbnailBuffer() noexcept
+    {
+        if (data)
+        {
+            delete[] static_cast<uint8_t *>(data);
+            data = nullptr;
+        }
+    }
+
+    inline operator bool() const noexcept
+    {
+        return data != nullptr && size > 0;
+    }
+
+    void transferTo(ThumbnailBuffer &other) noexcept
+    {
+        std::swap(other.data, data);
+        std::swap(other.size, size);
+        std::swap(other.format, format);
+    }
+};
+
+struct BaseFrame: public NonCopyable<BaseFrame>
 {
     int64_t pts;
     void *data;
@@ -720,6 +736,13 @@ struct VideoFrame: public BaseFrame
             .bytes_len = bytes_len,
             .key_frame = key_frame,
         };
+    }
+
+    void transferTo(ThumbnailBuffer &buffer) noexcept
+    {
+        std::swap(buffer.data, data);
+        std::swap(buffer.size, bytes_len);
+        buffer.format = kRecordWriterDefaultFormat;
     }
 
     VideoFrame(VideoFrame &&other) noexcept = default;
@@ -797,6 +820,24 @@ struct MediaFrame
             return a.time_stamp > b.time_stamp;
         }
     };
+};
+
+struct CacheFileInfo final
+{
+    std::filesystem::path path;
+    std::string first_level_dir_name;
+    std::filesystem::file_time_type creation_time;
+    std::shared_ptr<WriteEvent> event;
+    ThumbnailBuffer thumbnail;
+
+    CacheFileInfo() : path(), first_level_dir_name(), creation_time(), event(), thumbnail() { }
+
+    CacheFileInfo(std::shared_ptr<WriteEvent> evt)
+        : path(), first_level_dir_name(), creation_time(), event(evt), thumbnail()
+    {
+    }
+
+    ~CacheFileInfo() = default;
 };
 
 struct WaterMarks

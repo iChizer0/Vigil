@@ -132,16 +132,18 @@ inline bool EnsureDirectoryExists(const fs::path &path, bool update_permissions 
     return true;
 }
 
-static bool RemoveWithThumbnailCheck(const fs::path &path) noexcept
+inline fs::path ThumbnailPathFrom(const fs::path &path) noexcept
+{
+    return path.parent_path() / kStorageThumbnailDirName
+           / (path.stem().string() + std::string(kStorageThumbnailFileExt));
+}
+
+inline bool RemoveWithThumbnailCheck(const fs::path &path) noexcept
 {
     static const std::unordered_set<std::string_view> kThumbnailAssociatedExtensions = { ".mp4" };
     std::error_code ec;
     if (auto ext = path.extension().string(); kThumbnailAssociatedExtensions.contains(ext))
-    {
-        const fs::path thumbnail_path = path.parent_path() / kStorageThumbnailDirName
-                                        / (path.stem().string() + std::string(kStorageThumbnailFileExt));
-        fs::remove_all(thumbnail_path, ec);
-    }
+        fs::remove_all(ThumbnailPathFrom(path), ec);
     fs::remove_all(path, ec);
     return !ec;
 }
