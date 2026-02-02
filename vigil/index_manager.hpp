@@ -22,6 +22,7 @@
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <unordered_set>
 #include <utility>
@@ -129,6 +130,20 @@ inline bool EnsureDirectoryExists(const fs::path &path, bool update_permissions 
             fs::perms::owner_all | fs::perms::group_all | fs::perms::others_read | fs::perms::others_exec, ctx);
     }
     return true;
+}
+
+static bool RemoveWithThumbnailCheck(const fs::path &path) noexcept
+{
+    static const std::unordered_set<std::string_view> kThumbnailAssociatedExtensions = { ".mp4" };
+    std::error_code ec;
+    if (auto ext = path.extension().string(); kThumbnailAssociatedExtensions.contains(ext))
+    {
+        const fs::path thumbnail_path = path.parent_path() / kStorageThumbnailDirName
+                                        / (path.stem().string() + std::string(kStorageThumbnailFileExt));
+        fs::remove_all(thumbnail_path, ec);
+    }
+    fs::remove_all(path, ec);
+    return !ec;
 }
 
 class IndexManager
@@ -292,8 +307,9 @@ public:
             total_size };
     }
 
-    size_t removeEntries(size_t target_size_bytes) noexcept
+    size_t tryReleaseSpace(size_t target_size_bytes) noexcept
     {
+        const std::unique_lock lock(_indexer_mutex);
         size_t removed_size = 0;
         {
             const std::shared_lock entries_lock(_entries_mutex);
@@ -304,12 +320,25 @@ public:
                     ++it;
                     continue;
                 }
+                const auto size_to_remove = target_size_bytes - removed_size;
+                bool remove_entry = true;
+                size_t removed_from_entry = 0;
                 try
                 {
                     const fs::path entry_path = _watch_path / it->first;
                     const size_t entry_size = it->second->size();
-                    fs::remove_all(entry_path);
-                    removed_size += entry_size;
+                    if (entry_size > size_to_remove)
+                        std::tie(remove_entry, removed_from_entry) = removeInsideEntry(entry_path, size_to_remove);
+                    else
+                        removed_from_entry = entry_size;
+
+                    if (remove_entry)
+                    {
+                        fs::remove_all(entry_path);
+                        removed_size += entry_size;
+                    }
+                    else
+                        removed_size += removed_from_entry;
                 }
                 catch (const std::exception &e)
                 {
@@ -319,6 +348,7 @@ public:
             }
             _generation_target.fetch_add(1, std::memory_order_release);
         }
+        _indexer_cv.notify_one();
         return removed_size;
     }
 
@@ -336,6 +366,41 @@ public:
     }
 
 private:
+    std::pair<bool, size_t> removeInsideEntry(const fs::path &entry_path, size_t target_size_bytes) const noexcept
+    {
+        bool remove_self = false;
+        size_t removed_size = 0;
+        try
+        {
+            for (const auto &entry: fs::directory_iterator(entry_path, fs::directory_options::skip_permission_denied))
+            {
+                if (removed_size >= target_size_bytes)
+                    break;
+                size_t size = 0;
+                if (auto sta = indexFileOrSubdirectory(entry.path(), size); sta == IndexStatus::SUCCESS)
+                {
+                    RemoveWithThumbnailCheck(entry.path());
+                    removed_size += size;
+                }
+                else if (sta == IndexStatus::PARTIAL)
+                {
+                    remove_self = true;
+                    break;
+                }
+                else if (sta == IndexStatus::CANCELED)
+                {
+                    break;
+                }
+            }
+        }
+        catch (const std::exception &e)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove inside entry ", entry_path, ": ", e.what());
+            remove_self = true;
+        }
+        return { remove_self, removed_size };
+    }
+
     static fs::path detectMountPoint(const fs::path &path)
     {
         const fs::path abs_path = fs::absolute(path);

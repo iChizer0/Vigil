@@ -569,7 +569,7 @@ private:
             kManagerEstimatedWriteBytesPeriod.count(), " minutes: ", estimated_write_bytes_in_period,
             " bytes, will free up ", watermarks.recycle_bytes, " bytes");
 
-        const auto freed = idx_mgr->removeEntries(watermarks.recycle_bytes);
+        const auto freed = idx_mgr->tryReleaseSpace(watermarks.recycle_bytes);
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Freed up ", freed, " bytes on storage slot for device path", _dev_path);
     }
 
