@@ -450,10 +450,11 @@ protected:
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to generate thumbnail for cache file ",
                     cache_file_info.path, ", code: ", static_cast<int>(ret));
             }
-            EnsureOwnerAndPermissions(thumbnail_path, kStorageDefaultUid, kStorageDefaultGid,
-                fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
-                    | fs::perms::others_read,
-                &this->ctxRef());
+            else
+                EnsureOwnerAndPermissions(thumbnail_path, kStorageDefaultUid, kStorageDefaultGid,
+                    fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
+                        | fs::perms::others_read,
+                    &this->ctxRef());
         }
 
         size_t size = 0;
