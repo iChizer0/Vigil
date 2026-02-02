@@ -135,7 +135,7 @@ inline bool EnsureDirectoryExists(const fs::path &path, bool update_permissions 
 inline fs::path ThumbnailPathFrom(const fs::path &path) noexcept
 {
     return path.parent_path() / kStorageThumbnailDirName
-           / (path.stem().string() + std::string(kStorageThumbnailFileExt));
+           / (path.filename().string() + std::string(kStorageThumbnailFileExt));
 }
 
 inline bool RemoveWithThumbnailCheck(const fs::path &path) noexcept
