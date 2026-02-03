@@ -442,8 +442,8 @@ protected:
                     thumbnail_path.parent_path());
             }
             else if (auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
-                         cache_file_info.thumbnail.size, cache_file_info.thumbnail.format.c_str(),
-                         thumbnail_path.c_str(), kStorageThumbnailFileType.c_str(), kStorageThumbnailDownScaleFactor,
+                         cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_path.c_str(),
+                         kStorageThumbnailFileType.c_str(), kStorageThumbnailDownScaleFactor,
                          _ctx.c_api.media.user_data);
                 ret != 0)
             {

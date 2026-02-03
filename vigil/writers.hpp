@@ -40,7 +40,7 @@ class AdaptableWriter
 public:
     AdaptableWriter(Context &ctx, std::shared_ptr<FileWriterSettings> settings, std::shared_ptr<WriteEvent> event)
         : _start_time(std::chrono::steady_clock::now()), _ctx(ctx), _settings(std::move(settings)),
-          _event(std::move(event)), _thumbnail()
+          _event(std::move(event))
     {
         if (!_settings)
             throw Exception("AdaptableWriter initialized with null settings");
@@ -121,9 +121,9 @@ protected:
         return static_cast<const T *>(this)->getFilePathImpl();
     }
 
-    inline ThumbnailBuffer &thumbnailBufferRef() noexcept
+    virtual ThumbnailBuffer getThumbnail() noexcept
     {
-        return _thumbnail;
+        return {};
     }
 
 private:
@@ -131,7 +131,6 @@ private:
     Context &_ctx;
     std::shared_ptr<FileWriterSettings> _settings;
     std::shared_ptr<WriteEvent> _event;
-    ThumbnailBuffer _thumbnail;
 };
 
 // - MARK: Slot Adapted Writer
@@ -155,7 +154,8 @@ public:
 
     virtual ~SlotAdaptedWriter() noexcept
     {
-        this->thumbnailBufferRef().transferTo(_cache_file_info.thumbnail);
+        if (this->ctxRef().c_api.media.thumbnail_generate_cb)
+            this->getThumbnail().transferTo(_cache_file_info.thumbnail);
         _slot.moveAndAddCacheFile(_cache_file_info);
         _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
     }
@@ -203,7 +203,8 @@ private:
         const auto duration = this->startTime().time_since_epoch();
         const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
         const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration - seconds);
-        ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << micros.count();
+        ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << std::setfill('0') << std::setw(6)
+           << micros.count();
 
         const auto cache_dir = _slot.getRecordCachePath();
         if (!EnsureDirectoryExists(cache_dir, true, false, &this->ctxRef()))
@@ -425,6 +426,16 @@ public:
         this->ctxRef().media_writers_active.fetch_sub(1, std::memory_order_release);
     }
 
+    ThumbnailBuffer getThumbnail() noexcept override
+    {
+        ThumbnailBuffer thumbnail;
+        if (!_thumbnail.frame) [[unlikely]]
+            return thumbnail;
+        if (auto p = std::get_if<VideoFrame>(&*_thumbnail.frame); p) [[likely]]
+            p->cloneTo(thumbnail);
+        return thumbnail;
+    }
+
 private:
     static inline constexpr const std::chrono::milliseconds kVideoFrameWaitDelay = std::chrono::milliseconds(10);
 
@@ -508,8 +519,7 @@ private:
 
             __VIGIL_WRITER_WRITE_FRAME_INTERNAL__;
 
-            if (auto p_vf = std::get_if<VideoFrame>(&*frame.frame); p_vf)
-                p_vf->transferTo(this->thumbnailBufferRef());
+            _thumbnail = frame;
 
             break;
         }
@@ -600,6 +610,7 @@ private:
     std::chrono::seconds _video_clip_length;
     int _fd;
     bool _is_clip_finish;
+    MediaFrame _thumbnail;
 };
 
 } // namespace vigil::writers

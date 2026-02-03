@@ -644,7 +644,7 @@ struct ThumbnailBuffer final: public NonCopyable<ThumbnailBuffer>
 {
     void *data;
     size_t size;
-    std::string format;
+    const char *format;
 
     ThumbnailBuffer() noexcept : data(nullptr), size(0), format() { }
 
@@ -667,6 +667,18 @@ struct ThumbnailBuffer final: public NonCopyable<ThumbnailBuffer>
         std::swap(other.data, data);
         std::swap(other.size, size);
         std::swap(other.format, format);
+    }
+
+    ThumbnailBuffer(ThumbnailBuffer &&other) noexcept : data(nullptr), size(0), format()
+    {
+        other.transferTo(*this);
+    }
+
+    ThumbnailBuffer &operator=(ThumbnailBuffer &&other) noexcept
+    {
+        if (this != &other)
+            other.transferTo(*this);
+        return *this;
     }
 };
 
@@ -738,11 +750,18 @@ struct VideoFrame: public BaseFrame
         };
     }
 
-    void transferTo(ThumbnailBuffer &buffer) noexcept
+    bool cloneTo(ThumbnailBuffer &buffer) noexcept
     {
-        std::swap(buffer.data, data);
-        std::swap(buffer.size, bytes_len);
-        buffer.format = kRecordWriterDefaultFormat;
+        if (data && bytes_len > 0)
+        {
+            if (buffer.data)
+                return false;
+            if (buffer.data = new (std::nothrow) uint8_t[bytes_len]; buffer.data)
+                std::memcpy(buffer.data, data, bytes_len);
+            buffer.format = kRecordWriterDefaultFormat;
+            return true;
+        }
+        return false;
     }
 
     VideoFrame(VideoFrame &&other) noexcept = default;

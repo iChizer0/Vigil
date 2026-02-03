@@ -19,7 +19,7 @@ static inline constexpr const size_t kHardwareDestructiveInterferenceSize = std:
 #pragma GCC diagnostic pop
 
 static inline constexpr const std::string_view kRecordWriterPrefixDefault = "";
-static inline constexpr const std::string kRecordWriterDefaultFormat = "MP4";
+static inline constexpr const char *kRecordWriterDefaultFormat = "MP4";
 static inline constexpr const std::chrono::milliseconds kRecordWriterDefaultIntervalMs = std::chrono::milliseconds(0);
 static inline constexpr const std::string_view kCaptureWriterPrefixDefault = "Capture ";
 
@@ -44,8 +44,8 @@ static inline constexpr const int kStorageDefaultUid = 1000;
 static inline constexpr const int kStorageDefaultGid = 1000;
 static inline constexpr const std::string_view kStorageMountBasePath = "/mnt";
 static inline constexpr const char *kStorageFirstLevelDirNameTimeFormat = "%Y-%m-%d";
-static inline constexpr const char *kStorageFileNamePrefixTimeFormat = "%H-%M-%S";
-static inline constexpr const std::string_view kStorageThumbnailDirName = ".thumbnails";
+static inline constexpr const char *kStorageFileNamePrefixTimeFormat = "%H:%M:%S";
+static inline constexpr const std::string_view kStorageThumbnailDirName = ".thumb";
 static inline constexpr const std::string kStorageThumbnailFileType = "JPG";
 static inline constexpr const std::string_view kStorageThumbnailFileExt = ".thumb.jpg";
 static inline constexpr const int kStorageThumbnailDownScaleFactor = 2;

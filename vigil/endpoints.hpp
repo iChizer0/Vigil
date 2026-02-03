@@ -10,6 +10,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -1077,7 +1078,8 @@ private:
             const auto duration = steady_now.time_since_epoch();
             const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
             const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(duration - seconds);
-            ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << micros.count() << fmt;
+            ss << ' ' << std::put_time(&tm, kStorageFileNamePrefixTimeFormat) << ' ' << std::setfill('0')
+               << std::setw(6) << micros.count() << fmt;
 
             file_name = ss.str();
         }
