@@ -121,9 +121,9 @@ protected:
         return static_cast<const T *>(this)->getFilePathImpl();
     }
 
-    virtual ThumbnailBuffer getThumbnail() noexcept
+    void onThumbnailFrame(const MediaFrame::FrameType &frame) noexcept
     {
-        return {};
+        static_cast<T *>(this)->onThumbnailFrameImpl(frame);
     }
 
 private:
@@ -154,8 +154,6 @@ public:
 
     virtual ~SlotAdaptedWriter() noexcept
     {
-        if (this->ctxRef().c_api.media.thumbnail_generate_cb)
-            this->getThumbnail().transferTo(_cache_file_info.thumbnail);
         _slot.moveAndAddCacheFile(_cache_file_info);
         _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
     }
@@ -186,6 +184,14 @@ protected:
     inline bool shouldContinueWritingImpl() const noexcept
     {
         return this->ctxRef().shared_writer_settings.getRevision() == _settings_revision && _slot.isReadyToWrite();
+    }
+
+    inline void onThumbnailFrameImpl(const MediaFrame::FrameType &frame) noexcept
+    {
+        if (!this->ctxRef().c_api.media.thumbnail_generate_cb)
+            return;
+        if (auto p = std::get_if<VideoFrame>(frame.get()); p) [[likely]]
+            p->cloneTo(_cache_file_info.thumbnail);
     }
 
 private:
@@ -321,6 +327,8 @@ protected:
         return _capture.shouldContinueWriting() && isRemainSpaceEnough();
     }
 
+    inline void onThumbnailFrameImpl(const MediaFrame::FrameType &) noexcept { }
+
 private:
     bool isRemainSpaceEnough() const noexcept
     {
@@ -401,7 +409,7 @@ public:
     template<typename... Args>
     VideoWriter(Args &&...args)
         : T(std::forward<Args>(args)...), _video_clip_length(this->settings().video_clip_length), _fd(-1),
-          _is_clip_finish(false)
+          _is_clip_finish(false), _thumbnail()
     {
         if (!this->ctxRef().c_api.media.video_file_create_cb || !this->ctxRef().c_api.media.video_file_finish_cb)
         {
@@ -426,16 +434,6 @@ public:
         this->ctxRef().media_writers_active.fetch_sub(1, std::memory_order_release);
     }
 
-    ThumbnailBuffer getThumbnail() noexcept override
-    {
-        ThumbnailBuffer thumbnail;
-        if (!_thumbnail.frame) [[unlikely]]
-            return thumbnail;
-        if (auto p = std::get_if<VideoFrame>(&*_thumbnail.frame); p) [[likely]]
-            p->cloneTo(thumbnail);
-        return thumbnail;
-    }
-
 private:
     static inline constexpr const std::chrono::milliseconds kVideoFrameWaitDelay = std::chrono::milliseconds(10);
 
@@ -454,20 +452,22 @@ private:
 
     WriteEvent::Status endWrite() noexcept
     {
-        if (_fd >= 0)
+        if (_fd >= 0) [[likely]]
         {
             if (auto ret = this->ctxRef().c_api.media.video_file_finish_cb(_fd, this->ctxRef().c_api.media.user_data);
-                ret != 0)
+                ret != 0) [[unlikely]]
             {
                 VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to finish video file with fd ", _fd,
                     ", code: ", static_cast<int>(ret));
                 return WriteEvent::Status::Failed;
             }
+            else [[likely]]
+                this->onThumbnailFrame(_thumbnail);
             _fd = -1;
+            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "VideoWriter finished writing file at path ",
+                this->getFilePath());
         }
 
-        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "VideoWriter finished writing file at path ",
-            this->getFilePath());
         return WriteEvent::Status::Completed;
     }
 
@@ -519,7 +519,7 @@ private:
 
             __VIGIL_WRITER_WRITE_FRAME_INTERNAL__;
 
-            _thumbnail = frame;
+            _thumbnail = frame.frame;
 
             break;
         }
@@ -610,7 +610,7 @@ private:
     std::chrono::seconds _video_clip_length;
     int _fd;
     bool _is_clip_finish;
-    MediaFrame _thumbnail;
+    MediaFrame::FrameType _thumbnail;
 };
 
 } // namespace vigil::writers

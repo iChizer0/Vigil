@@ -646,7 +646,7 @@ struct ThumbnailBuffer final: public NonCopyable<ThumbnailBuffer>
     size_t size;
     const char *format;
 
-    ThumbnailBuffer() noexcept : data(nullptr), size(0), format() { }
+    ThumbnailBuffer() noexcept : data(nullptr), size(0), format(nullptr) { }
 
     ~ThumbnailBuffer() noexcept
     {
@@ -757,9 +757,13 @@ struct VideoFrame: public BaseFrame
             if (buffer.data)
                 return false;
             if (buffer.data = new (std::nothrow) uint8_t[bytes_len]; buffer.data)
+            {
                 std::memcpy(buffer.data, data, bytes_len);
-            buffer.format = kRecordWriterDefaultFormat;
-            return true;
+                buffer.size = bytes_len;
+                buffer.format = kRecordWriterDefaultFormat;
+                return true;
+            }
+            return false;
         }
         return false;
     }
@@ -793,7 +797,8 @@ struct AudioFrame: public BaseFrame
 struct MediaFrame
 {
     std::chrono::steady_clock::time_point time_stamp;
-    mutable std::shared_ptr<std::variant<VideoFrame, AudioFrame>> frame;
+    using FrameType = std::shared_ptr<std::variant<VideoFrame, AudioFrame>>;
+    mutable FrameType frame;
 
     MediaFrame() : time_stamp(), frame() { }
 
