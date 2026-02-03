@@ -488,6 +488,7 @@ Notes:
 - The relay directory is temporary and will timeout after a period of inactivity (default 300s).
 - Accessing the relay directory refreshes the timeout.
 - Use the `UNRELAY` action to explicitly close the relay.
+- The default thumbnail is generated on-the-fly for video files when accessed via the relay: `/path/to/video.mp4` -> `/path/to/.thumb/video.mp4.thumb.jpg`
 
 ## Error Handling
 

@@ -29,8 +29,8 @@ static inline constexpr const size_t kMaskHeight = 128;
 static inline constexpr const size_t kInferenceQueueSize = 60 * 1;
 
 static inline constexpr const std::chrono::seconds kVideoClipLengthDefault = std::chrono::seconds(60);
-static inline constexpr const size_t kVideoFrameBufferSize = 30 * 5;
-static inline constexpr const size_t kAudioFrameBufferSize = 30 * 5;
+static inline constexpr const size_t kVideoFrameBufferSize = 30 * 10;
+static inline constexpr const size_t kAudioFrameBufferSize = 30 * 10;
 static inline constexpr const size_t kSlotMediaMuxerBufferSize = kVideoFrameBufferSize + kAudioFrameBufferSize;
 static inline constexpr const size_t kSlotMediaMuxerBufferPeriod = 10;
 
