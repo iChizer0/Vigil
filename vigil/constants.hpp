@@ -48,7 +48,7 @@ static inline constexpr const char *kStorageFileNamePrefixTimeFormat = "%H:%M:%S
 static inline constexpr const std::string_view kStorageThumbnailDirName = ".thumb";
 static inline constexpr const std::string kStorageThumbnailFileType = "JPG";
 static inline constexpr const std::string_view kStorageThumbnailFileExt = ".thumb.jpg";
-static inline constexpr const int kStorageThumbnailDownScaleFactor = 2;
+static inline constexpr const int kStorageThumbnailMaxWH = 1024;
 static inline constexpr const size_t kStorageNetlinkBufferSize = 4096;
 static inline constexpr const std::string_view kStorageNetlinkAction = "ACTION=";
 static inline constexpr const std::string_view kStorageNetlinkDevName = "DEVNAME=";

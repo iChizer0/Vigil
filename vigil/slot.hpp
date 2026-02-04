@@ -443,8 +443,7 @@ protected:
             }
             else if (auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
                          cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_path.c_str(),
-                         kStorageThumbnailFileType.c_str(), kStorageThumbnailDownScaleFactor,
-                         _ctx.c_api.media.user_data);
+                         kStorageThumbnailFileType.c_str(), kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
                 ret != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to generate thumbnail for cache file ",
