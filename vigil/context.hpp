@@ -153,14 +153,14 @@ struct Context
                 if (!shared_rule_event.current)
                 {
                     shared_rule_event.current = std::make_shared<WriteEvent>(steady_time, unix_time);
-                    shared_rule_event.current_owner.emplace(type, id, unix_time);
+                    shared_rule_event.current_owner = std::make_shared<EventOwner>(type, id, unix_time);
                     return true;
                 }
             }
         }
         catch (std::exception &e)
         {
-            VG_LOG(log, VG_LOG_LEVEL_ERROR, "Failed to create EvaluationResult in ruleTaskLoop: ", e.what());
+            VG_LOG(log, VG_LOG_LEVEL_ERROR, "Failed to create rule evaluation events: ", e.what());
         }
         return false;
     }
@@ -187,20 +187,21 @@ struct Context
 
         mutable std::shared_mutex mutex;
         std::shared_ptr<WriteEvent> last;
+        std::shared_ptr<EventOwner> last_owner;
         std::shared_ptr<WriteEvent> current;
-        std::optional<EventOwner> current_owner;
+        std::shared_ptr<EventOwner> current_owner;
 
     public:
         void reset(WriteEvent::Status status) noexcept
         {
+            const std::unique_lock lock(mutex);
             if (current)
             {
                 current->status.store(status, std::memory_order_relaxed);
-                {
-                    const std::unique_lock lock(mutex);
-                    last = std::move(current);
-                    current.reset();
-                }
+                last = std::move(current);
+                current.reset();
+                last_owner = std::move(current_owner);
+                current_owner.reset();
             }
         }
 
@@ -216,11 +217,12 @@ struct Context
             return current;
         }
 
-        std::tuple<std::shared_ptr<WriteEvent>, std::shared_ptr<WriteEvent>, std::optional<EventOwner>>
+        std::tuple<std::shared_ptr<WriteEvent>, std::shared_ptr<EventOwner>, std::shared_ptr<WriteEvent>,
+            std::shared_ptr<EventOwner>>
         get() const noexcept
         {
             const std::shared_lock lock(mutex);
-            return { last, current, current_owner };
+            return { last, last_owner, current, current_owner };
         }
 
     } mutable shared_rule_event;

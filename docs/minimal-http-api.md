@@ -44,14 +44,19 @@ Get the information about the rule system.
         "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", "UNKNOWN"
         "iTimestamp": 1735574000 // Integer, Unix timestamp in milliseconds
     },
-    "dCurrentRuleEvent": { // Optional, present only if an active writing event exists
-        "sStatus": "WRITING", // String, write event status
-        "iTimestamp": 1735574400 // Integer, Unix timestamp in milliseconds
-    },
-    "dCurrentRuleEventOwner": { // Optional, present and update when a rule evaluated as true and the current event is finished
+    "dLastRuleEventOwner": { // Optional, present and update when a rule evaluated as true and the current event is finished
         "sRuleType": "TIMER", // String, rule type
         "sRuleID": "Hourly Timer", // String, rule ID
-        "iTimestamp": 1735574400 // Integer, Unix timestamp in milliseconds (should be same as in dCurrentRuleEvent)
+        "iTimestamp": 1735574400 // Integer, Unix timestamp in milliseconds (should be same as the corresponding timestamp of its event)
+    },
+    "dCurrentRuleEvent": { // Alternative to dLastRuleEvent, present only if an active event exists
+        "sStatus": "WRITING",
+        "iTimestamp": 1735574400
+    },
+    "dCurrentRuleEventOwner": { // Alternative to dLastRuleEventOwner, present only if an active event exists
+        "sRuleType": "TIMER",
+        "sRuleID": "Hourly Timer",
+        "iTimestamp": 1735574400
     },
     "dAvailableGPIOs": { // Object, available GPIO pins
         "GPIO_01": { // Key: String, GPIO pin name

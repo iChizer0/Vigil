@@ -448,41 +448,31 @@ public:
         try
         {
             {
-                auto [last_evt, current_evt, current_owner] = _ctx->shared_rule_event.get();
-
-                res_j["dLastRuleEvent"] = [&]() -> std::optional<nlohmann::json> {
-                    if (!last_evt)
+                auto fmt_evt = [](const std::shared_ptr<WriteEvent> &evt) -> std::optional<nlohmann::json> {
+                    if (!evt)
                         return std::nullopt;
-
-                    const auto &evt = last_evt;
                     auto obj = nlohmann::json::object();
                     obj["sStatus"] = WriteEvent::StatusString(evt->status.load(std::memory_order_relaxed));
                     obj["iTimestamp"] = evt->timestamp;
                     return obj;
-                }();
+                };
 
-                res_j["dCurrentRuleEvent"] = [&]() -> std::optional<nlohmann::json> {
-                    if (!current_evt)
+                auto fmt_evt_owner = [](const std::shared_ptr<EventOwner> &owner) -> std::optional<nlohmann::json> {
+                    if (!owner)
                         return std::nullopt;
-
-                    const auto &evt = current_evt;
-                    auto obj = nlohmann::json::object();
-                    obj["sStatus"] = WriteEvent::StatusString(evt->status.load(std::memory_order_relaxed));
-                    obj["iTimestamp"] = evt->timestamp;
-                    return obj;
-                }();
-
-                res_j["dCurrentRuleEventOwner"] = [&]() -> std::optional<nlohmann::json> {
-                    const auto &owner = current_owner;
-                    if (!owner.has_value())
-                        return std::nullopt;
-
                     auto obj = nlohmann::json::object();
                     obj["sRuleType"] = BaseRule::TypeString(owner->type);
                     obj["sRuleID"] = owner->id;
                     obj["iTimestamp"] = owner->timestamp;
                     return obj;
-                }();
+                };
+
+                auto [last_evt, last_owner, current_evt, current_owner] = _ctx->shared_rule_event.get();
+
+                res_j["dLastRuleEvent"] = fmt_evt(last_evt);
+                res_j["dLastRuleEventOwner"] = fmt_evt_owner(last_owner);
+                res_j["dCurrentRuleEvent"] = fmt_evt(current_evt);
+                res_j["dCurrentRuleEventOwner"] = fmt_evt_owner(current_owner);
             }
             {
                 auto gpios_obj = nlohmann::json::object();
