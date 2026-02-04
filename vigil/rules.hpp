@@ -390,6 +390,8 @@ public:
                 return true;
 
             const std::string_view current_data(_buffer.data(), bytes_read + _subcmd_len);
+            VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Read ", bytes_read, " bytes from TTY socket fd ", _fd, ", data: '",
+                current_data, "'");
 
             size_t pos = 0;
             size_t end_of_last_match = 0;
