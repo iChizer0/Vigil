@@ -70,7 +70,7 @@ struct Context
     // Tick function to update context state
     bool tick() noexcept
     {
-        if (!rule_enabled.load(std::memory_order_relaxed))
+        if (!record_rule_enabled.load(std::memory_order_relaxed))
         {
             shared_inference_result.reset();
             shared_rule_event.reset(WriteEvent::Status::Canceled);
@@ -104,7 +104,8 @@ struct Context
     {
         static_assert(std::is_same_v<std::remove_cvref_t<T>, InferenceResult>,
             "enqueueInferenceResult only accepts InferenceResult type.");
-        if (!rule_enabled.load(std::memory_order_relaxed) || inference_subscribers.load(std::memory_order_relaxed) == 0)
+        if (!record_rule_enabled.load(std::memory_order_relaxed)
+            || inference_subscribers.load(std::memory_order_relaxed) == 0)
         {
             const std::unique_lock lock(inference_mutex);
 
@@ -166,7 +167,7 @@ struct Context
 
     // Shared data
     // Used to control rule evaluation and inference subscriptions
-    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> rule_enabled = false;
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> record_rule_enabled = false;
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<int> inference_subscribers = 0;
     // Sync inference results queue, updated in enqueueInferenceResult()
     std::mutex inference_mutex;

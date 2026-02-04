@@ -288,7 +288,7 @@ vg_sta_e vg_http_api_rule_config_get(vg_http_api_response_t *response)
 
     try
     {
-        auto res_j = vigil_instance->ruleEndpoint().getRuleConfig();
+        auto res_j = vigil_instance->ruleEndpoint().getRecordConfig();
         return vg_http_api_json_2_response(res_j, *response);
     }
     catch (const std::exception &e)
@@ -310,7 +310,7 @@ vg_sta_e vg_http_api_rule_config_post(const vg_http_api_request_t *request, vg_h
     try
     {
         auto req_j = vg_http_api_request_2_json(*request);
-        auto res_j = vigil_instance->ruleEndpoint().updateRuleConfig(req_j, true);
+        auto res_j = vigil_instance->ruleEndpoint().updateRecordConfig(req_j, true);
         return vg_http_api_json_2_response(res_j, *response);
     }
     catch (const std::exception &e)

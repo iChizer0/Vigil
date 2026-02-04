@@ -176,7 +176,7 @@ private:
 class RuleEndpoint final
 {
 private:
-    static inline constexpr const std::string_view kRuleConfigName = "rule_config.json";
+    static inline constexpr const std::string_view kRecordConfigName = "record_config.json";
     static inline constexpr const std::string_view kScheduleRuleConfigName = "schedule_rule_config.json";
     static inline constexpr const std::string_view kRecordRuleConfigName = "record_rule_config.json";
     static inline constexpr const std::chrono::milliseconds kRuleEvaluationInterval = std::chrono::milliseconds(10);
@@ -188,9 +188,9 @@ public:
             throw Exception("Context pointer cannot be null in RuleEndpoint");
 
         {
-            _rule_config_store = std::make_unique<ConfigStore>(*_ctx, kRuleConfigName);
-            if (nlohmann::json j; _rule_config_store->loadFromFile(j) == 0)
-                updateRuleConfig(j, false);
+            _record_config_store = std::make_unique<ConfigStore>(*_ctx, kRecordConfigName);
+            if (nlohmann::json j; _record_config_store->loadFromFile(j) == 0)
+                updateRecordConfig(j, false);
         }
         {
             _schedule_rule_config = std::make_unique<ScheduleRuleConfig>();
@@ -225,24 +225,24 @@ public:
         }
     }
 
-    nlohmann::json updateRuleConfig(const nlohmann::json &j, bool store = true)
+    nlohmann::json updateRecordConfig(const nlohmann::json &j, bool store = true)
     {
         auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
 
         try
         {
-            const auto rule_enabled = j.at("bRuleEnabled").get<bool>();
+            const auto record_rule_enabled = j.at("bRuleEnabled").get<bool>();
             const auto writer_config = FileWriterConfig(j.at("dWriterConfig"), *_ctx);
 
             if (store) // Store first
             {
-                if (ret = _rule_config_store->saveToFile(j); ret != 0)
-                    throw Exception("Failed to store rule config to file");
+                if (ret = _record_config_store->saveToFile(j); ret != 0)
+                    throw Exception("Failed to store record config to file");
             }
 
             writer_config.sync(*_ctx); // Before updating rule enabled state
-            _ctx->rule_enabled.store(rule_enabled, std::memory_order_relaxed);
+            _ctx->record_rule_enabled.store(record_rule_enabled, std::memory_order_relaxed);
         }
         catch (const std::exception &e)
         {
@@ -255,14 +255,14 @@ public:
         return res_j;
     }
 
-    nlohmann::json getRuleConfig() const
+    nlohmann::json getRecordConfig() const
     {
         auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
 
         try
         {
-            res_j["bRuleEnabled"] = _ctx->rule_enabled.load(std::memory_order_relaxed);
+            res_j["bRuleEnabled"] = _ctx->record_rule_enabled.load(std::memory_order_relaxed);
             {
                 nlohmann::json writer_cfg_j;
                 const auto writer_cfg = FileWriterConfig::from(*_ctx);
@@ -549,7 +549,7 @@ public:
         {
             // Pre-checks
             {
-                if (!_ctx->rule_enabled.load(std::memory_order_relaxed))
+                if (!_ctx->record_rule_enabled.load(std::memory_order_relaxed))
                 {
                     ret = EPERM;
                     throw Exception("Cannot activate HTTP rule when rule evaluation is disabled");
@@ -713,7 +713,7 @@ private:
     std::unique_ptr<BaseRule> _record_rule;
 
     // Config store
-    std::unique_ptr<ConfigStore> _rule_config_store;
+    std::unique_ptr<ConfigStore> _record_config_store;
     std::unique_ptr<ConfigStore> _schedule_rule_config_store;
     std::unique_ptr<ConfigStore> _record_rule_config_store;
 };
