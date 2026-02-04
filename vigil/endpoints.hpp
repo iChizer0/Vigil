@@ -1019,7 +1019,7 @@ public:
                 !_finish_current_capture.compare_exchange_strong(exp, true, std::memory_order_acq_rel))
             {
                 ret = EALREADY;
-                throw Exception("Capture stopping is already in progress");
+                throw Exception("Stopping capture is already in progress");
             }
         }
         catch (const std::exception &e)

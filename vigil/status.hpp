@@ -147,8 +147,8 @@ struct CaptureStatus
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
-        j["dActiveCapture"] = formatEvent(active);
-        j["dLastCapture"] = formatEvent(last);
+        j["dLastCapture"] = formatEvent(active ? active : last);
+        j["bReadyToStartNew"] = active ? false : true;
         j["bStopRequested"] = stop_requested;
     }
 
@@ -170,9 +170,6 @@ struct CaptureStatus
         if (evt->event)
         {
             oj["sStatus"] = WriteEvent::StatusString(evt->event->status.load(std::memory_order_relaxed));
-            oj["sTimepoint"]
-                = std::chrono::duration_cast<std::chrono::milliseconds>(evt->event->timepoint.time_since_epoch())
-                      .count();
             oj["iTimestamp"] = evt->event->timestamp;
         }
         oj["sFileName"] = evt->file_name;

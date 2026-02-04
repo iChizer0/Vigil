@@ -379,27 +379,17 @@ Get the current capture status.
 
 ```json
 {
-    "dActiveCapture": { // Object (optional), current capture if in progress, null if none
+    "dLastCapture": { // Object (optional), current active capture if in progress, otherwise last completed capture, null if none
         "sID": "194e8b2c0000194e8b2c0001", // String, unique capture event ID
         "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
         "sFormat": "MP4", // String, capture format ("MP4", "JPG", "RAW")
         "iVideoLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
         "sStatus": "WRITING", // String, write event status ("PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", "UNKNOWN")
-        "sTimepoint": 1736870400000, // Integer, steady clock timepoint (milliseconds since epoch)
         "iTimestamp": 1736870400000, // Integer, Unix timestamp in milliseconds
         "sFileName": "Capture 20260114 143000 123456.mp4" // String, generated file name
     },
-    "dLastCapture": { // Object (optional), last completed capture, null if none
-        "sID": "194e8b2c0000194e8b2c0000", // String, unique capture event ID
-        "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
-        "sFormat": "MP4", // String, capture format ("MP4", "JPG", "RAW")
-        "iVideoLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
-        "sStatus": "COMPLETED", // String, write event status
-        "sTimepoint": 1736870300000, // Integer, steady clock timepoint (milliseconds since epoch)
-        "iTimestamp": 1736870300000, // Integer, Unix timestamp in milliseconds
-        "sFileName": "Capture 20260114 142800 654321.mp4" // String, generated file name
-    },
-    "bStopRequested": false, // Boolean, whether a stop capture request is pending
+    "bReadyToStartNew": true, // Boolean, whether a new capture can be started (false if active capture in progress)
+    "bStopRequested": false // Boolean, whether a stop capture request is pending
 }
 ```
 
@@ -431,7 +421,6 @@ Start a new capture session.
         "sFormat": "MP4", // String, capture format
         "iVideoLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
         "sStatus": "PENDING", // String, initial write event status
-        "sTimepoint": 1736870400000, // Integer, steady clock timepoint (milliseconds since epoch)
         "iTimestamp": 1736870400000, // Integer, Unix timestamp in milliseconds
         "sFileName": "Capture 20260114 143000 123456.mp4" // String, generated file name
     },
