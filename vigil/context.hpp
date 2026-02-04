@@ -266,13 +266,12 @@ struct Context
     } shared_writer_settings;
 
     // Shared video/audio frame buffers
-    template<size_t SizeLimit, size_t PeriodLimit>
+    template<size_t PeriodLimit>
     struct SharedMediaBuffer
     {
-        static_assert(SizeLimit > 0, "Size limit must be greater than 0");
-
         std::mutex mutex;
         std::deque<MediaFrame> queue;
+        bool drop_until_keyframe = false;
 
         void clear() noexcept
         {
@@ -300,10 +299,17 @@ struct Context
         void enqueue(T &&frame) noexcept
         {
             const std::unique_lock lock(mutex);
+            if (drop_until_keyframe) [[unlikely]]
+            {
+                if (frame.isKeyFrame())
+                    drop_until_keyframe = false;
+                else
+                    return;
+            }
             auto rit = queue.crbegin();
             for (; rit != queue.crend(); ++rit)
             {
-                if (rit->time_stamp <= frame.time_stamp)
+                if (rit->time_stamp <= frame.time_stamp) [[likely]]
                     break;
             }
             queue.insert(rit.base(), std::forward<T>(frame));
@@ -313,41 +319,31 @@ struct Context
     private:
         inline void tryDropFramesInternal() noexcept
         {
+            auto s = queue.begin();
+            auto e = queue.begin();
+            for (auto t = std::chrono::steady_clock::now() - std::chrono::seconds(PeriodLimit); e != queue.end(); ++e)
             {
-                const auto t = std::chrono::steady_clock::now() - std::chrono::seconds(PeriodLimit);
-                for (auto s = queue.begin(); s != queue.end();)
-                {
-                    if (s->time_stamp >= t)
-                        break;
-                    s = queue.erase(s);
-                }
+                if (e->time_stamp >= t)
+                    break;
             }
-
-            if (queue.size() > SizeLimit)
+            if (s == e)
+                return;
+            for (; e != queue.end(); ++e)
             {
-                auto s = queue.begin();
-                auto e = std::next(s);
-
-                for (; e != queue.end(); ++e)
-                {
-                    if (e->isKeyFrame())
-                        break;
-                }
-
-                if (s->isKeyFrame() || e == queue.end())
-                {
-                    queue.erase(s, e); // Drop frames between key frames
-                    return;
-                }
-
-                while (s != e && std::holds_alternative<AudioFrame>(*e->frame))
-                    e = std::prev(e);
-                queue.erase(e); // Drop the last video frame before the next key frame
+                if (e->isKeyFrame())
+                    break;
+            }
+            if (e != queue.end())
+                queue.erase(s, e);
+            else
+            {
+                drop_until_keyframe = true;
+                queue.clear();
             }
         }
     };
-    SharedMediaBuffer<kSlotMediaMuxerBufferSize, kSlotMediaMuxerBufferPeriod> slot_media_buffer;
-    SharedMediaBuffer<kCaptureMediaMuxerBufferSize, kCaptureMediaMuxerBufferPeriod> capture_media_buffer;
+    SharedMediaBuffer<kSlotMediaMuxerBufferPeriod> slot_media_buffer;
+    SharedMediaBuffer<kCaptureMediaMuxerBufferPeriod> capture_media_buffer;
 
     // Shared time (thread-safe)
     struct SharedTime
