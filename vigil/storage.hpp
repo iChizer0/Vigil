@@ -335,7 +335,7 @@ private:
 
     std::filesystem::path getMountPath(const std::string &dev_name) const
     {
-        return std::filesystem::path(kStorageMountBasePath) / ("vg_" + dev_name);
+        return std::filesystem::path(kStorageMountBasePath) / ("rc_" + dev_name);
     }
 
     void syncAndUpdateSlotsWithNetlink()
