@@ -469,10 +469,9 @@ public:
 
                 auto [last_evt, last_owner, current_evt, current_owner] = _ctx->shared_rule_event.get();
 
-                res_j["dLastRuleEvent"] = fmt_evt(last_evt);
-                res_j["dLastRuleEventOwner"] = fmt_evt_owner(last_owner);
-                res_j["dCurrentRuleEvent"] = fmt_evt(current_evt);
-                res_j["dCurrentRuleEventOwner"] = fmt_evt_owner(current_owner);
+                res_j["bReadyForNewEvent"] = current_evt ? false : true;
+                res_j["dLastRuleEvent"] = fmt_evt(current_evt ? current_evt : last_evt);
+                res_j["dLastRuleEventOwner"] = fmt_evt_owner(current_owner ? current_owner : last_owner);
             }
             {
                 auto gpios_obj = nlohmann::json::object();
