@@ -289,6 +289,29 @@ public:
                == _generation_target.load(std::memory_order_acquire);
     }
 
+    class IndexSuspendGuard final: public NonCopyable<IndexSuspendGuard>
+    {
+    public:
+        IndexSuspendGuard(IndexManager &manager) noexcept : _manager(manager)
+        {
+            _manager._indexer_mutex.lock();
+        }
+
+        ~IndexSuspendGuard() noexcept
+        {
+            _manager._indexer_mutex.unlock();
+            _manager._indexer_cv.notify_one();
+        }
+
+    private:
+        IndexManager &_manager;
+    };
+
+    IndexSuspendGuard suspend() noexcept
+    {
+        return { *this };
+    }
+
     IndexResult size() const noexcept
     {
         if (!_indexable.load(std::memory_order_acquire))

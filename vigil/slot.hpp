@@ -132,6 +132,11 @@ public:
         return _uuid;
     }
 
+    std::shared_ptr<IndexManager> getIndexManager() const noexcept
+    {
+        return _index_manager.load(std::memory_order_acquire);
+    }
+
     SlotStatus getStatus() const noexcept
     {
         const auto is_enabled = isEnabled();

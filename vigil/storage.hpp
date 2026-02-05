@@ -155,29 +155,43 @@ public:
             relative_paths.clear(); // Treat as nothing deleted
             return EPERM;
         }
-        for (auto it = relative_paths.begin(); it != relative_paths.end();)
-        {
-            try
+
+        auto do_remove = [&]() {
+            for (auto it = relative_paths.begin(); it != relative_paths.end();)
             {
-                if (auto ret = slot->removeFileOrDirectory(*it); ret == 0)
+                try
                 {
+                    if (auto ret = slot->removeFileOrDirectory(*it); ret == 0)
+                    {
+                        ++it;
+                        continue;
+                    }
+                    else
+                    {
+                        VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove file or directory ", *it,
+                            " on slot with device path ", slot_dev_path, ", code: ", ret);
+                        it = relative_paths.erase(it);
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Exception occurred when removing file or directory ", *it,
+                        " on slot with device path ", slot_dev_path, ": ", e.what());
                     ++it;
-                    continue;
-                }
-                else
-                {
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove file or directory ", *it,
-                        " on slot with device path ", slot_dev_path, ", code: ", ret);
-                    it = relative_paths.erase(it);
                 }
             }
-            catch (const std::exception &e)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Exception occurred when removing file or directory ", *it,
-                    " on slot with device path ", slot_dev_path, ": ", e.what());
-                ++it;
-            }
+        };
+
+        if (auto mgr = slot->getIndexManager(); mgr)
+        {
+            const auto guard = mgr->suspend();
+            do_remove();
         }
+        else
+        {
+            do_remove();
+        }
+
         return 0;
     }
 
