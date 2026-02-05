@@ -4,6 +4,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
 #include <new>
 #include <string>
@@ -309,6 +310,8 @@ struct TTYRuleConfig
             j.at("sCommand").get_to(cmd);
             if (cmd.empty())
                 throw Exception("TTY rule for '" + name + "' has empty command string");
+            if (cmd.length() > buffer_size)
+                throw Exception("TTY rule command length exceeds buffer size for TTY '" + name + "'");
         }
     }
 

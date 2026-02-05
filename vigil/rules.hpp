@@ -7,10 +7,10 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -347,13 +347,12 @@ private:
 class TTYRule final: public BaseRule
 {
 public:
-    TTYRule(const TTYRuleConfig &cfg, const Context &ctx) noexcept
-        : BaseRule(VG_RULE_TYPE_TTY, 0), _socket_path(cfg.socket_path), _cmd(cfg.cmd),
-          _searcher(_cmd.begin(), _cmd.end()), _fd(-1), _subcmd_len(_cmd.length() ? _cmd.length() - 1 : 0),
-          _buffer(cfg.buffer_size + _subcmd_len), _found(0)
+    TTYRule(const TTYRuleConfig &cfg, const Context &ctx)
+        : BaseRule(VG_RULE_TYPE_TTY, 0), _socket_path(cfg.socket_path), _cmd(cfg.cmd), _cmd_pos(0),
+          _buffer_size(cfg.buffer_size), _buffer(new char[_buffer_size]), _fd(-1), _found(0)
     {
         if (_cmd.empty())
-            VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Initializing TTY rule with empty command string");
+            throw Exception("TTY rule command cannot be empty while initializing TTY rule");
 
         openSocket(ctx);
 
@@ -372,55 +371,44 @@ public:
             openSocket(ctx);
         while (isSocketOpen())
         {
-            ssize_t bytes_read = ::read(_fd, _buffer.data() + _subcmd_len, _buffer.size() - _subcmd_len);
-            if (bytes_read == -1)
+            const ssize_t n = ::recv(_fd, _buffer, _buffer_size, 0);
+            if (n < 0)
             {
-                const auto err = errno;
-                if (err == EAGAIN || err == EWOULDBLOCK)
-                    break;
-
-                VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Error reading from TTY socket fd ", _fd, ": ", strerror(err));
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                    break; // No more data available
+                VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to read from Unix socket at '", _socket_path,
+                    "': ", strerror(errno));
                 closeSocket();
                 break;
             }
-            else if (bytes_read == 0)
-                break;
-
-            if (_cmd.empty())
-                return true;
-
-            const std::string_view current_data(_buffer.data(), bytes_read + _subcmd_len);
-            VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Read ", bytes_read, " bytes from TTY socket fd ", _fd, ", data: '",
-                current_data, "'");
-
-            size_t pos = 0;
-            size_t end_of_last_match = 0;
-            while (true)
+            if (n == 0)
             {
-                auto it = std::search(current_data.begin() + pos, current_data.end(), _searcher);
-                if (it == current_data.end())
-                    break;
-
-                ++_found;
-                pos = std::distance(current_data.begin(), it) + _cmd.length();
-                end_of_last_match = pos;
+                VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Unix socket at '", _socket_path, "' closed by peer");
+                closeSocket();
+                break;
             }
 
-            char *const prefix_start = _buffer.data();
-            const size_t data_len = current_data.length();
-            const size_t unsearched_len = data_len - end_of_last_match;
-            const size_t overlap = std::min(unsearched_len, _subcmd_len);
+            VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Read ", n, " bytes from Unix socket at '", _socket_path, "'");
 
-            if (overlap > 0)
-                std::memmove(prefix_start + _subcmd_len - overlap, prefix_start + data_len - overlap, overlap);
-
-            if (_subcmd_len - overlap > 0)
-                std::memset(prefix_start, 0, _subcmd_len - overlap);
+            for (ssize_t i = 0; i < n; ++i)
+            {
+                if (_buffer[i] == _cmd[_cmd_pos])
+                {
+                    ++_cmd_pos;
+                    if (_cmd_pos == _cmd.size())
+                    {
+                        ++_found;
+                        _cmd_pos = 0;
+                    }
+                }
+                else if (_cmd_pos > 0)
+                    _cmd_pos = (_buffer[i] == _cmd[0]) ? 1 : 0;
+            }
         }
 
-        _found -= _found > 0;
-
-        return _found;
+        const bool found = _found > 0;
+        _found -= found;
+        return found;
     }
 
 private:
@@ -470,6 +458,10 @@ private:
 
         VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Connected to Unix socket at '", _socket_path, "' with fd ", _fd,
             ", flags set to:", flags);
+
+        _cmd_pos = 0;
+        std::memset(_buffer, 0, _buffer_size);
+        _found = 0;
     }
 
     void closeSocket() const noexcept
@@ -482,12 +474,12 @@ private:
     }
 
 private:
-    std::string _socket_path;
-    std::string _cmd;
-    std::boyer_moore_horspool_searcher<std::string::const_iterator> _searcher;
+    const std::string _socket_path;
+    const std::string _cmd;
+    mutable size_t _cmd_pos;
+    const size_t _buffer_size;
+    mutable char *_buffer;
     mutable int _fd;
-    size_t _subcmd_len;
-    mutable std::vector<char> _buffer;
     mutable int _found;
 };
 
