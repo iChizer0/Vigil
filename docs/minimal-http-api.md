@@ -262,6 +262,7 @@ Get the current status of all storage slots.
             "sType": "ext4", // String (optional), filesystem type, null if not available or not formatted yet, may not exist if eState < NOT_MOUNTED
             "bSelected": true, // Boolean, whether this slot is the target enabled slot according to current configuration
             "bEnabled": true, // Boolean, whether this slot is currently enabled
+            "bSyncing": false, // Boolean, whether this slot is currently performing sync tasks (e.g., flushing write cache)
             "bWriting": false, // Boolean, whether this slot currently has activate writing tasks (e.g., recording videos, writing images)
             "bRotating": false, // Boolean, whether this slot is currently performing quota rotation
             "eState": 8, // Integer, states enum of current slot, values (1: ERROR, 2: NOT_FORMATTED_OR_FORMAT_UNSUPPORTED, 3: FORMATTING, 4: NOT_MOUNTED, 5: MOUNTED, 6: CONFIGURED, 7: INDEXING, 8: READY)
