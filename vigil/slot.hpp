@@ -295,8 +295,8 @@ public:
         if (bytes < -1 || bytes > _stats.load(std::memory_order_acquire).size_bytes)
             return EINVAL;
         const std::unique_lock lock(_mutex);
-        if (_state.load(std::memory_order_acquire) == SlotState::Mounted && !ensureStateConfigured())
-            return EIO;
+        if (_state.load(std::memory_order_acquire) == SlotState::Mounted)
+            ensureStateConfigured();
         if (_state.load(std::memory_order_acquire) < SlotState::Configured)
             return EPERM;
         if (!writeQuotaLimitToFile(bytes))
@@ -308,8 +308,8 @@ public:
     vg_sta_e setQuotaRotate(bool rotate)
     {
         const std::unique_lock lock(_mutex);
-        if (_state.load(std::memory_order_acquire) == SlotState::Mounted && !ensureStateConfigured())
-            return EIO;
+        if (_state.load(std::memory_order_acquire) == SlotState::Mounted)
+            ensureStateConfigured();
         if (_state.load(std::memory_order_acquire) < SlotState::Configured)
             return EPERM;
         if (!writeQuotaRotateToFile(rotate))
