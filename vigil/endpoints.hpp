@@ -75,8 +75,7 @@ public:
         }
         catch (const std::exception &e)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to load JSON from file '", file_path.string(),
-                "': ", e.what());
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to load JSON from file ", file_path, ": ", e.what());
             return EINVAL;
         }
 
@@ -89,29 +88,29 @@ public:
         const auto tmp_path = _dir_path / (std::string(".") + std::string(_name));
 
         const std::unique_lock lock(_mutex);
-        std::ofstream file(tmp_path, std::ios::trunc);
-        if (!file.is_open())
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open temporary file '", tmp_path.string(),
-                "' for writing: ", std::strerror(errno));
-            return EIO;
-        }
-        try
-        {
+            std::ofstream file(tmp_path, std::ios::trunc);
+            if (!file.is_open())
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open temporary file ", tmp_path,
+                    " for writing, code: ", errno);
+                return EIO;
+            }
+
             file << j.dump(4);
-        }
-        catch (const std::exception &e)
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to write JSON to temporary file '", tmp_path.string(),
-                "': ", e.what());
-            return EINVAL;
+            if (file.fail())
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "I/O error occurred while writing to temporary file ", tmp_path,
+                    ", code: ", errno);
+                return EIO;
+            }
         }
 
         std::filesystem::rename(tmp_path, _dir_path / _name, ec);
         if (ec)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to rename temporary file '", tmp_path.string(), "' to '",
-                (_dir_path / _name).string(), "': ", ec.message());
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to rename temporary file ", tmp_path, " to ",
+                (_dir_path / _name), ": ", ec.message());
             std::filesystem::remove(tmp_path, ec);
             return EIO;
         }
