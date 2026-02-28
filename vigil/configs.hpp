@@ -331,6 +331,13 @@ struct TTYRuleConfig
 struct HTTPRuleConfig
 {
     HTTPRuleConfig() = default;
+
+    ~HTTPRuleConfig() = default;
+
+    bool operator==(HTTPRuleConfig &) const noexcept
+    {
+        return true;
+    }
 };
 
 struct ScheduleRuleConfig
@@ -425,41 +432,51 @@ struct ScheduleRuleConfig
     }
 };
 
-struct FileWriterConfig
+struct RecordConfig
 {
+    bool enabled;
     std::shared_ptr<FileWriterSettings> settings;
 
-    FileWriterConfig(const std::shared_ptr<FileWriterSettings> &s) : settings(s)
+    RecordConfig(bool e, const std::shared_ptr<FileWriterSettings> &s) : enabled(e), settings(s)
     {
         if (!settings)
-            throw Exception("FileWriterSettings is null while constructing FileWriterConfig");
+            throw Exception("FileWriterSettings is null while constructing RecordConfig");
     }
 
-    FileWriterConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
+    RecordConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
-        if (settings = FileWriterSettings::create(j.at("sFormat").get<std::string>(),
-                std::chrono::milliseconds(j.at("iIntervalMs").get<int>()), kRecordWriterPrefixDefault,
-                kVideoClipLengthDefault);
-            !settings)
-            throw Exception("Failed to create FileWriterSettings while parsing FileWriterConfig");
+        enabled = j.at("bEnabled").get<bool>();
+
+        {
+            const auto settings_j = j.at("dWriterConfig");
+            if (settings = FileWriterSettings::create(settings_j.at("sFormat").get<std::string>(),
+                    std::chrono::milliseconds(settings_j.at("iIntervalMs").get<long>()), kRecordWriterPrefixDefault,
+                    kVideoClipLengthDefault);
+                !settings)
+                throw Exception("Failed to create FileWriterSettings while parsing RecordConfig");
+        }
     }
 
-    static FileWriterConfig from(const Context &ctx)
+    static RecordConfig from(const Context &ctx)
     {
-        return FileWriterConfig(ctx.shared_writer_settings.get().second);
+        return RecordConfig(ctx.record_rule_enabled.load(std::memory_order_acquire),
+            ctx.shared_writer_settings.get().second);
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
-        if (auto s = settings; s)
+        j["bEnabled"] = enabled;
+        if (auto settings_j = nlohmann::json::object(); settings)
         {
-            j["sFormat"] = s->format;
-            j["iIntervalMs"] = s->interval.count();
+            settings_j["sFormat"] = settings->format;
+            settings_j["iIntervalMs"] = static_cast<long>(settings->interval.count());
+            j["dWriterConfig"] = settings_j;
         }
     }
 
-    void sync(Context &ctx) const
+    void sync(Context &ctx) const noexcept
     {
+        ctx.record_rule_enabled.store(enabled, std::memory_order_release);
         ctx.shared_writer_settings.update(settings);
     }
 };
@@ -528,7 +545,7 @@ struct StorageConfig
 
     bool operator==(const StorageConfig &other) const noexcept
     {
-        return target_enabled_slot_dev_path == other.target_enabled_slot_dev_path
+        return enabled == other.enabled && target_enabled_slot_dev_path == other.target_enabled_slot_dev_path
                && target_enabled_slot_uuid == other.target_enabled_slot_uuid;
     }
 };

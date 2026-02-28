@@ -237,10 +237,10 @@ struct Context
             kRecordWriterDefaultIntervalMs, kRecordWriterPrefixDefault, kVideoClipLengthDefault);
 
     public:
-        void update(const std::shared_ptr<FileWriterSettings> &new_settings)
+        void update(const std::shared_ptr<FileWriterSettings> &new_settings) noexcept
         {
             if (!new_settings)
-                throw Exception("New FileWriterSettings is null.");
+                return;
             const std::unique_lock lock(mutex);
             if (!settings || *settings != *new_settings)
             {

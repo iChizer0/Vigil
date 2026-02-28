@@ -102,7 +102,7 @@ public:
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "I/O error occurred while writing to temporary file ", tmp_path,
                     ", code: ", errno);
-                return EIO;
+                goto l_err_and_cleanup;
             }
         }
 
@@ -111,11 +111,14 @@ public:
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to rename temporary file ", tmp_path, " to ",
                 (_dir_path / _name), ": ", ec.message());
-            std::filesystem::remove(tmp_path, ec);
-            return EIO;
+            goto l_err_and_cleanup;
         }
 
         return 0;
+
+    l_err_and_cleanup:
+        std::filesystem::remove(tmp_path, ec);
+        return EIO;
     }
 
     template<typename T>
@@ -128,8 +131,7 @@ public:
 
         try
         {
-            auto obj = std::make_unique<T>(j, _ctx);
-            return obj;
+            return std::make_unique<T>(j, _ctx);
         }
         catch (const std::exception &e)
         {
@@ -156,8 +158,7 @@ public:
             return false;
         }
 
-        vg_sta_e ret = saveToFile(j);
-        if (ret != 0)
+        if (saveToFile(j) != 0)
             return false;
 
         return true;
@@ -226,13 +227,12 @@ public:
 
     nlohmann::json updateRecordConfig(const nlohmann::json &j, bool store = true)
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
-            const auto record_rule_enabled = j.at("bRuleEnabled").get<bool>();
-            const auto writer_config = FileWriterConfig(j.at("dWriterConfig"), *_ctx);
+            const auto record_config = RecordConfig(j, *_ctx);
 
             if (store) // Store first
             {
@@ -240,8 +240,7 @@ public:
                     throw Exception("Failed to store record config to file");
             }
 
-            writer_config.sync(*_ctx); // Before updating rule enabled state
-            _ctx->record_rule_enabled.store(record_rule_enabled, std::memory_order_relaxed);
+            record_config.sync(*_ctx);
         }
         catch (const std::exception &e)
         {
@@ -256,18 +255,14 @@ public:
 
     nlohmann::json getRecordConfig() const
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
-            res_j["bRuleEnabled"] = _ctx->record_rule_enabled.load(std::memory_order_relaxed);
-            {
-                nlohmann::json writer_cfg_j;
-                const auto writer_cfg = FileWriterConfig::from(*_ctx);
-                writer_cfg.to(writer_cfg_j, *_ctx);
-                res_j["dWriterConfig"] = writer_cfg_j;
-            }
+            const auto record_config = RecordConfig::from(*_ctx);
+
+            record_config.to(res_j, *_ctx);
         }
         catch (const std::exception &e)
         {
@@ -282,8 +277,8 @@ public:
 
     nlohmann::json updateScheduleRuleConfig(const nlohmann::json &j, bool store = true)
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
@@ -292,15 +287,15 @@ public:
 
             if (!_schedule_rule_config || *schedule_rule_config != *_schedule_rule_config)
             {
-                _schedule_rule_config = std::move(schedule_rule_config);
-                _schedule_rule.reset();
-                _schedule_rule = std::make_unique<ScheduleRule>(*_schedule_rule_config, *_ctx);
-
                 if (store)
                 {
                     if (ret = _schedule_rule_config_store->saveToFile(j); ret != 0)
                         throw Exception("Failed to store schedule rule config to file");
                 }
+
+                _schedule_rule.reset();
+                _schedule_rule = std::make_unique<ScheduleRule>(*schedule_rule_config, *_ctx);
+                _schedule_rule_config = std::move(schedule_rule_config);
             }
         }
         catch (const std::exception &e)
@@ -316,8 +311,8 @@ public:
 
     nlohmann::json getScheduleRuleConfig() const
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
@@ -338,8 +333,10 @@ public:
 
     nlohmann::json updateRecordRuleConfig(const nlohmann::json &j, bool store = true)
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
+
+        const auto on_change = [&]() -> bool { return store ? _record_rule_config_store->saveToFile(j) == 0 : true; };
 
         try
         {
@@ -353,27 +350,21 @@ public:
             else
             {
                 if (auto rule_type = BaseRule::TypeFromString(rule_type_str); rule_type == VG_RULE_TYPE_INFERENCE_SET)
-                    swapTypedRecordRule<InferenceRuleSet>(InferenceRuleSetConfig(j.at("lInferenceSet"), *_ctx));
+                    swapTypedRecordRule<InferenceRuleSet>(InferenceRuleSetConfig(j.at("lInferenceSet"), *_ctx),
+                        on_change);
                 else if (rule_type == VG_RULE_TYPE_TIMER)
-                    swapTypedRecordRule<TimerRule>(TimerRuleConfig(j.at("dTimer"), *_ctx));
+                    swapTypedRecordRule<TimerRule>(TimerRuleConfig(j.at("dTimer"), *_ctx), on_change);
                 else if (rule_type == VG_RULE_TYPE_GPIO)
-                    swapTypedRecordRule<GPIORule>(GPIORuleConfig(j.at("dGPIO"), *_ctx));
+                    swapTypedRecordRule<GPIORule>(GPIORuleConfig(j.at("dGPIO"), *_ctx), on_change);
                 else if (rule_type == VG_RULE_TYPE_TTY)
-                    swapTypedRecordRule<TTYRule>(TTYRuleConfig(j.at("dTTY"), *_ctx));
+                    swapTypedRecordRule<TTYRule>(TTYRuleConfig(j.at("dTTY"), *_ctx), on_change);
                 else if (rule_type == VG_RULE_TYPE_HTTP)
-                    swapTypedRecordRule<HTTPRule>(HTTPRuleConfig());
+                    swapTypedRecordRule<HTTPRule>(HTTPRuleConfig(), on_change);
                 else
                     throw Exception("Invalid rule type while updating record rule config '" + rule_type_str + "'");
             }
 
             _record_rule_config = j;
-
-            if (store)
-            {
-                // Entire JSON object
-                if (ret = _record_rule_config_store->saveToFile(j); ret != 0)
-                    throw Exception("Failed to store record rule config to file");
-            }
         }
         catch (const std::exception &e)
         {
@@ -388,8 +379,8 @@ public:
 
     nlohmann::json getRecordRuleConfig() const
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
@@ -441,8 +432,8 @@ public:
 
     nlohmann::json getRuleInfo() const
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
@@ -530,8 +521,8 @@ public:
 
     nlohmann::json doHTTPRuleActivate(const nlohmann::json &)
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
@@ -633,16 +624,23 @@ private:
     }
 
 private:
-    template<typename T, typename C>
-    void swapTypedRecordRule(const C &new_config)
+    template<typename T, typename C, typename F>
+    void swapTypedRecordRule(const C &new_config, const F &on_change) noexcept
     {
         bool roollback_needed = false;
         try
         {
-            if (_record_rule)
+            if (auto p_record_rule_config = std::get_if<std::decay_t<C>>(&_record_rule_config_variant);
+                !p_record_rule_config || *p_record_rule_config != new_config)
+            {
                 _record_rule.reset();
-            _record_rule = std::make_unique<T>(new_config, *_ctx);
-            _record_rule_config_variant = new_config;
+                _record_rule = std::make_unique<T>(new_config, *_ctx);
+
+                if (!on_change())
+                    throw Exception("Hook on_change failed during record rule config update, aborting change");
+
+                _record_rule_config_variant = new_config;
+            }
         }
         catch (std::exception &e)
         {
@@ -732,12 +730,12 @@ public:
 
     nlohmann::json updateStorageConfig(const nlohmann::json &j, bool store = true)
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
-            const auto config = StorageConfig(j, *_ctx); // Check validity
+            const auto config = StorageConfig(j, *_ctx);
 
             if (store)
             {
@@ -761,8 +759,8 @@ public:
 
     nlohmann::json getStorageConfig() const
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
@@ -782,8 +780,8 @@ public:
 
     nlohmann::json getStorageStatus() const
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
@@ -803,8 +801,8 @@ public:
 
     nlohmann::json doStorageControl(const nlohmann::json &j)
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
@@ -932,8 +930,8 @@ public:
 
     nlohmann::json getCaptureStatus() const
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         auto get_capture_status = [&]() -> CaptureStatus {
             const std::shared_lock lock(_event_mutex);
@@ -958,8 +956,8 @@ public:
 
     nlohmann::json doCaptureStart(const nlohmann::json &j)
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {
@@ -992,8 +990,8 @@ public:
 
     nlohmann::json doCaptureStop(const nlohmann::json &)
     {
-        auto res_j = nlohmann::json::object();
         vg_sta_e ret = 0;
+        auto res_j = nlohmann::json::object();
 
         try
         {

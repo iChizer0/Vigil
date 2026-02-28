@@ -206,7 +206,7 @@ public:
         return slot ? slot->freeUpUsedSpace() : EPERM;
     }
 
-    vg_sta_e setConfig(const StorageConfig &cfg)
+    vg_sta_e setConfig(const StorageConfig &cfg) noexcept
     {
         const std::unique_lock lock(_config_mutex);
         if (_config != cfg)
