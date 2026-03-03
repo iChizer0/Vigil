@@ -144,7 +144,11 @@ struct Context
             const auto [steady_time, unix_time, _] = shared_time.getAll();
             if (c_api.basic.on_rule_event_cb)
             {
-                const auto evt = vg_rule_evt_t { .type = type, .id = id.c_str(), .timestamp = unix_time };
+                const auto evt = vg_rule_evt_t { .type = type,
+                    .id = id.c_str(),
+                    .uid
+                    = std::chrono::duration_cast<std::chrono::milliseconds>(steady_time.time_since_epoch()).count(),
+                    .timestamp = unix_time };
                 c_api.basic.on_rule_event_cb(&evt);
             }
             {

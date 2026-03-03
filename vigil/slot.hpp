@@ -498,6 +498,10 @@ protected:
                 .path = path_str.c_str(),
                 .size_bytes = size,
                 .attributes = attributes_str,
+                .event_uid = cache_file_info.event ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                         cache_file_info.event->timepoint.time_since_epoch())
+                                                         .count()
+                                                   : 0,
                 .timestamp = _ctx.shared_time.unixTime(),
             };
             _ctx.c_api.basic.on_file_event_cb(&file_evt);
