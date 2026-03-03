@@ -491,12 +491,13 @@ protected:
         if (_ctx.c_api.basic.on_file_event_cb)
         {
             const auto path_str = target_file_path.string();
-            const auto attrs_str = cache_file_info.event ? WriteEvent::StatusString(cache_file_info.event->status) : "";
+            const auto attributes_str
+                = cache_file_info.event ? WriteEvent::StatusString(cache_file_info.event->status) : "";
             const auto file_evt = vg_file_evt_t {
                 .op_type = VG_FILE_EVT_OP_ADDED,
                 .path = path_str.c_str(),
                 .size_bytes = size,
-                .attrs = attrs_str,
+                .attributes = attributes_str,
                 .timestamp = _ctx.shared_time.unixTime(),
             };
             _ctx.c_api.basic.on_file_event_cb(&file_evt);

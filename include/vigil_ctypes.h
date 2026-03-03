@@ -100,7 +100,7 @@ typedef struct vg_file_evt_t
     vg_file_evt_op_type_e op_type; /**< Type of file event operation. */
     const char *path;              /**< Internal managed string, null terminated, do not free. */
     size_t size_bytes;             /**< Size of the file in bytes. */
-    const char *attrs;             /**< Internal managed string, null terminated, do not free. */
+    const char *attributes;        /**< Internal managed string, null terminated, do not free. */
     int64_t timestamp; /**< Timestamp of the file event (can be corresponding to the timestamp of rule event). */
 } vg_file_evt_t;
 
