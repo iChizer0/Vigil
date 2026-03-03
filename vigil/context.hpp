@@ -11,7 +11,6 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <queue>
 #include <shared_mutex>
 #include <tuple>
