@@ -445,7 +445,7 @@ struct RecordConfig
 
     RecordConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
-        enabled = j.at("bEnabled").get<bool>();
+        enabled = j.at("bRuleEnabled").get<bool>();
 
         {
             const auto settings_j = j.at("dWriterConfig");
@@ -465,7 +465,7 @@ struct RecordConfig
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
-        j["bEnabled"] = enabled;
+        j["bRuleEnabled"] = enabled;
         if (auto settings_j = nlohmann::json::object(); settings)
         {
             settings_j["sFormat"] = settings->format;
