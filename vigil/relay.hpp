@@ -128,11 +128,10 @@ public:
         return 0;
     }
 
-    vg_sta_e disableNginxRelay() noexcept
+    void disableNginxRelay() noexcept
     {
         const std::unique_lock api_lock(_mutex);
         disableRelayUnsafe();
-        return 0;
     }
 
 private:

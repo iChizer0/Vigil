@@ -70,11 +70,7 @@ public:
 
     ~Slot() noexcept
     {
-        while (disable() != 0)
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Retrying to disable storage slot for device path ", _dev_path);
-            std::this_thread::yield();
-        }
+        disable();
 
         // Detach slot check callback (if current attached)
         {
@@ -236,25 +232,30 @@ public:
         return 0;
     }
 
-    vg_sta_e disable() noexcept
+    void disable() noexcept
     {
         const std::unique_lock lock(_mutex);
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Disabling storage slot for device path ", _dev_path);
-        vg_sta_e ret = 0;
 
         // Disable relay
-        if (ret = disableNginxRelay(); ret != 0)
-            goto l_disable_fail;
+        disableNginxRelay();
 
         _stop_token.store(true, std::memory_order_release);
         try
         {
             if (_writer_thread)
             {
-                // Stop writer thread
                 _writer_thread->join();
                 _writer_thread.reset();
             }
+        }
+        catch (const std::exception &e)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to safely shutdown writer thread for device path ", _dev_path,
+                ": ", e.what());
+        }
+        try
+        {
             if (_manager_thread)
             {
                 // Stop manager thread
@@ -264,9 +265,8 @@ public:
         }
         catch (const std::exception &e)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to safely shutdown threads for storage slot for device path ",
-                _dev_path, ": ", e.what());
-            ret = EFAULT;
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to safely shutdown manager thread for device path ", _dev_path,
+                ": ", e.what());
         }
 
         // Reset index manager
@@ -276,18 +276,7 @@ public:
         _rotating.store(false, std::memory_order_release);
 
         // Unmount and set state to unmounted
-        if (!ensureStateForceUnmounted())
-        {
-            ret = EIO;
-            goto l_disable_fail;
-        }
-
-        return ret;
-
-    l_disable_fail:
-        VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to disable storage slot for device path ", _dev_path,
-            ", code: ", ret);
-        return ret;
+        ensureStateForceUnmounted();
     }
 
     vg_sta_e setQuotaLimitBytes(FileSize bytes)
@@ -406,9 +395,9 @@ public:
         return 0;
     }
 
-    vg_sta_e disableNginxRelay() noexcept
+    void disableNginxRelay() noexcept
     {
-        return _relay.disableNginxRelay();
+        _relay.disableNginxRelay();
     }
 
     // - MARK: Slot Protected Methods
@@ -994,13 +983,7 @@ private:
         }
 
         if (mount_path_missing)
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Mount path ", _mount_path,
-                " does not exist, recreating before mount probe");
-            const std::unique_lock lock(_op_mutex);
-            if (!EnsureDirectoryExists(_mount_path, true, false, &_ctx))
-                return false;
-        }
+            return false;
 
         if (!mount_stats_valid)
         {
@@ -1027,8 +1010,10 @@ private:
         const std::unique_lock lock(_op_mutex);
         // Sync the filesystem before unmounting (syncfs)
         if (auto fd = ::open(_mount_path.c_str(), O_RDONLY); fd < 0)
+        {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open mount path ", _mount_path,
                 " for syncing before unmounting: ", static_cast<int>(errno));
+        }
         else if (::syncfs(fd) != 0)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to sync filesystem at mount path ", _mount_path,
@@ -1044,6 +1029,16 @@ private:
                 static_cast<int>(errno));
             return false;
         }
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kStorageUnmountCleanDelayMs));
+            std::error_code ec;
+            std::filesystem::remove_all(_mount_path, ec);
+            if (ec)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove mount path ", _mount_path,
+                    " after unmounting: ", ec.message());
+            }
+        }
         if (_ctx.c_api.storage.on_unmount_cb)
             _ctx.c_api.storage.on_unmount_cb(_dev_path.c_str(), _mount_path.c_str());
         return true;
@@ -1052,6 +1047,16 @@ private:
     bool doMount() const noexcept
     {
         const std::unique_lock lock(_op_mutex);
+        {
+            std::error_code ec;
+            std::filesystem::remove_all(_mount_path, ec);
+            if (ec)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove existing mount path ", _mount_path,
+                    " before mounting: ", ec.message());
+                return false;
+            }
+        }
         if (!EnsureDirectoryExists(_mount_path, true, true, &_ctx))
             return false;
         try
@@ -1118,25 +1123,12 @@ private:
         return false;
     }
 
-    bool ensureStateForceUnmounted() noexcept
+    void ensureStateForceUnmounted() noexcept
     {
-        auto state = _state.load(std::memory_order_acquire);
-        if (isRemovable() && !isInternal())
+        if (!isInternal())
         {
-            // No need to check state, unmount anyway
-            if (probeDeviceOnline() && probeCorrectlyMounted() && !doUnmount())
-                goto l_unmount_error;
-            _state.store(SlotState::NotMounted, std::memory_order_release);
+            _state.store(doUnmount() ? SlotState::NotMounted : SlotState::Error, std::memory_order_release);
         }
-        else
-            _state.store(SlotState::Mounted, std::memory_order_release);
-        return true;
-
-    l_unmount_error:
-        while (!_state.compare_exchange_strong(state, SlotState::Error, std::memory_order_acq_rel,
-            std::memory_order_acquire))
-            std::this_thread::yield();
-        return false;
     }
 
     FileSize readQuotaLimitFromFile() const noexcept

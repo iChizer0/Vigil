@@ -121,8 +121,7 @@ public:
         }
         if (!slot || slot->isInternal())
             return ENOTSUP;
-        if (auto ret = slot->disable(); ret != 0)
-            return ret;
+        slot->disable();
         {
             const std::unique_lock slots_lock(_slots_mutex);
             _slots.erase(slot->devPath().string());
@@ -275,7 +274,10 @@ public:
             if (auto it = _slots.find(slot_dev_path); it != _slots.end())
                 slot = it->second;
         }
-        return slot ? slot->disableNginxRelay() : EPERM;
+        if (!slot)
+            return EPERM;
+        slot->disableNginxRelay();
+        return 0;
     }
 
 private:
@@ -503,14 +505,7 @@ private:
             }
         }
         for (const auto &slot: enabled_slots_without_target)
-        {
-            if (auto ret = slot->disable(); ret != 0)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to disable storage slot with device path ",
-                    slot->devPath(), ", code: ", ret);
-                return ret;
-            }
-        }
+            slot->disable();
         if (!target_slot)
             return 0;
         else if (!target_slot->isEnabled())

@@ -52,6 +52,7 @@ static inline constexpr const size_t kStorageMinFileSystemFreeBytesInternal = 20
 static inline constexpr const size_t kStorageHighWaterMarkFactor = 5;
 static inline constexpr const size_t kStorageCriticalWaterMarkFactor = 1;
 static inline constexpr const size_t kStorageRecycleFactor = 10;
+static inline constexpr const size_t kStorageUnmountCleanDelayMs = 100;
 
 static inline constexpr const std::array<const char *, 7> kTMDayNamesMap = {
     "Sun",
