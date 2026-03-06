@@ -1030,7 +1030,6 @@ private:
             return false;
         }
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(kStorageUnmountCleanDelayMs));
             std::error_code ec;
             std::filesystem::remove_all(_mount_path, ec);
             if (ec)
@@ -1056,18 +1055,41 @@ private:
                     " before mounting: ", ec.message());
                 return false;
             }
+            if (std::filesystem::exists(_mount_path, ec))
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Mount path ", _mount_path,
+                    " already exists and cannot be removed before mounting: ", ec.message());
+                return false;
+            }
         }
         if (!EnsureDirectoryExists(_mount_path, true, true, &_ctx))
             return false;
+        bool is_native_fs = false;
+        {
+            const std::shared_lock lock(_info_mutex);
+            if (_type.has_value())
+                is_native_fs = kNativeFileSystemTypes.contains(*_type);
+        }
         try
         {
-            int ret = Execute("mount", { _dev_path.string(), _mount_path.string() })();
-            if (ret != 0)
+            std::vector<std::string> args;
+            if (!is_native_fs)
+            {
+                args.push_back("-o");
+                std::string options = "uid=" + std::to_string(kStorageDefaultUid)
+                                      + ",gid=" + std::to_string(kStorageDefaultGid) + ",umask=000";
+                args.push_back(std::move(options));
+            }
+            args.push_back(_dev_path.string());
+            args.push_back(_mount_path.string());
+            if (auto ret = Execute("mount", std::move(args))(); ret != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to mount storage slot device ", _dev_path, " to ",
                     _mount_path, ", code: ", ret);
                 return false;
             }
+            EnsureOwnerAndPermissions(_mount_path, kStorageDefaultUid, kStorageDefaultGid,
+                fs::perms::owner_all | fs::perms::group_all | fs::perms::others_all);
         }
         catch (const std::exception &e)
         {
@@ -1126,9 +1148,7 @@ private:
     void ensureStateForceUnmounted() noexcept
     {
         if (!isInternal())
-        {
             _state.store(doUnmount() ? SlotState::NotMounted : SlotState::Error, std::memory_order_release);
-        }
     }
 
     FileSize readQuotaLimitFromFile() const noexcept
@@ -1350,6 +1370,7 @@ private:
     // - MARK: Slot Constants
 
 private:
+    static inline const std::unordered_set<std::string_view> kNativeFileSystemTypes = { "ext4", "xfs", "btrfs" };
     static inline const std::unordered_set<std::string_view> kSupportedFileSystemTypes
         = { "ext4", "fat", "vfat", "exfat" };
     static inline constexpr const std::chrono::milliseconds kManagerProbeInterval = std::chrono::milliseconds(500);

@@ -119,7 +119,7 @@ public:
             if (auto it = _slots.find(slot_dev_path); it != _slots.end())
                 slot = it->second;
         }
-        if (!slot || slot->isInternal())
+        if (!slot || slot->isInternal() || !slot->isRemovable())
             return ENOTSUP;
         slot->disable();
         {

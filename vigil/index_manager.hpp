@@ -111,9 +111,7 @@ inline bool EnsureDirectoryExists(const fs::path &path, bool update_permissions 
     {
         if (override_permissions)
             EnsureOwnerAndPermissions(path, kStorageDefaultUid, kStorageDefaultGid,
-                fs::perms::owner_all | fs::perms::group_all | fs::perms::others_read | fs::perms::others_write
-                    | fs::perms::others_exec,
-                ctx);
+                fs::perms::owner_all | fs::perms::group_all | fs::perms::others_all, ctx);
         return true;
     }
     else
@@ -129,9 +127,7 @@ inline bool EnsureDirectoryExists(const fs::path &path, bool update_permissions 
     if (update_permissions)
     {
         EnsureOwnerAndPermissions(path, kStorageDefaultUid, kStorageDefaultGid,
-            fs::perms::owner_all | fs::perms::group_all | fs::perms::others_read | fs::perms::others_write
-                | fs::perms::others_exec,
-            ctx);
+            fs::perms::owner_all | fs::perms::group_all | fs::perms::others_all, ctx);
     }
     return true;
 }

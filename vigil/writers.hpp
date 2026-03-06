@@ -280,7 +280,7 @@ public:
         {
             EnsureOwnerAndPermissions(_output_cache_path, kStorageDefaultUid, kStorageDefaultGid,
                 fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
-                    | fs::perms::others_read,
+                    | fs::perms::others_read | fs::perms::others_write,
                 &this->ctxRef());
             std::filesystem::rename(_output_cache_path, _output_file_path, ec);
             if (ec)
