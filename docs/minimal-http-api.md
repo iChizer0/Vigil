@@ -118,7 +118,7 @@ The payload depends on the `sCurrentSelected` field.
             "sID": "person_detection", // String, rule ID (uniqueness not enforced but recommended)
             "iDebounceTimes": 3, // Integer, number of consecutive frames to confirm the activation
             "lConfidenceFilter": [0.5, 1.0], // Array of number [min, max], confidence range to filter, configurable range between 0.0 and 1.0 for each part
-            "lClassFilter": [0, 1], // Array of integers, class IDs to filter
+            "lClassFilter": ["person", "car"], // Array of strings, class names to filter
             "lRegionFilter": [ // Optional, list of regions to filter, empty list means no region filtering
                 {
                     "lPolygon": [ // Array of polygons, each polygon is a list of points sorted in clockwise or counter-clockwise order
