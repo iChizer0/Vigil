@@ -271,14 +271,14 @@ template<typename T>
 struct Detection final
 {
     using value_type = T::value_type;
-    int class_id;
+    std::string class_name;
     float confidence;
     T object;
 };
 
 struct Classification final
 {
-    int class_id;
+    std::string class_name;
     float confidence;
 };
 

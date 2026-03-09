@@ -212,7 +212,7 @@ vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len)
             for (const auto &entry: proto_result.detection().entries())
             {
                 vigil::DetectionResult det;
-                det.class_id = entry.class_id();
+                det.class_name = entry.class_name();
                 det.confidence = entry.score();
 
                 det.object.top_left.x = scale(entry.box().left(), vigil::kMaskWidth);
@@ -231,7 +231,7 @@ vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len)
             for (const auto &entry: proto_result.classification().entries())
             {
                 vigil::ClassificationResult cls;
-                cls.class_id = entry.class_id();
+                cls.class_name = entry.class_name();
                 cls.confidence = entry.score();
                 classifications.push_back(std::move(cls));
             }

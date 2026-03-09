@@ -144,7 +144,7 @@ public:
 
     bool operator()(const Context &ctx) const noexcept override
     {
-        return _msk_rng ? filterDetection(ctx) : filterClassification(ctx);
+        return finalActive(filterDetection(ctx) || filterClassification(ctx));
     }
 
 private:
@@ -189,9 +189,10 @@ private:
         {
             if (!(_conf_rg & det.confidence))
                 continue;
-            if (!_cls_set.empty() && std::find(_cls_set.begin(), _cls_set.end(), det.class_id) == _cls_set.end())
+            if (!_cls_set.empty() && std::find(_cls_set.begin(), _cls_set.end(), det.class_name) == _cls_set.end())
                 continue;
-            if (!_msk_rng->at(static_cast<size_t>((det.object.top_left.x + det.object.bottom_right.x) >> 1),
+            if (_msk_rng
+                && !_msk_rng->at(static_cast<size_t>((det.object.top_left.x + det.object.bottom_right.x) >> 1),
                     static_cast<size_t>((det.object.top_left.y + det.object.bottom_right.y) >> 1)))
                 continue;
 
@@ -199,7 +200,7 @@ private:
             break;
         }
 
-        return finalActive(active);
+        return active;
     }
 
     bool filterClassification(const Context &ctx) const noexcept
@@ -209,14 +210,14 @@ private:
         {
             if (!(_conf_rg & cls.confidence))
                 continue;
-            if (!_cls_set.empty() && std::find(_cls_set.begin(), _cls_set.end(), cls.class_id) == _cls_set.end())
+            if (!_cls_set.empty() && std::find(_cls_set.begin(), _cls_set.end(), cls.class_name) == _cls_set.end())
                 continue;
 
             active = true;
             break;
         }
 
-        return finalActive(active);
+        return active;
     }
 
 private:
@@ -227,7 +228,7 @@ private:
     int _active_times_min;
 
     Range<float> _conf_rg;
-    std::vector<int> _cls_set;
+    std::vector<std::string> _cls_set;
     std::unique_ptr<Mask<kMaskWidth, kMaskHeight>> _msk_rng;
 };
 

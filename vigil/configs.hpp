@@ -28,7 +28,7 @@ struct InferenceRuleConfig
     std::string id;
     size_t debounce_times;
     Range<float> confidence_filter;
-    std::unordered_set<int> class_filter;
+    std::unordered_set<std::string> class_filter;
     std::vector<ROI<float>> region_filter;
 
     InferenceRuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
@@ -41,7 +41,7 @@ struct InferenceRuleConfig
         }
         {
             auto &cls_set = j.at("lClassFilter");
-            class_filter = cls_set.get<std::unordered_set<int>>();
+            class_filter = cls_set.get<std::unordered_set<std::string>>();
         }
         if (j.contains("lRegionFilter"))
         {
