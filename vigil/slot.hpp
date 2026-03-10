@@ -71,6 +71,7 @@ public:
     ~Slot() noexcept
     {
         disable();
+        ensureStateForceUnmounted();
 
         // Detach slot check callback (if current attached)
         {
@@ -274,9 +275,6 @@ public:
 
         // Reset rotating status
         _rotating.store(false, std::memory_order_release);
-
-        // Unmount and set state to unmounted
-        ensureStateForceUnmounted();
     }
 
     vg_sta_e setQuotaLimitBytes(FileSize bytes)
