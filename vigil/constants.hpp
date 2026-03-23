@@ -48,7 +48,7 @@ static inline constexpr const std::string_view kStorageNetlinkSubsystem = "SUBSY
 static inline constexpr const std::string_view kStorageNetlinkDevType = "DEVTYPE=";
 static inline constexpr const size_t kStorageMinSupportedFileSystemBytes = 2048UL * 1024 * 1024;    // 2GB
 static inline constexpr const size_t kStorageMinFileSystemFreeBytes = 512 * 1024 * 1024;            // 512MB
-static inline constexpr const size_t kStorageMinFileSystemFreeBytesInternal = 2048UL * 1024 * 1024; // 2GB
+static inline constexpr const size_t kStorageMinFileSystemFreeBytesInternal = 4096UL * 1024 * 1024; // 4GB
 static inline constexpr const size_t kStorageHighWaterMarkFactor = 5;
 static inline constexpr const size_t kStorageCriticalWaterMarkFactor = 1;
 static inline constexpr const size_t kStorageRecycleFactor = 10;
