@@ -17,6 +17,7 @@
 
 #include "constants.hpp"
 #include "context.hpp"
+#include "index_manager.hpp"
 #include "log.hpp"
 #include "status.hpp"
 
@@ -24,6 +25,7 @@ namespace vigil::relay {
 
 using namespace vigil::status;
 using namespace vigil::constants;
+using namespace vigil::index_manager;
 
 class Relay final
 {
@@ -76,13 +78,8 @@ public:
             }
 
             // Ensure relay root directory exists
-            std::filesystem::create_directories(_relay_dir_path, ec);
-            if (ec)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create relay root directory ", _relay_dir_path, ": ",
-                    ec.message());
-                return EIO;
-            }
+            if (!EnsureDirectoryExists(_relay_dir_path, true, true, &_ctx))
+                return EPERM;
 
             auto relay_dir_name = generateUUIDv4();
             for (;; relay_dir_name = generateUUIDv4())
