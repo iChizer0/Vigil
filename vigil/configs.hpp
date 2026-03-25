@@ -514,7 +514,11 @@ struct StorageConfig
     std::string target_enabled_slot_dev_path;
     std::string target_enabled_slot_uuid;
 
-    StorageConfig() noexcept : enabled(false), target_enabled_slot_dev_path(), target_enabled_slot_uuid() { }
+    StorageConfig() noexcept
+        : enabled(!kStorageDefaultDevPath.empty()), target_enabled_slot_dev_path(kStorageDefaultDevPath),
+          target_enabled_slot_uuid()
+    {
+    }
 
     StorageConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]]) : enabled(false)
     {
