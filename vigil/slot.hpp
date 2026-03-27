@@ -373,6 +373,8 @@ public:
 
     vg_sta_e formatFileSystem() noexcept
     {
+        if (_internal)
+            return EPERM;
         const std::unique_lock lock(_mutex);
         if (const auto state = _state.load(std::memory_order_acquire);
             state != SlotState::NotFormattedOrFormatUnsupported)
@@ -904,6 +906,8 @@ private:
 
     bool doFormat() const noexcept
     {
+        if (_internal)
+            return false;
         const std::unique_lock lock(_op_mutex);
         try
         {
@@ -1370,7 +1374,7 @@ private:
 private:
     static inline const std::unordered_set<std::string_view> kNativeFileSystemTypes = { "ext4", "xfs", "btrfs" };
     static inline const std::unordered_set<std::string_view> kSupportedFileSystemTypes
-        = { "ext4", "fat", "vfat", "exfat" };
+        = { "ext2", "ext3", "ext4", "fat", "vfat", "exfat" };
     static inline constexpr const std::chrono::milliseconds kManagerProbeInterval = std::chrono::milliseconds(500);
     static inline constexpr const std::chrono::seconds kManagerRecoverDelay = std::chrono::seconds(3);
     static inline constexpr const std::chrono::minutes kManagerEstimatedWriteBytesPeriod = std::chrono::minutes(30);
