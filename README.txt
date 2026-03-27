@@ -7,7 +7,7 @@
     - C++20 compatible compiler
     - CMake 3.21+
     - Protobuf
-    - libblkid
+    - libblkid (via pkg-config or a standard CMake include/library search path)
     - nlohmann/json (bundled or system)
 
 [Building]

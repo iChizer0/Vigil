@@ -39,15 +39,21 @@ else()
 endif()
 
 if(VIGIL_USE_BUILDROOT_SYSROOT)
+	if(DEFINED RK_APP_BUILDROOT_STAGING AND EXISTS "${RK_APP_BUILDROOT_STAGING}")
+		set(BUILDROOT_SYSROOT "${RK_APP_BUILDROOT_STAGING}")
+		message(STATUS "Using Buildroot staging from parent project: ${BUILDROOT_SYSROOT}")
+	endif()
 	if(NOT DEFINED SDK_ROOT)
 		get_filename_component(SDK_ROOT "${CMAKE_SOURCE_DIR}/../../../../" ABSOLUTE)
 	endif()
-	file(GLOB BUILDROOT_SYSROOT_CANDIDATES "${SDK_ROOT}/sysdrv/source/buildroot/buildroot-*/output/host/*/sysroot")
-	if(BUILDROOT_SYSROOT_CANDIDATES)
-		list(GET BUILDROOT_SYSROOT_CANDIDATES 0 BUILDROOT_SYSROOT)
-		message(STATUS "Found Buildroot Sysroot: ${BUILDROOT_SYSROOT}")
-	else()
-		message(FATAL_ERROR "Could not find Buildroot Sysroot in ${SDK_ROOT}/sysdrv/source/buildroot")
+	if(NOT BUILDROOT_SYSROOT)
+		file(GLOB BUILDROOT_SYSROOT_CANDIDATES "${SDK_ROOT}/sysdrv/source/buildroot/buildroot-*/output/host/*/sysroot")
+		if(BUILDROOT_SYSROOT_CANDIDATES)
+			list(GET BUILDROOT_SYSROOT_CANDIDATES 0 BUILDROOT_SYSROOT)
+			message(STATUS "Found Buildroot Sysroot: ${BUILDROOT_SYSROOT}")
+		else()
+			message(FATAL_ERROR "Could not find Buildroot Sysroot in ${SDK_ROOT}/sysdrv/source/buildroot")
+		endif()
 	endif()
 endif()
 
@@ -55,10 +61,38 @@ find_package(PkgConfig REQUIRED)
 if(VIGIL_USE_BUILDROOT_SYSROOT)
 	# Set pkg-config to look in the buildroot sysroot
 	set(ENV{PKG_CONFIG_SYSROOT_DIR} "${BUILDROOT_SYSROOT}")
-	set(ENV{PKG_CONFIG_LIBDIR} "${BUILDROOT_SYSROOT}/usr/lib/pkgconfig:${BUILDROOT_SYSROOT}/usr/share/pkgconfig")
+	set(ENV{PKG_CONFIG_LIBDIR} "${BUILDROOT_SYSROOT}/usr/lib/pkgconfig:${BUILDROOT_SYSROOT}/usr/lib64/pkgconfig:${BUILDROOT_SYSROOT}/usr/share/pkgconfig")
 endif()
 
-pkg_check_modules(BLKID REQUIRED blkid)
+pkg_check_modules(BLKID QUIET blkid)
+if(NOT BLKID_FOUND)
+	set(BLKID_SEARCH_HINTS)
+	if(VIGIL_USE_BUILDROOT_SYSROOT)
+		list(APPEND BLKID_SEARCH_HINTS
+			"${BUILDROOT_SYSROOT}"
+			"${BUILDROOT_SYSROOT}/usr"
+		)
+	endif()
+
+	find_path(BLKID_INCLUDE_DIRS
+		NAMES blkid/blkid.h
+		HINTS ${BLKID_SEARCH_HINTS}
+		PATH_SUFFIXES include usr/include
+	)
+	find_library(BLKID_LIBRARIES
+		NAMES blkid
+		HINTS ${BLKID_SEARCH_HINTS}
+		PATH_SUFFIXES lib usr/lib lib64 usr/lib64 lib32 usr/lib32 usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}
+	)
+
+	if(BLKID_INCLUDE_DIRS AND BLKID_LIBRARIES)
+		get_filename_component(BLKID_LIBRARY_DIRS "${BLKID_LIBRARIES}" DIRECTORY)
+		set(BLKID_FOUND TRUE)
+		message(STATUS "blkid pkg-config metadata not found, using CMake-discovered library: ${BLKID_LIBRARIES}")
+	else()
+		message(FATAL_ERROR "libblkid not found. Install blkid development files or make the target sysroot available to CMake.")
+	endif()
+endif()
 
 if(VIGIL_USE_SYSTEM_PROTOBUF)
 	find_package(Protobuf REQUIRED)
