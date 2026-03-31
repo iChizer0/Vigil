@@ -408,8 +408,10 @@ class VideoWriter final: public T
 public:
     template<typename... Args>
     VideoWriter(Args &&...args)
-        : T(std::forward<Args>(args)...), _video_clip_length(this->settings().video_clip_length), _fd(-1),
-          _is_clip_finish(false), _thumbnail()
+        : T(std::forward<Args>(args)...), _end_time(this->settings().video_clip_length == std::chrono::seconds::max()
+                                                        ? std::chrono::steady_clock::time_point::max()
+                                                        : this->startTime() + this->settings().video_clip_length),
+          _fd(-1), _is_clip_finish(false), _thumbnail()
     {
         if (!this->ctxRef().c_api.media.video_file_create_cb || !this->ctxRef().c_api.media.video_file_finish_cb)
         {
@@ -556,8 +558,7 @@ private:
     inline bool isClipFinished() noexcept
     {
         if (!_is_clip_finish)
-            _is_clip_finish = this->shouldFinishWriting()
-                              || ((std::chrono::steady_clock::now() - this->startTime()) >= _video_clip_length);
+            _is_clip_finish = this->shouldFinishWriting() || (std::chrono::steady_clock::now() >= _end_time);
         return _is_clip_finish;
     }
 
@@ -607,7 +608,7 @@ private:
     }
 
 private:
-    std::chrono::seconds _video_clip_length;
+    std::chrono::steady_clock::time_point _end_time;
     int _fd;
     bool _is_clip_finish;
     MediaFrame::FrameType _thumbnail;
