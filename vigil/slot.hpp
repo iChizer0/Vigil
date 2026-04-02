@@ -438,7 +438,7 @@ protected:
             else if (auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
                          cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_path.c_str(),
                          kStorageThumbnailFileType.c_str(), kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
-                ret != 0)
+                     ret != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to generate thumbnail for cache file ",
                     cache_file_info.path, ", code: ", static_cast<int>(ret));
@@ -745,7 +745,10 @@ private:
                 }
 
                 // Check if free space is sufficient
-                if (doStats(); _stats.load(std::memory_order_acquire).free_bytes <= watermarks.critical_remain_bytes)
+                if (doStats(); _stats.load(std::memory_order_acquire).free_bytes
+                               <= (isInternal() ? static_cast<FileSize>(watermarks.critical_remain_bytes
+                                                                        + kStorageMinFileSystemFreeBytesInternal)
+                                                : watermarks.critical_remain_bytes))
                     goto l_continue_log;
 
                 // Check if media is paused
@@ -954,8 +957,12 @@ private:
 
     bool probeCorrectlyMounted() const noexcept
     {
-        struct stat dev_sb {};
-        struct stat mnt_sb {};
+        struct stat dev_sb
+        {
+        };
+        struct stat mnt_sb
+        {
+        };
         bool mount_stats_valid = false;
         bool mount_path_missing = false;
 
@@ -1106,7 +1113,9 @@ private:
 
     bool doStats() const noexcept
     {
-        struct statvfs vfs {};
+        struct statvfs vfs
+        {
+        };
         const std::shared_lock lock(_op_mutex);
         if (::statvfs(_mount_path.c_str(), &vfs) != 0)
         {
