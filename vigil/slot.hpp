@@ -876,7 +876,8 @@ private:
     bool probeDeviceFileSystemSupported() const noexcept
     {
         const std::shared_lock lock(_info_mutex);
-        return _type.has_value() && kSupportedFileSystemTypes.find(*_type) != kSupportedFileSystemTypes.end();
+        return _uuid.has_value() && _type.has_value()
+               && kSupportedFileSystemTypes.find(*_type) != kSupportedFileSystemTypes.end();
     }
 
     SlotState probeInitialStatusAndGetState() const noexcept
