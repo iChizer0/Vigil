@@ -56,7 +56,7 @@ public:
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
           _internal(internal), _data_dir_name(data_dir_name), _info_mutex(), _label(), _uuid(), _type(), _mutex(),
           _op_mutex(), _stop_token(false), _manager_thread(nullptr), _writer_thread(nullptr), _state(SlotState::Error),
-          _stats(), _quota_limit_bytes(-1), _quota_rotate(false), _index_manager(nullptr), _writer_task_count(0),
+          _stats(), _quota_limit_bytes(-1), _quota_rotate(true), _index_manager(nullptr), _writer_task_count(0),
           _rotating(false), _write_stats(), _relay(ctx, _mount_path / _data_dir_name)
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Creating storage slot for device path ", _dev_path, " at mount path ",
@@ -508,9 +508,9 @@ protected:
         return getRecordRootPath() / kRecordQuotaLimitFileName;
     }
 
-    std::filesystem::path getRecordQuotaRotatePath() const
+    std::filesystem::path getRecordQuotaNoRotatePath() const
     {
-        return getRecordRootPath() / kRecordQuotaRotateFileName;
+        return getRecordRootPath() / kRecordQuotaNoRotateFileName;
     }
 
     std::filesystem::path getRecordCachePath() const
@@ -1240,18 +1240,18 @@ private:
 
     bool writeQuotaRotateToFile(bool rotate) const noexcept
     {
-        const auto quota_rotate_path = getRecordQuotaRotatePath();
-        // If true, create an empty file; else, remove the file if exists
+        const auto quota_no_rotate_path = getRecordQuotaNoRotatePath();
+        // If false, create an empty file; else, remove the file if exists
         std::error_code ec;
-        if (rotate)
+        if (!rotate)
         {
-            if (std::filesystem::is_regular_file(quota_rotate_path, ec))
+            if (std::filesystem::is_regular_file(quota_no_rotate_path, ec))
                 return true; // Already exists
-            std::filesystem::remove_all(quota_rotate_path, ec);
-            std::ofstream quota_file(quota_rotate_path, std::ios::trunc);
+            std::filesystem::remove_all(quota_no_rotate_path, ec);
+            std::ofstream quota_file(quota_no_rotate_path, std::ios::trunc);
             if (!quota_file.is_open())
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open quota rotate file at ", quota_rotate_path,
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open quota no rotate file at ", quota_no_rotate_path,
                     " for writing: ", static_cast<int>(errno));
                 return false;
             }
@@ -1259,11 +1259,11 @@ private:
         }
         else
         {
-            std::filesystem::remove_all(quota_rotate_path, ec);
+            std::filesystem::remove_all(quota_no_rotate_path, ec);
             if (ec)
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove quota rotate file at ", quota_rotate_path, ": ",
-                    ec.message());
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove quota no rotate file at ", quota_no_rotate_path,
+                    ": ", ec.message());
                 return false;
             }
         }
@@ -1296,7 +1296,7 @@ private:
     bool doSyncQuotaRotate() const noexcept
     {
         std::error_code ec;
-        _quota_rotate.store(std::filesystem::is_regular_file(getRecordQuotaRotatePath(), ec),
+        _quota_rotate.store(!std::filesystem::is_regular_file(getRecordQuotaNoRotatePath(), ec),
             std::memory_order_release);
         return true;
     }
@@ -1405,7 +1405,7 @@ private:
     static inline constexpr const std::chrono::milliseconds kIndexSyncInterval = std::chrono::milliseconds(100);
     static inline constexpr const std::string_view kRecordCacheDirName = ".cache";
     static inline constexpr const std::string_view kRecordQuotaLimitFileName = ".quota_limit";
-    static inline constexpr const std::string_view kRecordQuotaRotateFileName = ".quota_rotate";
+    static inline constexpr const std::string_view kRecordQuotaNoRotateFileName = ".quota_no_rotate";
 
     // - MARK: Slot Private Members
 

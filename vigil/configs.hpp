@@ -345,7 +345,11 @@ struct ScheduleRuleConfig
     bool enabled;
     std::vector<TimeRange> active_weekdays;
 
-    ScheduleRuleConfig() : enabled(false), active_weekdays() { }
+    ScheduleRuleConfig() : enabled(false), active_weekdays()
+    {
+        // When enabled, default to a full week schedule
+        active_weekdays.emplace_back(LocalTime(1, 0, 0, 0), LocalTime(0, 24, 0, 0));
+    }
 
     ScheduleRuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
@@ -514,10 +518,12 @@ struct StorageConfig
     std::string target_enabled_slot_dev_path;
     std::string target_enabled_slot_uuid;
 
-    StorageConfig() noexcept
-        : enabled(!kStorageDefaultDevPath.empty()), target_enabled_slot_dev_path(kStorageDefaultDevPath),
-          target_enabled_slot_uuid()
+    StorageConfig() noexcept : enabled(false), target_enabled_slot_dev_path(), target_enabled_slot_uuid() { }
+
+    StorageConfig(std::string &&dev_path, std::string &&uuid)
+        : enabled(false), target_enabled_slot_dev_path(std::move(dev_path)), target_enabled_slot_uuid(std::move(uuid))
     {
+        enabled = !target_enabled_slot_dev_path.empty() || !target_enabled_slot_uuid.empty();
     }
 
     StorageConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]]) : enabled(false)

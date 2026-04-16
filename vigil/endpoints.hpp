@@ -723,6 +723,15 @@ public:
             _storage_config_store = std::make_unique<ConfigStore>(*_ctx, kStorageConfigName);
             if (nlohmann::json j; _storage_config_store->loadFromFile(j) == 0)
                 updateStorageConfig(j, false);
+            else
+            {
+                auto config_j = nlohmann::json::object();
+                {
+                    const auto config = StorageConfig(std::string { kStorageDefaultDevPath }, std::string {});
+                    config.to(config_j, *_ctx);
+                }
+                updateStorageConfig(config_j, false);
+            };
         }
     }
 
