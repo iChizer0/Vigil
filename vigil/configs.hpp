@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <new>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -340,6 +341,18 @@ struct HTTPRuleConfig
     }
 };
 
+struct AlwaysOnRuleConfig
+{
+    AlwaysOnRuleConfig() = default;
+
+    ~AlwaysOnRuleConfig() = default;
+
+    bool operator==(const AlwaysOnRuleConfig &) const noexcept
+    {
+        return true;
+    }
+};
+
 struct ScheduleRuleConfig
 {
     bool enabled;
@@ -562,56 +575,203 @@ struct StorageConfig
 
 struct StorageControlConfig
 {
-    enum ActionType {
-        FormatSlot,
-        FreeUpSlot,
-        EjectSlot,
+    enum class TaskType : int32_t {
+        Sync,
+        AsyncSubmit,
+        AsyncStatus,
+        AsyncCancel,
+    };
+
+    enum class ActionType : int32_t {
+        Unknown,
         ConfigSlot,
         RelaySlot,
         RelayStatusSlot,
         UnrelaySlot,
+        FormatSlot,
+        FreeUpSlot,
+        EjectSlot,
         RemoveFilesOrDirectories,
     };
-    ActionType action;
+
+    TaskType task_type = TaskType::Sync;
+    ActionType action = ActionType::Unknown;
     std::string slot_dev_path;
     std::optional<SlotConfig> slot_config;
     std::optional<std::vector<std::filesystem::path>> files_or_directories_to_remove;
 
+    static constexpr std::string_view TaskTypeString(const TaskType task_type) noexcept
+    {
+        switch (task_type)
+        {
+            case TaskType::Sync:
+                return "SYNC";
+            case TaskType::AsyncSubmit:
+                return "ASYNC_SUBMIT";
+            case TaskType::AsyncStatus:
+                return "ASYNC_STATUS";
+            case TaskType::AsyncCancel:
+                return "ASYNC_CANCEL";
+            default:
+                return "UNKNOWN";
+        }
+    }
+
+    static constexpr std::optional<TaskType> TaskTypeFromString(const std::string_view task_type_str) noexcept
+    {
+        if (task_type_str == "SYNC")
+            return TaskType::Sync;
+        if (task_type_str == "ASYNC_SUBMIT")
+            return TaskType::AsyncSubmit;
+        if (task_type_str == "ASYNC_STATUS")
+            return TaskType::AsyncStatus;
+        if (task_type_str == "ASYNC_CANCEL")
+            return TaskType::AsyncCancel;
+        return std::nullopt;
+    }
+
+    static constexpr std::string_view ActionString(const ActionType action) noexcept
+    {
+        switch (action)
+        {
+            case ActionType::ConfigSlot:
+                return "CONFIG";
+            case ActionType::RelaySlot:
+                return "RELAY";
+            case ActionType::RelayStatusSlot:
+                return "RELAY_STATUS";
+            case ActionType::UnrelaySlot:
+                return "UNRELAY";
+            case ActionType::FormatSlot:
+                return "FORMAT";
+            case ActionType::FreeUpSlot:
+                return "FREE_UP";
+            case ActionType::EjectSlot:
+                return "EJECT";
+            case ActionType::RemoveFilesOrDirectories:
+                return "REMOVE_FILES_OR_DIRECTORIES";
+            default:
+                return "UNKNOWN";
+        }
+    }
+
+    static constexpr std::optional<ActionType> ActionTypeFromString(const std::string_view action_str) noexcept
+    {
+        if (action_str == "FORMAT")
+            return ActionType::FormatSlot;
+        if (action_str == "FREE_UP")
+            return ActionType::FreeUpSlot;
+        if (action_str == "EJECT")
+            return ActionType::EjectSlot;
+        if (action_str == "CONFIG")
+            return ActionType::ConfigSlot;
+        if (action_str == "RELAY")
+            return ActionType::RelaySlot;
+        if (action_str == "RELAY_STATUS")
+            return ActionType::RelayStatusSlot;
+        if (action_str == "UNRELAY")
+            return ActionType::UnrelaySlot;
+        if (action_str == "REMOVE_FILES_OR_DIRECTORIES")
+            return ActionType::RemoveFilesOrDirectories;
+        return std::nullopt;
+    }
+
+    static constexpr bool ActionSupportsAsync(const ActionType action) noexcept
+    {
+        switch (action)
+        {
+            case ActionType::FormatSlot:
+            case ActionType::FreeUpSlot:
+            case ActionType::EjectSlot:
+            case ActionType::RemoveFilesOrDirectories:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static constexpr bool ActionIsRunningCancelable(const ActionType action) noexcept
+    {
+        return action == ActionType::FreeUpSlot || action == ActionType::RemoveFilesOrDirectories;
+    }
+
+    constexpr bool isSyncTask() const noexcept
+    {
+        return task_type == TaskType::Sync;
+    }
+
+    constexpr bool isAsyncTask() const noexcept
+    {
+        return task_type != TaskType::Sync;
+    }
+
+    constexpr bool isAsyncSubmitTask() const noexcept
+    {
+        return task_type == TaskType::AsyncSubmit;
+    }
+
+    constexpr bool actionSupportsAsync() const noexcept
+    {
+        return ActionSupportsAsync(action);
+    }
+
+    constexpr bool requiresSlotConfigPayload() const noexcept
+    {
+        return isSyncTask() && action == ActionType::ConfigSlot;
+    }
+
+    constexpr bool requiresRemovePathsPayload() const noexcept
+    {
+        return action == ActionType::RemoveFilesOrDirectories && (isSyncTask() || isAsyncSubmitTask());
+    }
+
     StorageControlConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
         using namespace std::string_literals;
-        if (auto action_str = j.at("sAction").get<std::string>(); action_str == "FORMAT")
-            action = ActionType::FormatSlot;
-        else if (action_str == "FREE_UP")
-            action = ActionType::FreeUpSlot;
-        else if (action_str == "EJECT")
-            action = ActionType::EjectSlot;
-        else if (action_str == "CONFIG")
-            action = ActionType::ConfigSlot;
-        else if (action_str == "RELAY")
-            action = ActionType::RelaySlot;
-        else if (action_str == "RELAY_STATUS")
-            action = ActionType::RelayStatusSlot;
-        else if (action_str == "UNRELAY")
-            action = ActionType::UnrelaySlot;
-        else if (action_str == "REMOVE_FILES_OR_DIRECTORIES")
-            action = ActionType::RemoveFilesOrDirectories;
-        else
-            throw Exception("Invalid storage action string '"s + action_str + "'"s);
-        j.at("sSlotDevPath").get_to(slot_dev_path);
-        if (action == ActionType::ConfigSlot)
-            slot_config = SlotConfig(j.at("dSlotConfig"), ctx);
-        else if (action == ActionType::RemoveFilesOrDirectories)
+
         {
-            auto &files_vec = j.at("lFilesOrDirectoriesToRemove");
-            std::vector<std::filesystem::path> to_remove;
-            for (const auto &file_j: files_vec)
-                to_remove.emplace_back(file_j.get<std::string>());
-            files_or_directories_to_remove = to_remove;
+            task_type = TaskType::Sync;
+            if (j.contains("sTaskType"))
+            {
+                const auto task_type_str = j.at("sTaskType").get<std::string>();
+                if (const auto parsed_task_type = TaskTypeFromString(task_type_str); parsed_task_type.has_value())
+                    task_type = *parsed_task_type;
+                else
+                    throw Exception("Invalid storage control task type string '"s + task_type_str + "'"s);
+            }
         }
 
-        VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Parsed storage control config: action=", static_cast<int>(action),
-            ", slot_dev_path=", slot_dev_path);
+        {
+            const auto action_str = j.at("sAction").get<std::string>();
+            if (const auto parsed_action = ActionTypeFromString(action_str); parsed_action.has_value())
+                action = *parsed_action;
+            else
+                throw Exception("Invalid storage action string '"s + action_str + "'"s);
+        }
+
+        if (isAsyncTask() && !actionSupportsAsync())
+            throw Exception(
+                "Storage control action '"s + std::string(ActionString(action)) + "' does not support async tasks");
+
+        j.at("sSlotDevPath").get_to(slot_dev_path);
+
+        {
+            if (requiresSlotConfigPayload())
+            {
+                slot_config = SlotConfig(j.at("dSlotConfig"), ctx);
+            }
+            else if (requiresRemovePathsPayload())
+            {
+                auto &files_vec = j.at("lFilesOrDirectoriesToRemove");
+                std::vector<std::filesystem::path> to_remove;
+                for (const auto &file_j: files_vec)
+                    to_remove.emplace_back(file_j.get<std::string>());
+                files_or_directories_to_remove = to_remove;
+            }
+        }
+
+        VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Parsed storage control config: task_type=", TaskTypeString(task_type),
+            ", action=", ActionString(action), ", slot_dev_path=", slot_dev_path);
     }
 };
 

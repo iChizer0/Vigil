@@ -2,6 +2,7 @@
 #ifndef VIGIL_ENDPOINTS_HPP
 #define VIGIL_ENDPOINTS_HPP
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -13,6 +14,7 @@
 #include <iomanip>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -22,6 +24,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "async_task.hpp"
 #include "configs.hpp"
 #include "constants.hpp"
 #include "context.hpp"
@@ -360,6 +363,8 @@ public:
                     swapTypedRecordRule<TTYRule>(TTYRuleConfig(j.at("dTTY"), *_ctx), on_change);
                 else if (rule_type == VG_RULE_TYPE_HTTP)
                     swapTypedRecordRule<HTTPRule>(HTTPRuleConfig(), on_change);
+                else if (rule_type == VG_RULE_TYPE_ALWAYS_ON)
+                    swapTypedRecordRule<AlwaysOnRule>(AlwaysOnRuleConfig(), on_change);
                 else
                     throw Exception("Invalid rule type while updating record rule config '" + rule_type_str + "'");
             }
@@ -676,6 +681,8 @@ private:
                     return std::make_unique<TTYRule>(cfg, *_ctx);
                 else if constexpr (std::is_same_v<ConfigType, HTTPRuleConfig>)
                     return std::make_unique<HTTPRule>(cfg, *_ctx);
+                else if constexpr (std::is_same_v<ConfigType, AlwaysOnRuleConfig>)
+                    return std::make_unique<AlwaysOnRule>(cfg, *_ctx);
                 else
                     return nullptr;
             },
@@ -694,7 +701,8 @@ private:
 
     mutable std::shared_mutex _record_rule_mutex;
     nlohmann::json _record_rule_config;
-    std::variant<std::monostate, InferenceRuleSetConfig, TimerRuleConfig, GPIORuleConfig, TTYRuleConfig, HTTPRuleConfig>
+    std::variant<std::monostate, InferenceRuleSetConfig, TimerRuleConfig, GPIORuleConfig, TTYRuleConfig, HTTPRuleConfig,
+        AlwaysOnRuleConfig>
         _record_rule_config_variant;
     std::unique_ptr<BaseRule> _record_rule;
 
@@ -713,7 +721,7 @@ private:
 
 public:
     StorageEndpoint(std::shared_ptr<Context> ctx)
-        : _ctx(std::move(ctx)), _storage(nullptr), _storage_config_store(nullptr)
+        : _ctx(std::move(ctx)), _storage(nullptr), _storage_config_store(nullptr), _async_task_worker(nullptr)
     {
         if (!_ctx)
             throw Exception("Context pointer cannot be null in StorageEndpoint");
@@ -733,9 +741,13 @@ public:
                 updateStorageConfig(config_j, false);
             };
         }
+
+        _async_task_worker = std::make_unique<AsyncTaskWorker>(*_storage);
+        if (!_async_task_worker)
+            throw Exception("Failed to create AsyncTaskWorker in StorageEndpoint");
     }
 
-    ~StorageEndpoint() = default;
+    ~StorageEndpoint() noexcept = default;
 
     nlohmann::json updateStorageConfig(const nlohmann::json &j, bool store = true)
     {
@@ -816,71 +828,94 @@ public:
         try
         {
             const auto control_config = StorageControlConfig(j, *_ctx);
-            switch (control_config.action)
+            switch (control_config.task_type)
             {
-                case StorageControlConfig::ActionType::FormatSlot:
-
-                    if (ret = _storage->formatSlot(control_config.slot_dev_path); ret != 0)
-                        throw Exception("Failed to format storage slot");
-                    break;
-
-                case StorageControlConfig::ActionType::FreeUpSlot:
-                    if (ret = _storage->freeUpSlot(control_config.slot_dev_path); ret != 0)
-                        throw Exception("Failed to free up storage slot");
-                    break;
-
-                case StorageControlConfig::ActionType::EjectSlot:
-                    if (ret = _storage->ejectSlot(control_config.slot_dev_path); ret != 0)
-                        throw Exception("Failed to eject storage slot");
-                    break;
-
-                case StorageControlConfig::ActionType::ConfigSlot:
-                    if (!control_config.slot_config)
-                        throw Exception("Missing slot configuration for ConfigSlot action");
-                    if (ret = _storage->setSlotConfig(control_config.slot_dev_path, *control_config.slot_config);
-                        ret != 0)
-                        throw Exception("Failed to configure storage slot");
-                    break;
-
-                case StorageControlConfig::ActionType::RelaySlot: {
-                    RelayStatus relay_status;
-                    if (ret = _storage->enableOrHeartbeatNginxRelay(control_config.slot_dev_path, relay_status);
-                        ret != 0)
-                        throw Exception("Failed to enable nginx relay on storage slot");
-                    res_j["dRelayStatus"] = nlohmann::json::object();
-                    relay_status.to(res_j["dRelayStatus"], *_ctx);
-                }
-                break;
-
-                case StorageControlConfig::ActionType::RelayStatusSlot: {
-                    RelayStatus relay_status;
-                    if (ret = _storage->statusOfNginxRelay(control_config.slot_dev_path, relay_status); ret != 0)
-                        throw Exception("Failed to enable nginx relay on storage slot");
-                    res_j["dRelayStatus"] = nlohmann::json::object();
-                    relay_status.to(res_j["dRelayStatus"], *_ctx);
-                }
-                break;
-
-                case StorageControlConfig::ActionType::UnrelaySlot:
-                    if (ret = _storage->disableNginxRelay(control_config.slot_dev_path); ret != 0)
-                        throw Exception("Failed to disable nginx relay on storage slot");
-                    break;
-
-                case StorageControlConfig::ActionType::RemoveFilesOrDirectories:
-                    if (!control_config.files_or_directories_to_remove)
-                        throw Exception("Missing files or directories to remove for RemoveFilesOrDirectories action");
+                case StorageControlConfig::TaskType::Sync:
+                    switch (control_config.action)
                     {
-                        auto to_remove = *control_config.files_or_directories_to_remove;
-                        if (ret = _storage->removeFilesOrDirectories(control_config.slot_dev_path, to_remove); ret != 0)
-                            throw Exception("Failed to remove files or directories on storage slot");
-                        res_j["lRemovedFilesOrDirectories"] = nlohmann::json::array();
-                        for (const auto &path: to_remove)
-                            res_j["lRemovedFilesOrDirectories"].emplace_back(path.string());
+                        case StorageControlConfig::ActionType::FormatSlot:
+                            if (ret = _storage->formatSlot(control_config.slot_dev_path); ret != 0)
+                                throw Exception("Failed to format storage slot");
+                            break;
+                        case StorageControlConfig::ActionType::FreeUpSlot:
+                            if (ret = _storage->freeUpSlot(control_config.slot_dev_path); ret != 0)
+                                throw Exception("Failed to free up storage slot");
+                            break;
+                        case StorageControlConfig::ActionType::EjectSlot:
+                            if (ret = _storage->ejectSlot(control_config.slot_dev_path); ret != 0)
+                                throw Exception("Failed to eject storage slot");
+                            break;
+                        case StorageControlConfig::ActionType::ConfigSlot:
+                            if (!control_config.slot_config)
+                                throw Exception("Missing slot configuration for ConfigSlot action");
+                            if (ret
+                                = _storage->setSlotConfig(control_config.slot_dev_path, *control_config.slot_config);
+                                ret != 0)
+                                throw Exception("Failed to configure storage slot");
+                            break;
+                        case StorageControlConfig::ActionType::RelaySlot: {
+                            RelayStatus relay_status;
+                            if (ret = _storage->enableOrHeartbeatNginxRelay(control_config.slot_dev_path, relay_status);
+                                ret != 0)
+                                throw Exception("Failed to enable nginx relay on storage slot");
+                            res_j["dRelayStatus"] = nlohmann::json::object();
+                            relay_status.to(res_j["dRelayStatus"], *_ctx);
+                        }
+                        break;
+                        case StorageControlConfig::ActionType::RelayStatusSlot: {
+                            RelayStatus relay_status;
+                            if (ret = _storage->statusOfNginxRelay(control_config.slot_dev_path, relay_status);
+                                ret != 0)
+                                throw Exception("Failed to enable nginx relay on storage slot");
+                            res_j["dRelayStatus"] = nlohmann::json::object();
+                            relay_status.to(res_j["dRelayStatus"], *_ctx);
+                        }
+                        break;
+                        case StorageControlConfig::ActionType::UnrelaySlot:
+                            if (ret = _storage->disableNginxRelay(control_config.slot_dev_path); ret != 0)
+                                throw Exception("Failed to disable nginx relay on storage slot");
+                            break;
+                        case StorageControlConfig::ActionType::RemoveFilesOrDirectories: {
+                            if (!control_config.files_or_directories_to_remove)
+                                throw Exception(
+                                    "Missing files or directories to remove for RemoveFilesOrDirectories action");
+                            auto to_remove = *control_config.files_or_directories_to_remove;
+                            if (ret = _storage->removeFilesOrDirectories(control_config.slot_dev_path, to_remove);
+                                ret != 0)
+                                throw Exception("Failed to remove files or directories on storage slot");
+                            res_j["lRemovedFilesOrDirectories"] = nlohmann::json::array();
+                            for (const auto &path: to_remove)
+                                res_j["lRemovedFilesOrDirectories"].emplace_back(path.string());
+                        }
+                        break;
+                        default:
+                            throw Exception("Unknown storage action type");
+                    }
+                    break;
+
+                case StorageControlConfig::TaskType::AsyncSubmit:
+                case StorageControlConfig::TaskType::AsyncStatus:
+                case StorageControlConfig::TaskType::AsyncCancel:
+                    if (!_async_task_worker)
+                        throw Exception("Storage async worker is not available");
+                    switch (control_config.task_type)
+                    {
+                        case StorageControlConfig::TaskType::AsyncSubmit:
+                            _async_task_worker->handleSubmit(control_config, res_j, ret);
+                            break;
+                        case StorageControlConfig::TaskType::AsyncStatus:
+                            _async_task_worker->handleStatus(control_config, res_j, ret);
+                            break;
+                        case StorageControlConfig::TaskType::AsyncCancel:
+                            _async_task_worker->handleCancel(control_config, res_j, ret);
+                            break;
+                        default:
+                            throw Exception("Unknown storage task type");
                     }
                     break;
 
                 default:
-                    throw Exception("Unknown storage action type");
+                    throw Exception("Unknown storage task type");
             }
         }
         catch (const std::exception &e)
@@ -902,6 +937,7 @@ private:
 
     // Config store
     std::unique_ptr<ConfigStore> _storage_config_store;
+    std::unique_ptr<AsyncTaskWorker> _async_task_worker;
 };
 
 // - MARK: Capture Endpoint

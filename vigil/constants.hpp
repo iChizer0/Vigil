@@ -5,7 +5,6 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
-#include <new>
 #include <string>
 #include <string_view>
 
@@ -13,14 +12,19 @@ namespace vigil::constants {
 
 static inline constexpr const int kEndpointErrorBase = 30000;
 
+#if defined(__cpp_lib_hardware_interference_size) && __cpp_lib_hardware_interference_size >= 201703L
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winterference-size"
 static inline constexpr const size_t kHardwareDestructiveInterferenceSize = std::hardware_destructive_interference_size;
 #pragma GCC diagnostic pop
+#else
+static inline constexpr const size_t kHardwareDestructiveInterferenceSize = 64;
+#endif
 
 static inline constexpr const std::string_view kRecordWriterPrefixDefault = "";
 static inline constexpr const char *kRecordWriterDefaultFormat = "MP4";
-static inline constexpr const std::chrono::milliseconds kRecordWriterDefaultIntervalMs = std::chrono::milliseconds(0);
+static inline constexpr const std::chrono::milliseconds kRecordWriterDefaultIntervalMs
+    = std::chrono::milliseconds(5000);
 static inline constexpr const std::string_view kCaptureWriterPrefixDefault = "Capture ";
 
 static inline constexpr const size_t kMaskWidth = 128;

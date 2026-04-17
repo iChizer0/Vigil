@@ -143,6 +143,16 @@ public:
     vg_sta_e removeFilesOrDirectories(const std::string &slot_dev_path,
         std::vector<std::filesystem::path> &relative_paths)
     {
+        SlotRemoveFilesProgress progress;
+        const auto ret = removeFilesOrDirectories(slot_dev_path, relative_paths, &progress);
+        relative_paths = std::move(progress.removed_paths);
+        return ret;
+    }
+
+    vg_sta_e removeFilesOrDirectories(const std::string &slot_dev_path,
+        const std::vector<std::filesystem::path> &relative_paths, SlotRemoveFilesProgress *progress,
+        const CancellationCheck &should_cancel = {}, const SlotRemoveFilesProgressCallback &on_progress = {})
+    {
         std::shared_ptr<Slot> slot;
         {
             const std::shared_lock lock(_slots_mutex);
@@ -151,50 +161,32 @@ public:
         }
         if (!slot)
         {
-            relative_paths.clear(); // Treat as nothing deleted
+            if (progress)
+            {
+                *progress = SlotRemoveFilesProgress {};
+                progress->requested_count = relative_paths.size();
+                progress->processed_count = relative_paths.size();
+                progress->failed_count = relative_paths.size();
+                if (on_progress)
+                    on_progress(*progress);
+            }
             return EPERM;
         }
 
-        auto do_remove = [&]() {
-            for (auto it = relative_paths.begin(); it != relative_paths.end();)
-            {
-                try
-                {
-                    if (auto ret = slot->removeFileOrDirectory(*it); ret == 0)
-                    {
-                        ++it;
-                        continue;
-                    }
-                    else
-                    {
-                        VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove file or directory ", *it,
-                            " on slot with device path ", slot_dev_path, ", code: ", ret);
-                        it = relative_paths.erase(it);
-                    }
-                }
-                catch (const std::exception &e)
-                {
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Exception occurred when removing file or directory ", *it,
-                        " on slot with device path ", slot_dev_path, ": ", e.what());
-                    ++it;
-                }
-            }
-        };
+        auto do_remove
+            = [&]() { return slot->removeFilesOrDirectories(relative_paths, progress, should_cancel, on_progress); };
 
         if (auto mgr = slot->getIndexManager(); mgr)
         {
             const auto guard = mgr->suspend();
-            do_remove();
+            return do_remove();
         }
         else
-        {
-            do_remove();
-        }
-
-        return 0;
+            return do_remove();
     }
 
-    vg_sta_e freeUpSlot(const std::string &slot_dev_path)
+    vg_sta_e freeUpSlot(const std::string &slot_dev_path, SlotFreeUpProgress *progress = nullptr,
+        const CancellationCheck &should_cancel = {}, const SlotFreeUpProgressCallback &on_progress = {})
     {
         std::shared_ptr<Slot> slot;
         {
@@ -202,7 +194,17 @@ public:
             if (auto it = _slots.find(slot_dev_path); it != _slots.end())
                 slot = it->second;
         }
-        return slot ? slot->freeUpUsedSpace() : EPERM;
+        if (!slot)
+        {
+            if (progress)
+            {
+                *progress = SlotFreeUpProgress {};
+                if (on_progress)
+                    on_progress(*progress);
+            }
+            return EPERM;
+        }
+        return slot->freeUpUsedSpace(progress, should_cancel, on_progress);
     }
 
     vg_sta_e setConfig(const StorageConfig &cfg) noexcept

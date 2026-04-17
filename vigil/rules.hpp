@@ -57,6 +57,8 @@ public:
                 return "SCHEDULE";
             case VG_RULE_TYPE_HTTP:
                 return "HTTP";
+            case VG_RULE_TYPE_ALWAYS_ON:
+                return "ALWAYS_ON";
             default:
                 return "UNKNOWN";
         }
@@ -78,6 +80,8 @@ public:
             return VG_RULE_TYPE_SCHEDULE;
         else if (type_str == "HTTP")
             return VG_RULE_TYPE_HTTP;
+        else if (type_str == "ALWAYS_ON")
+            return VG_RULE_TYPE_ALWAYS_ON;
         else
             return VG_RULE_TYPE_UNKNOWN;
     }
@@ -504,6 +508,40 @@ private:
 
 private:
     const Context &_ctx;
+};
+
+class AlwaysOnRule: public BaseRule
+{
+public:
+    AlwaysOnRule(const AlwaysOnRuleConfig &, const Context &ctx) noexcept
+        : BaseRule(VG_RULE_TYPE_ALWAYS_ON, 0), _last_trigger_time(ctx.shared_time.steadyTime() - currentInterval(ctx))
+    {
+        VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Initialized always-on rule with interval: ",
+            std::chrono::duration_cast<std::chrono::milliseconds>(currentInterval(ctx)).count(), "ms");
+    }
+
+    ~AlwaysOnRule() = default;
+
+    bool operator()(const Context &ctx) const noexcept override
+    {
+        const auto now = ctx.shared_time.steadyTime();
+        if (const auto interval = currentInterval(ctx); now - _last_trigger_time >= interval)
+        {
+            _last_trigger_time = now;
+            return true;
+        }
+        return false;
+    }
+
+private:
+    static std::chrono::steady_clock::duration currentInterval(const Context &ctx) noexcept
+    {
+        const auto [_, settings] = ctx.shared_writer_settings.get();
+        return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            settings ? settings->interval : kRecordWriterDefaultIntervalMs);
+    }
+
+    mutable std::chrono::steady_clock::time_point _last_trigger_time;
 };
 
 class ScheduleRule: public BaseRule

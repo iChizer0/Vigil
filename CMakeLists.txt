@@ -148,6 +148,7 @@ add_library(vigil::vigil ALIAS vigil)
 
 target_sources(vigil
 	PRIVATE
+		vigil/async_task.cpp
 		vigil/capi.cpp
 		${PROTO_SRCS}
 		${PROTO_HDRS}
@@ -203,6 +204,7 @@ if(VIGIL_BUILD_EXAMPLES)
 	target_compile_options(vigil_index_manager_test PRIVATE -std=c++20)
 
 	add_executable(vigil_mask_test example/mask_test.cpp)
+	target_link_libraries(vigil_mask_test PRIVATE nlohmann_json::nlohmann_json)
 	target_include_directories(vigil_mask_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/include)
 	if(VIGIL_ENABLE_WARNINGS)
 		target_compile_options(vigil_mask_test PRIVATE ${VIGIL_WARNING_FLAGS})

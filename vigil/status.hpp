@@ -3,7 +3,9 @@
 #define VIGIL_STATUS_HPP
 
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -36,6 +38,27 @@ struct RelayStatus
         j["sRelayDirectory"] = relay_directory;
     }
 };
+
+struct SlotRemoveFilesProgress
+{
+    size_t requested_count = 0;
+    size_t processed_count = 0;
+    size_t removed_count = 0;
+    size_t failed_count = 0;
+    std::vector<std::filesystem::path> removed_paths;
+};
+
+using SlotRemoveFilesProgressCallback = std::function<void(const SlotRemoveFilesProgress &)>;
+
+struct SlotFreeUpProgress
+{
+    size_t total_entries = 0;
+    size_t processed_entries = 0;
+    size_t removed_entries = 0;
+    size_t failed_entries = 0;
+};
+
+using SlotFreeUpProgressCallback = std::function<void(const SlotFreeUpProgress &)>;
 
 struct SlotStatus
 {

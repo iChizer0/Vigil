@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -18,6 +19,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_set>
+#include <vector>
 
 #include <blkid/blkid.h>
 #include <fcntl.h>
@@ -47,6 +49,8 @@ using namespace vigil::write_stats;
 using namespace vigil::relay;
 using namespace vigil::writers;
 using namespace vigil::utils;
+
+using CancellationCheck = std::function<bool()>;
 
 class Slot final
 {
@@ -329,30 +333,106 @@ public:
         return 0;
     }
 
-    vg_sta_e freeUpUsedSpace()
+    vg_sta_e removeFilesOrDirectories(const std::vector<std::filesystem::path> &relative_paths,
+        SlotRemoveFilesProgress *progress = nullptr, const CancellationCheck &should_cancel = {},
+        const SlotRemoveFilesProgressCallback &on_progress = {})
+    {
+        if (auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
+            return EPERM;
+
+        auto local_progress = SlotRemoveFilesProgress {};
+        auto &active_progress = progress ? *progress : local_progress;
+        active_progress = SlotRemoveFilesProgress {};
+        active_progress.requested_count = relative_paths.size();
+
+        auto update_progress = [&]() {
+            if (on_progress)
+                on_progress(active_progress);
+        };
+
+        update_progress();
+
+        for (const auto &relative_path: relative_paths)
+        {
+            if (should_cancel && should_cancel())
+                return ECANCELED;
+
+            try
+            {
+                if (const auto ret = removeFileOrDirectory(relative_path); ret == 0)
+                {
+                    active_progress.removed_paths.emplace_back(relative_path);
+                    ++active_progress.removed_count;
+                }
+                else
+                    ++active_progress.failed_count;
+            }
+            catch (const std::exception &e)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Exception occurred while removing file or directory ",
+                    relative_path, " on slot with device path ", _dev_path, ": ", e.what());
+                ++active_progress.failed_count;
+            }
+
+            ++active_progress.processed_count;
+            update_progress();
+        }
+
+        return 0;
+    }
+
+    vg_sta_e freeUpUsedSpace(SlotFreeUpProgress *progress = nullptr, const CancellationCheck &should_cancel = {},
+        const SlotFreeUpProgressCallback &on_progress = {})
     {
         if (auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
             return EPERM;
 
         vg_sta_e ret = 0;
+        auto local_progress = SlotFreeUpProgress {};
+        auto &active_progress = progress ? *progress : local_progress;
+        active_progress = SlotFreeUpProgress {};
+
+        auto update_progress = [&]() {
+            if (on_progress)
+                on_progress(active_progress);
+        };
+
         try
         {
+            std::vector<std::filesystem::path> entries;
             for (const auto &entry: std::filesystem::directory_iterator(getRecordRootPath(),
                      std::filesystem::directory_options::skip_permission_denied))
             {
-                try
+                const auto &file_name = entry.path().filename().string();
+                if (file_name.starts_with('.'))
+                    continue; // Skip hidden files and dirs
+                entries.emplace_back(entry.path());
+            }
+
+            active_progress.total_entries = entries.size();
+            update_progress();
+
+            for (const auto &entry_path: entries)
+            {
+                if (should_cancel && should_cancel())
                 {
-                    const auto &file_name = entry.path().filename().string();
-                    if (file_name.starts_with('.'))
-                        continue; // Skip hidden files and dirs
-                    std::filesystem::remove_all(entry.path());
+                    ret = ECANCELED;
+                    break;
                 }
-                catch (const std::exception &e)
+
+                std::error_code ec;
+                std::filesystem::remove_all(entry_path, ec);
+                if (ec)
                 {
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove file or directory: ", entry.path(),
-                        ", error: ", e.what());
-                    continue;
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove file or directory: ", entry_path,
+                        ", error: ", ec.message());
+                    ++active_progress.failed_entries;
                 }
+                else
+                    ++active_progress.removed_entries;
+
+                ++active_progress.processed_entries;
+                update_progress();
             }
         }
         catch (const std::exception &e)
