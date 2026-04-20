@@ -39,26 +39,46 @@ struct RelayStatus
     }
 };
 
-struct SlotRemoveFilesProgress
+struct SlotFileOpsProgress
 {
+    enum class Type {
+        Add,
+        Remove,
+        FreeUp,
+        Modify,
+    } type;
+
     size_t requested_count = 0;
     size_t processed_count = 0;
-    size_t removed_count = 0;
+    size_t success_count = 0;
     size_t failed_count = 0;
-    std::vector<std::filesystem::path> removed_paths;
+
+    std::vector<std::filesystem::path> success_paths;
+    std::vector<std::pair<std::filesystem::path, int>> failed_paths_with_errnos;
+
+    explicit SlotFileOpsProgress(Type t) : type(t) { }
+
+    ~SlotFileOpsProgress() = default;
+
+    static std::string_view TypeToString(Type type)
+    {
+        switch (type)
+        {
+            case Type::Add:
+                return "ADD";
+            case Type::Remove:
+                return "REMOVE";
+            case Type::FreeUp:
+                return "FREE_UP";
+            case Type::Modify:
+                return "MODIFY";
+            default:
+                return "UNKNOWN";
+        }
+    }
 };
 
-using SlotRemoveFilesProgressCallback = std::function<void(const SlotRemoveFilesProgress &)>;
-
-struct SlotFreeUpProgress
-{
-    size_t total_entries = 0;
-    size_t processed_entries = 0;
-    size_t removed_entries = 0;
-    size_t failed_entries = 0;
-};
-
-using SlotFreeUpProgressCallback = std::function<void(const SlotFreeUpProgress &)>;
+using SlotFileOpsProgressCallback = std::function<void(const SlotFileOpsProgress &)>;
 
 struct SlotStatus
 {

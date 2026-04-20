@@ -334,15 +334,15 @@ public:
     }
 
     vg_sta_e removeFilesOrDirectories(const std::vector<std::filesystem::path> &relative_paths,
-        SlotRemoveFilesProgress *progress = nullptr, const CancellationCheck &should_cancel = {},
-        const SlotRemoveFilesProgressCallback &on_progress = {})
+        SlotFileOpsProgress *progress = nullptr, const CancellationCheck &should_cancel = {},
+        const SlotFileOpsProgressCallback &on_progress = {})
     {
         if (auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
             return EPERM;
 
-        auto local_progress = SlotRemoveFilesProgress {};
+        auto local_progress = SlotFileOpsProgress(SlotFileOpsProgress::Type::Remove);
         auto &active_progress = progress ? *progress : local_progress;
-        active_progress = SlotRemoveFilesProgress {};
+        active_progress = SlotFileOpsProgress(SlotFileOpsProgress::Type::Remove);
         active_progress.requested_count = relative_paths.size();
 
         auto update_progress = [&]() {
@@ -361,11 +361,14 @@ public:
             {
                 if (const auto ret = removeFileOrDirectory(relative_path); ret == 0)
                 {
-                    active_progress.removed_paths.emplace_back(relative_path);
-                    ++active_progress.removed_count;
+                    active_progress.success_paths.emplace_back(relative_path);
+                    ++active_progress.success_count;
                 }
                 else
+                {
+                    active_progress.failed_paths_with_errnos.emplace_back(relative_path, ret);
                     ++active_progress.failed_count;
+                }
             }
             catch (const std::exception &e)
             {
@@ -381,16 +384,16 @@ public:
         return 0;
     }
 
-    vg_sta_e freeUpUsedSpace(SlotFreeUpProgress *progress = nullptr, const CancellationCheck &should_cancel = {},
-        const SlotFreeUpProgressCallback &on_progress = {})
+    vg_sta_e freeUpUsedSpace(SlotFileOpsProgress *progress = nullptr, const CancellationCheck &should_cancel = {},
+        const SlotFileOpsProgressCallback &on_progress = {})
     {
         if (auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
             return EPERM;
 
         vg_sta_e ret = 0;
-        auto local_progress = SlotFreeUpProgress {};
+        auto local_progress = SlotFileOpsProgress(SlotFileOpsProgress::Type::FreeUp);
         auto &active_progress = progress ? *progress : local_progress;
-        active_progress = SlotFreeUpProgress {};
+        active_progress = SlotFileOpsProgress(SlotFileOpsProgress::Type::FreeUp);
 
         auto update_progress = [&]() {
             if (on_progress)
@@ -409,9 +412,11 @@ public:
                 entries.emplace_back(entry.path());
             }
 
-            active_progress.total_entries = entries.size();
+            active_progress.requested_count = entries.size();
             update_progress();
 
+            // Skip adding per-entry paths to the progress record to avoid the memory overhead of retaining and
+            // serializing potentially large path lists during quota-driven eviction.
             for (const auto &entry_path: entries)
             {
                 if (should_cancel && should_cancel())
@@ -426,12 +431,12 @@ public:
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove file or directory: ", entry_path,
                         ", error: ", ec.message());
-                    ++active_progress.failed_entries;
+                    ++active_progress.failed_count;
                 }
                 else
-                    ++active_progress.removed_entries;
+                    ++active_progress.success_count;
 
-                ++active_progress.processed_entries;
+                ++active_progress.processed_count;
                 update_progress();
             }
         }
@@ -518,7 +523,7 @@ protected:
             else if (auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
                          cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_path.c_str(),
                          kStorageThumbnailFileType.c_str(), kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
-                     ret != 0)
+                ret != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to generate thumbnail for cache file ",
                     cache_file_info.path, ", code: ", static_cast<int>(ret));
@@ -1038,12 +1043,8 @@ private:
 
     bool probeCorrectlyMounted() const noexcept
     {
-        struct stat dev_sb
-        {
-        };
-        struct stat mnt_sb
-        {
-        };
+        struct stat dev_sb {};
+        struct stat mnt_sb {};
         bool mount_stats_valid = false;
         bool mount_path_missing = false;
 
@@ -1194,9 +1195,7 @@ private:
 
     bool doStats() const noexcept
     {
-        struct statvfs vfs
-        {
-        };
+        struct statvfs vfs {};
         const std::shared_lock lock(_op_mutex);
         if (::statvfs(_mount_path.c_str(), &vfs) != 0)
         {

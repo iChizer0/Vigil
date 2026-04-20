@@ -143,15 +143,15 @@ public:
     vg_sta_e removeFilesOrDirectories(const std::string &slot_dev_path,
         std::vector<std::filesystem::path> &relative_paths)
     {
-        SlotRemoveFilesProgress progress;
+        SlotFileOpsProgress progress(SlotFileOpsProgress::Type::Remove);
         const auto ret = removeFilesOrDirectories(slot_dev_path, relative_paths, &progress);
-        relative_paths = std::move(progress.removed_paths);
+        relative_paths = std::move(progress.success_paths);
         return ret;
     }
 
     vg_sta_e removeFilesOrDirectories(const std::string &slot_dev_path,
-        const std::vector<std::filesystem::path> &relative_paths, SlotRemoveFilesProgress *progress,
-        const CancellationCheck &should_cancel = {}, const SlotRemoveFilesProgressCallback &on_progress = {})
+        const std::vector<std::filesystem::path> &relative_paths, SlotFileOpsProgress *progress,
+        const CancellationCheck &should_cancel = {}, const SlotFileOpsProgressCallback &on_progress = {})
     {
         std::shared_ptr<Slot> slot;
         {
@@ -163,7 +163,7 @@ public:
         {
             if (progress)
             {
-                *progress = SlotRemoveFilesProgress {};
+                *progress = SlotFileOpsProgress(SlotFileOpsProgress::Type::Remove);
                 progress->requested_count = relative_paths.size();
                 progress->processed_count = relative_paths.size();
                 progress->failed_count = relative_paths.size();
@@ -185,8 +185,8 @@ public:
             return do_remove();
     }
 
-    vg_sta_e freeUpSlot(const std::string &slot_dev_path, SlotFreeUpProgress *progress = nullptr,
-        const CancellationCheck &should_cancel = {}, const SlotFreeUpProgressCallback &on_progress = {})
+    vg_sta_e freeUpSlot(const std::string &slot_dev_path, SlotFileOpsProgress *progress = nullptr,
+        const CancellationCheck &should_cancel = {}, const SlotFileOpsProgressCallback &on_progress = {})
     {
         std::shared_ptr<Slot> slot;
         {
@@ -198,7 +198,7 @@ public:
         {
             if (progress)
             {
-                *progress = SlotFreeUpProgress {};
+                *progress = SlotFileOpsProgress(SlotFileOpsProgress::Type::FreeUp);
                 if (on_progress)
                     on_progress(*progress);
             }

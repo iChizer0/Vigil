@@ -1,7 +1,7 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2026-04-17
+Revised: 2026-04-20
 Version: 1.6.0
 
 ## Rule API
@@ -311,243 +311,147 @@ Notes:
 
 ### Storage Control
 
-Perform an action on the storage system.
+Perform a sync or async storage action.
 
 **Path:** `.../vigil/storage/control`
 
 **Method:** `POST`
 
-The request uses two routing fields:
-
-- `sAction`: the storage operation family
-- `sTaskType`: how that operation should be handled
-
-Supported `sAction` values:
-
-- `FORMAT`
-- `FREE_UP`
-- `EJECT`
-- `REMOVE_FILES_OR_DIRECTORIES`
-- `CONFIG`
-- `RELAY`
-- `RELAY_STATUS`
-- `UNRELAY`
-
-Supported `sTaskType` values:
-
-- `SYNC`
-- `ASYNC_SUBMIT`
-- `ASYNC_STATUS`
-- `ASYNC_CANCEL`
-
-If `sTaskType` is omitted, it defaults to `SYNC`.
-
-Async task types are intended for the long-running action families:
-
-- `FORMAT`
-- `FREE_UP`
-- `EJECT`
-- `REMOVE_FILES_OR_DIRECTORIES`
-
-The following actions are synchronous only:
-
-- `CONFIG`
-- `RELAY`
-- `RELAY_STATUS`
-- `UNRELAY`
-
 **Request Payload:**
 
 ```json
 {
-    "sTaskType": "ASYNC_STATUS", // String (optional), one of: "SYNC", "ASYNC_SUBMIT", "ASYNC_STATUS", "ASYNC_CANCEL", defaults to "SYNC"
-    "sAction": "FREE_UP", // String, one of: "FORMAT", "FREE_UP", "EJECT", "REMOVE_FILES_OR_DIRECTORIES", "CONFIG", "RELAY", "RELAY_STATUS", "UNRELAY"
-    "sSlotDevPath": "/dev/sda1", // String, required for all actions, device path of the slot
-    "dSlotConfig": { // Object, required only for "CONFIG" action
-        "iQuotaLimitBytes": 1073741824, // Integer, quota limit in bytes, -1 means no limit
-        "bQuotaRotate": true // Boolean, whether to enable quota rotation
+    "sTask": "ASYNC_STATUS", // String (optional), control operation task type, one of: "SYNC", "ASYNC_SUBMIT", "ASYNC_STATUS", "ASYNC_CANCEL", defaults to "SYNC"
+    "sAction": "FREE_UP", // String, action type, one of: "FORMAT", "FREE_UP", "EJECT", "REMOVE_FILES_OR_DIRECTORIES", "CONFIG", "RELAY", "RELAY_STATUS", "UNRELAY"
+    "sSlotDevPath": "/dev/sda1", // String, device path of the target slot, required for every action
+    "sTaskUID": "0-12345678901234567890", // String (optional), queried by ASYNC_STATUS / ASYNC_CANCEL. Current behavior: non-empty is ignored, empty forces no matches
+    "dSlotConfig": { // Object (optional), required only for sync "CONFIG" action
+        "iQuotaLimitBytes": 1073741824, // Integer, quota limit in bytes, -1 for no limit
+        "bQuotaRotate": true // Boolean, whether quota rotation is enabled
     },
-    "lFilesOrDirectoriesToRemove": [ // List, required only for "SYNC" or "ASYNC_SUBMIT" with "REMOVE_FILES_OR_DIRECTORIES"
-        "DCIM/20251016/event.mp4", // String, relative path under the record data directory, the sanitized path must still be under the record data directory, otherwise error may returned
-        // ... More files or directories to remove
+    "lFilesOrDirectoriesToRemove": [ // Array of strings (optional), required only for "REMOVE_FILES_OR_DIRECTORIES" action with SYNC or ASYNC_SUBMIT
+        "DCIM/20251016/event.mp4" // String, relative path to file or directory
     ]
-}
-```
-
-**Response Body:**
-
-Top-level response fields keep their existing meaning:
-
-- `code == 0`: the request itself was valid and accepted.
-- `message`: request-level failure only.
-
-For `SYNC` requests:
-
-- `CONFIG`, `RELAY`, `RELAY_STATUS`, and `UNRELAY` behave synchronously as before
-- `FORMAT`, `FREE_UP`, `EJECT`, and `REMOVE_FILES_OR_DIRECTORIES` perform the operation synchronously and return only after the operation finishes
-
-For `ASYNC_SUBMIT`, `ASYNC_STATUS`, and `ASYNC_CANCEL` requests, the background-task history for the requested `{sAction, sSlotDevPath}` is returned in `dTasks`.
-
-### Async Task History
-
-```json
-{
-    "dTasks": {
-        "1776353445000": { // Key: String, task creation timestamp in milliseconds
-            "iCreatedTimestamp": 1776353445000, // Integer, task creation timestamp in milliseconds
-            "sAction": "FREE_UP", // String, async action family: "FORMAT", "FREE_UP", "EJECT", "REMOVE_FILES_OR_DIRECTORIES"
-            "sSlotDevPath": "/dev/sda1", // String, target slot device path
-            "sStatus": "RUNNING", // String, one of: "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCEL_REQUESTED", "CANCELED"
-            "bDone": false, // Boolean, true when the task reached a final state
-            "bCancelable": true, // Boolean, whether cancel may still succeed now
-            "iQueuePosition": 0, // Integer (optional), 0 for running, 1 for next queued task, null when done
-            "iProgressPercent": 42, // Integer (optional), 0-100 if known, otherwise null
-            "iUpdatedTimestamp": 1776353448000, // Integer, Unix timestamp in milliseconds
-            "dResult": { // Object, task result payload and final result metadata
-                "iCode": null, // Integer (optional), final POSIX-style result code when done
-                "sMessage": null, // String (optional), final human-readable result message
-                "iTotalEntries": 10,
-                "iProcessedCount": 4,
-                "iRemovedCount": 4,
-                "iFailedCount": 0
-            }
-        }
-    },
-    "code": 0,
-    "message": ""
-}
-```
-
-The `dResult` payload shape depends on the async action family:
-
-- `FORMAT` and `EJECT`: `iCode`, `sMessage`
-- `FREE_UP`: `iCode`, `sMessage`, `iTotalEntries`, `iProcessedCount`, `iRemovedCount`, `iFailedCount`
-- `REMOVE_FILES_OR_DIRECTORIES`: `iCode`, `sMessage`, `iRequestedCount`, `iRemovedCount`, `iFailedCount`, and final `lRemovedFilesOrDirectories`
-
-For async submit, status, and cancel requests:
-
-- top-level `code` reports request acceptance/rejection
-- `dTasks` is an object keyed by task creation timestamps
-- each `dTasks.<created_timestamp>.dResult.iCode` reports the final task result when that task is done
-- each `dTasks.<created_timestamp>.dResult.sMessage` provides the final task result message when that task is done
-- at most the three most recent tasks are retained for the requested `{sAction, sSlotDevPath}`
-
-The task identity is:
-
-- `sAction`
-- `sSlotDevPath`
-
-### Async Action Semantics
-
-- `FORMAT`
-    - `ASYNC_SUBMIT` queues a formatting task
-    - `ASYNC_STATUS` returns up to the three most recent format tasks for the slot
-    - `ASYNC_CANCEL` cancels unfinished queued format tasks for the slot
-  - cancelable while queued
-  - usually not cancelable after formatting starts
-- `FREE_UP`
-    - `ASYNC_SUBMIT` queues a free-up task
-    - `ASYNC_STATUS` returns up to the three most recent free-up tasks for the slot
-    - `ASYNC_CANCEL` cancels unfinished queued free-up tasks and requests cooperative cancellation for a running task
-  - cancelable while queued
-  - cooperatively cancelable while running
-- `EJECT`
-    - `ASYNC_SUBMIT` queues an eject task
-    - `ASYNC_STATUS` returns up to the three most recent eject tasks for the slot
-    - `ASYNC_CANCEL` cancels unfinished queued eject tasks for the slot
-  - cancelable while queued
-  - usually not cancelable after eject starts
-- `REMOVE_FILES_OR_DIRECTORIES`
-    - `ASYNC_SUBMIT` queues a file-removal task
-    - `ASYNC_STATUS` returns up to the three most recent file-removal tasks for the slot
-    - `ASYNC_CANCEL` cancels unfinished queued file-removal tasks and requests cooperative cancellation for a running task
-  - cancelable while queued
-  - cooperatively cancelable while running
-
-For synchronous-only actions (`CONFIG`, `RELAY`, `RELAY_STATUS`, `UNRELAY`), using `ASYNC_SUBMIT`, `ASYNC_STATUS`, or `ASYNC_CANCEL` is invalid.
-
-For `REMOVE_FILES_OR_DIRECTORIES`, each final history entry stores aggregate counts and removed-path details in `dTasks.<created_timestamp>.dResult`:
-
-```json
-{
-    "dTasks": {
-        "1776353470000": {
-            "iCreatedTimestamp": 1776353470000,
-            "sAction": "REMOVE_FILES_OR_DIRECTORIES",
-            "sSlotDevPath": "/dev/sda1",
-            "sStatus": "SUCCEEDED",
-            "bDone": true,
-            "bCancelable": false,
-            "iQueuePosition": null,
-            "iProgressPercent": 100,
-            "iUpdatedTimestamp": 1776353472000,
-            "dResult": {
-                "iCode": 0,
-                "sMessage": "Completed",
-                "iRequestedCount": 3,
-                "iRemovedCount": 2,
-                "iFailedCount": 1,
-                "lRemovedFilesOrDirectories": [
-                    "DCIM/20251016/event.mp4",
-                    "DCIM/20251016/thumbnail.jpg"
-                ]
-            }
-        }
-    },
-    "code": 0
-}
-```
-
-If no retained task history exists for an `ASYNC_STATUS` or `ASYNC_CANCEL` request, the API returns a request-level failure such as `ENOENT`.
-
-If a cancel request arrives too late, the API returns a request-level failure and may still include the current `dTasks` history.
-
-Queueing rules are intentionally simple:
-
-- only one mutating task runs at a time
-- up to three unfinished async tasks may exist for the same `sSlotDevPath`
-- if the per-slot unfinished-task limit is reached, submit fails
-- `dTasks` retains up to three recent tasks for the requested `{sAction, sSlotDevPath}`
-
-For `SYNC` `RELAY` and `RELAY_STATUS` requests:
-
-```json
-{
-    "dRelayStatus": {
-        "iRelayTimeoutRemain": 25,
-        "iRelayTimeout": 300,
-        "sRelayDirectory": "550e8400-e29b-41d4-a716-446655440000"
-    },
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
-}
-```
-
-For `SYNC` `CONFIG` and `UNRELAY` requests:
-
-```json
-{
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
-}
-```
-
-For `SYNC` `REMOVE_FILES_OR_DIRECTORIES` requests:
-
-```json
-{
-    "lRemovedFilesOrDirectories": [
-        "DCIM/20251016/event.mp4"
-    ],
-    "code": 0,
-    "message": ""
 }
 ```
 
 Notes:
 
-- This synchronous response lists only successfully removed paths.
-- Aggregate per-path failure counts are tracked only in async task history results; failed-path detail is not exposed.
+- Async `sTask` (`ASYNC_*`) is supported only by `FORMAT`, `FREE_UP`, `EJECT`, and `REMOVE_FILES_OR_DIRECTORIES`.
+- `CONFIG`, `RELAY`, `RELAY_STATUS`, and `UNRELAY` are sync-only operations.
+
+**Response Body:**
+
+The payload depends on the `sTask` field.
+
+#### Sync (SYNC)
+
+```json
+{
+    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
+    "message": "", // String, optional, present only on failure
+    "dRelayStatus": { // Object (optional), present only for "RELAY" and "RELAY_STATUS" on success
+        "iRelayTimeoutRemain": 25, // Integer, relay timeout remain in seconds
+        "iRelayTimeout": 300, // Integer, relay timeout in seconds
+        "sRelayDirectory": "..." // String, relay directory name
+    },
+    "lRemovedFilesOrDirectories": [ // Array of strings (optional), present only for "REMOVE_FILES_OR_DIRECTORIES" on success
+        "DCIM/20251016/event.mp4" // String, successfully removed path
+    ]
+}
+```
+
+#### Async Submit (ASYNC_SUBMIT)
+
+```json
+{
+    "sUID": "0-12345678901234567890", // String, unique async task ID
+    "iCreatedTimestamp": 1776353445000, // Integer, Unix timestamp of task creation in milliseconds
+    "iUpdatedTimestamp": 1776353445000, // Integer, Unix timestamp of last task update in milliseconds
+    "sAction": "FREE_UP", // String, action type passed during submission
+    "sDevPath": "/dev/sda1", // String, device path of the target slot
+    "sStatus": "QUEUED", // String, task status, one of: "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCEL_REQUESTED", "CANCELED"
+    "bDone": false, // Boolean, true if status is completed (SUCCEEDED, FAILED, CANCELED)
+    "bCancelable": true, // Boolean, true if task can still be canceled
+    "iProgressPercent": 0, // Integer, estimated completion progress 0-100
+    "dResult": {}, // Object, final or intermediate execution result details
+    "code": 0, // Integer, always present, 0 on success
+    "message": "" // String, optional, present only on failure
+}
+```
+
+#### Async Status (ASYNC_STATUS)
+
+```json
+{
+    "lTasks": [ // Array of objects (optional), omitted if no matched tasks
+        {
+            "sUID": "0-12345678901234567890", // String, unique async task ID
+            "iCreatedTimestamp": 1776353445000, // Integer, Unix timestamp of task creation in milliseconds
+            "iUpdatedTimestamp": 1776353448000, // Integer, Unix timestamp of last task update in milliseconds
+            "sAction": "FREE_UP", // String, action type
+            "sDevPath": "/dev/sda1", // String, device path of the target slot
+            "sStatus": "RUNNING", // String, current active status
+            "bDone": false, // Boolean, true if status is completed
+            "bCancelable": true, // Boolean, true if task can still be canceled
+            "iProgressPercent": 42, // Integer, estimated completion progress 0-100
+            "dResult": { // Object, detailed action outcome (schema varies by sAction)
+                "sFileOpsType": "FREE_UP", // String (optional), "FREE_UP" or "REMOVE" for file ops
+                "iRequestedCount": 10, // Integer (optional)
+                "iProcessedCount": 4, // Integer (optional)
+                "iSuccessCount": 4, // Integer (optional)
+                "iFailedCount": 0, // Integer (optional)
+                "iCode": 0, // Integer (optional), non-zero system error code if failed
+                "sMessage": "" // String (optional), failure reason
+            },
+            "iQueuePosition": 0 // Integer (optional), 0: running, 1..N: queued, null: finished (position at time of completion)
+        }
+    ],
+    "code": 0, // Integer, always present, 0 on success
+    "message": "" // String, optional, present only on failure
+}
+```
+
+#### Async Cancel (ASYNC_CANCEL)
+
+```json
+{
+    "lCancelledTasks": [ // Array of objects (optional), omitted if no matched tasks
+        {
+            "sUID": "0-12345678901234567890", // String, unique async task ID
+            "iCreatedTimestamp": 1776353445000, // Integer, Unix timestamp of task creation in milliseconds
+            "iUpdatedTimestamp": 1776353449000, // Integer, Unix timestamp of last task update in milliseconds
+            "sAction": "FREE_UP", // String, action type
+            "sDevPath": "/dev/sda1", // String, device path of the target slot
+            "sStatus": "CANCEL_REQUESTED", // String, current updated status after cancellation
+            "bDone": false, // Boolean, true if status is completed
+            "bCancelable": false, // Boolean, true if task can still be canceled
+            "iProgressPercent": 42, // Integer, estimated completion progress 0-100
+            "dResult": { // Object, detailed action outcome (schema varies by sAction)
+                "sFileOpsType": "FREE_UP", // String (optional), "FREE_UP" or "REMOVE" for file ops
+                "iRequestedCount": 10, // Integer (optional)
+                "iProcessedCount": 4, // Integer (optional)
+                "iSuccessCount": 4, // Integer (optional)
+                "iFailedCount": 0 // Integer (optional)
+            }
+            // Note: iQueuePosition is not present in ASYNC_CANCEL responses
+        }
+    ],
+    "code": 0, // Integer, always present, 0 on success
+    "message": "" // String, optional, present only on failure
+}
+```
+
+Runtime notes:
+
+- `FORMAT` and `EJECT` are cancelable only while queued.
+- `FREE_UP` and `REMOVE_FILES_OR_DIRECTORIES` are also cancelable while running.
+- Accepted cancellations may still report `sStatus: "CANCEL_REQUESTED"`; the final `CANCELED` state is visible through a later `ASYNC_STATUS` request.
+- Only one async task runs globally.
+- Queue limit: 6 pending tasks.
+- History limit: 3 completed tasks per `{sAction, sSlotDevPath}`.
+- If no entries match, `lTasks` / `lCancelledTasks` are omitted and the response may be just `{ "code": 0 }`.
+- Sync `REMOVE_FILES_OR_DIRECTORIES` returns only successfully removed paths; failed-path detail is not exposed.
 
 ## Capture API
 

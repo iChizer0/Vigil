@@ -594,15 +594,15 @@ struct StorageControlConfig
         RemoveFilesOrDirectories,
     };
 
-    TaskType task_type = TaskType::Sync;
+    TaskType task = TaskType::Sync;
     ActionType action = ActionType::Unknown;
     std::string slot_dev_path;
     std::optional<SlotConfig> slot_config;
     std::optional<std::vector<std::filesystem::path>> files_or_directories_to_remove;
 
-    static constexpr std::string_view TaskTypeString(const TaskType task_type) noexcept
+    static constexpr std::string_view TaskTypeString(const TaskType task) noexcept
     {
-        switch (task_type)
+        switch (task)
         {
             case TaskType::Sync:
                 return "SYNC";
@@ -617,15 +617,15 @@ struct StorageControlConfig
         }
     }
 
-    static constexpr std::optional<TaskType> TaskTypeFromString(const std::string_view task_type_str) noexcept
+    static constexpr std::optional<TaskType> TaskTypeFromString(const std::string_view task_str) noexcept
     {
-        if (task_type_str == "SYNC")
+        if (task_str == "SYNC")
             return TaskType::Sync;
-        if (task_type_str == "ASYNC_SUBMIT")
+        if (task_str == "ASYNC_SUBMIT")
             return TaskType::AsyncSubmit;
-        if (task_type_str == "ASYNC_STATUS")
+        if (task_str == "ASYNC_STATUS")
             return TaskType::AsyncStatus;
-        if (task_type_str == "ASYNC_CANCEL")
+        if (task_str == "ASYNC_CANCEL")
             return TaskType::AsyncCancel;
         return std::nullopt;
     }
@@ -697,17 +697,17 @@ struct StorageControlConfig
 
     constexpr bool isSyncTask() const noexcept
     {
-        return task_type == TaskType::Sync;
+        return task == TaskType::Sync;
     }
 
     constexpr bool isAsyncTask() const noexcept
     {
-        return task_type != TaskType::Sync;
+        return task != TaskType::Sync;
     }
 
     constexpr bool isAsyncSubmitTask() const noexcept
     {
-        return task_type == TaskType::AsyncSubmit;
+        return task == TaskType::AsyncSubmit;
     }
 
     constexpr bool actionSupportsAsync() const noexcept
@@ -730,14 +730,14 @@ struct StorageControlConfig
         using namespace std::string_literals;
 
         {
-            task_type = TaskType::Sync;
-            if (j.contains("sTaskType"))
+            task = TaskType::Sync;
+            if (j.contains("sTask"))
             {
-                const auto task_type_str = j.at("sTaskType").get<std::string>();
-                if (const auto parsed_task_type = TaskTypeFromString(task_type_str); parsed_task_type.has_value())
-                    task_type = *parsed_task_type;
+                const auto task_str = j.at("sTask").get<std::string>();
+                if (const auto parsed_task_type = TaskTypeFromString(task_str); parsed_task_type.has_value())
+                    task = *parsed_task_type;
                 else
-                    throw Exception("Invalid storage control task type string '"s + task_type_str + "'"s);
+                    throw Exception("Invalid storage control task string '"s + task_str + "'"s);
             }
         }
 
@@ -770,7 +770,7 @@ struct StorageControlConfig
             }
         }
 
-        VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Parsed storage control config: task_type=", TaskTypeString(task_type),
+        VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Parsed storage control config: task=", TaskTypeString(task),
             ", action=", ActionString(action), ", slot_dev_path=", slot_dev_path);
     }
 };

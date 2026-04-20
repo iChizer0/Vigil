@@ -148,7 +148,6 @@ add_library(vigil::vigil ALIAS vigil)
 
 target_sources(vigil
 	PRIVATE
-		vigil/async_task.cpp
 		vigil/capi.cpp
 		${PROTO_SRCS}
 		${PROTO_HDRS}

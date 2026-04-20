@@ -1,4 +1,5 @@
 #pragma once
+#include <limits>
 #ifndef VIGIL_ENDPOINTS_HPP
 #define VIGIL_ENDPOINTS_HPP
 
@@ -44,6 +45,7 @@ using namespace vigil::storage;
 using namespace vigil::status;
 using namespace vigil::constants;
 using namespace vigil::writers;
+using namespace vigil::async_task;
 
 // - MARK: Config Store
 
@@ -742,7 +744,7 @@ public:
             };
         }
 
-        _async_task_worker = std::make_unique<AsyncTaskWorker>(*_storage);
+        _async_task_worker = std::make_unique<AsyncTaskWorker>(*_ctx, _storage.get());
         if (!_async_task_worker)
             throw Exception("Failed to create AsyncTaskWorker in StorageEndpoint");
     }
@@ -827,8 +829,8 @@ public:
 
         try
         {
-            const auto control_config = StorageControlConfig(j, *_ctx);
-            switch (control_config.task_type)
+            auto control_config = StorageControlConfig(j, *_ctx);
+            switch (control_config.task)
             {
                 case StorageControlConfig::TaskType::Sync:
                     switch (control_config.action)
@@ -898,19 +900,71 @@ public:
                 case StorageControlConfig::TaskType::AsyncCancel:
                     if (!_async_task_worker)
                         throw Exception("Storage async worker is not available");
-                    switch (control_config.task_type)
+                    if (!control_config.actionSupportsAsync())
+                        throw Exception(std::string("Storage action '")
+                                        + std::string(StorageControlConfig::ActionString(control_config.action))
+                                        + "' does not support async tasks");
                     {
-                        case StorageControlConfig::TaskType::AsyncSubmit:
-                            _async_task_worker->handleSubmit(control_config, res_j, ret);
+                        std::optional<std::string> target_uid = std::nullopt;
+                        if (j.contains("sTaskUID"))
+                        {
+                            auto uid = j.at("sTaskUID").get<std::string>();
+                            if (uid.empty())
+                                target_uid = std::move(uid);
+                        }
+                        const auto target_tag = StorageAsyncTask::StableTag(control_config);
+                        const AsyncTaskWorker::TaskFilter filter = [target_uid, target_tag](const AsyncTask &t) {
+                            return (!target_uid.has_value() || t.uid() == target_uid.value()) && t.tag() == target_tag;
+                        };
+
+                        switch (control_config.task)
+                        {
+                            case StorageControlConfig::TaskType::AsyncSubmit: {
+                                if (_async_task_worker->full())
+                                {
+                                    ret = EAGAIN;
+                                    throw Exception("Storage async task queue is full, cannot submit new task");
+                                }
+
+                                const auto name = StorageAsyncTask::StableName(control_config);
+                                const auto task = std::make_shared<StorageAsyncTask>(std::move(control_config));
+                                const auto task_id = _async_task_worker->submit(task);
+                                if (!task_id.has_value())
+                                {
+                                    ret = EAGAIN;
+                                    throw Exception(std::string("Failed to submit async storage task: ") + name);
+                                }
+                                task->inspect(res_j);
+                            }
                             break;
-                        case StorageControlConfig::TaskType::AsyncStatus:
-                            _async_task_worker->handleStatus(control_config, res_j, ret);
+                            case StorageControlConfig::TaskType::AsyncStatus: {
+                                const auto pos_tasks = _async_task_worker->status(filter);
+                                for (const auto &task: pos_tasks)
+                                {
+                                    if (!task.second)
+                                        continue;
+                                    auto task_j = nlohmann::json::object();
+                                    task.second->inspect(task_j);
+                                    task_j["iQueuePosition"] = task.first == std::numeric_limits<size_t>::max()
+                                                                   ? nlohmann::json(nullptr)
+                                                                   : nlohmann::json(task.first);
+                                    res_j["lTasks"].emplace_back(std::move(task_j));
+                                }
+                            }
                             break;
-                        case StorageControlConfig::TaskType::AsyncCancel:
-                            _async_task_worker->handleCancel(control_config, res_j, ret);
+                            case StorageControlConfig::TaskType::AsyncCancel: {
+                                const auto tasks = _async_task_worker->cancel(filter);
+                                for (const auto &task: tasks)
+                                {
+                                    auto task_j = nlohmann::json::object();
+                                    task->inspect(task_j);
+                                    res_j["lCancelledTasks"].emplace_back(std::move(task_j));
+                                }
+                            }
                             break;
-                        default:
-                            throw Exception("Unknown storage task type");
+                            default:
+                                throw Exception("Unknown storage task type");
+                        }
                     }
                     break;
 
