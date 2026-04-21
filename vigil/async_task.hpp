@@ -56,7 +56,7 @@ private:
 public:
     AsyncTask() noexcept
         : _id(nextCounter()), _created_timestamp(std::chrono::system_clock::now()),
-          _updated_timestamp(_created_timestamp), _status(AsyncTaskStatus::Queued), _progress_percent(0.f)
+          _updated_timestamp(_created_timestamp), _status(AsyncTaskStatus::Queued), _progress_percent(0)
     {
     }
 
@@ -123,7 +123,7 @@ public:
 
         {
             const auto progress = _progress_percent.load(std::memory_order_relaxed);
-            j["iProgressPercent"] = std::min(std::max(progress, 0.f), 100.f);
+            j["iProgressPercent"] = std::min(std::max(progress, 0), 100);
         }
         {
             auto res_j = nlohmann::json::object();
@@ -222,7 +222,7 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<AsyncTaskStatus> _status;
 
 protected:
-    alignas(kHardwareDestructiveInterferenceSize) std::atomic<float> _progress_percent;
+    alignas(kHardwareDestructiveInterferenceSize) std::atomic<int> _progress_percent;
     alignas(kHardwareDestructiveInterferenceSize) mutable std::shared_mutex _result_mutex;
 };
 
@@ -356,7 +356,7 @@ private:
     {
         const auto ret = storage.formatSlot(_dev_path);
         if (ret == 0)
-            _progress_percent.store(100.f, std::memory_order_release);
+            _progress_percent.store(100, std::memory_order_release);
         return ret;
     }
 
@@ -364,7 +364,7 @@ private:
     {
         const auto ret = storage.ejectSlot(_dev_path);
         if (ret == 0)
-            _progress_percent.store(100.f, std::memory_order_release);
+            _progress_percent.store(100, std::memory_order_release);
         return ret;
     }
 
@@ -382,8 +382,9 @@ private:
         const auto cancel_check = [this]() { return cancelRequested(); };
         const auto on_progress = [this, progress](const SlotFileOpsProgress &new_progress) {
             if (new_progress.requested_count > 0)
-                _progress_percent.store(static_cast<float>(new_progress.processed_count)
-                                            / static_cast<float>(new_progress.requested_count) * 100.f,
+                _progress_percent.store(
+                    static_cast<int>(std::roundf(static_cast<float>(new_progress.processed_count)
+                                                 / static_cast<float>(new_progress.requested_count) * 100.f)),
                     std::memory_order_relaxed);
             {
                 const std::unique_lock lock(_result_mutex);
@@ -408,8 +409,9 @@ private:
         const auto cancel_check = [this]() { return cancelRequested(); };
         const auto on_progress = [this, progress](const SlotFileOpsProgress &new_progress) {
             if (new_progress.requested_count > 0)
-                _progress_percent.store(static_cast<float>(new_progress.processed_count)
-                                            / static_cast<float>(new_progress.requested_count) * 100.f,
+                _progress_percent.store(
+                    static_cast<int>(std::roundf(static_cast<float>(new_progress.processed_count)
+                                                 / static_cast<float>(new_progress.requested_count) * 100.f)),
                     std::memory_order_relaxed);
             {
                 const std::unique_lock lock(_result_mutex);
@@ -420,7 +422,7 @@ private:
 
         const auto ret = storage.freeUpSlot(_dev_path, progress.get(), cancel_check, on_progress);
         if (ret == 0)
-            _progress_percent.store(100.f, std::memory_order_release);
+            _progress_percent.store(100, std::memory_order_release);
         return ret;
     }
 
