@@ -204,6 +204,8 @@ public:
         }
         {
             _record_rule_config_store = std::make_unique<ConfigStore>(*_ctx, kRecordRuleConfigName);
+            _record_rule_config = nlohmann::json::object();
+            swapTypedRecordRule<AlwaysOnRule>(AlwaysOnRuleConfig(), []() noexcept { return true; });
             if (nlohmann::json j; _record_rule_config_store->loadFromFile(j) == 0)
                 updateRecordRuleConfig(j, false);
         }

@@ -170,7 +170,7 @@ struct Context
 
     // Shared data
     // Used to control rule evaluation and inference subscriptions
-    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> record_rule_enabled = false;
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> record_rule_enabled = true;
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<int> inference_subscribers = 0;
     // Sync inference results queue, updated in enqueueInferenceResult()
     std::mutex inference_mutex;

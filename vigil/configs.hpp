@@ -343,9 +343,9 @@ struct HTTPRuleConfig
 
 struct AlwaysOnRuleConfig
 {
-    AlwaysOnRuleConfig() = default;
+    AlwaysOnRuleConfig() noexcept = default;
 
-    ~AlwaysOnRuleConfig() = default;
+    ~AlwaysOnRuleConfig() noexcept = default;
 
     bool operator==(const AlwaysOnRuleConfig &) const noexcept
     {
