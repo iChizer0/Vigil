@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <string>
 
-#define JSON_DIAGNOSTICS 1
+#define JSON_DIAGNOSTIC_POSITIONS 1
 
 class CleanJsonException: public std::runtime_error
 {
