@@ -52,6 +52,32 @@ using namespace vigil::utils;
 
 using CancellationCheck = std::function<bool()>;
 
+static inline size_t SystemPreservedUsageProbe() noexcept
+{
+    static const std::chrono::duration<size_t, std::milli> probe_interval = std::chrono::milliseconds(50);
+    static auto last_probe_time = std::chrono::steady_clock::now() - probe_interval;
+    static size_t last_usage = 0;
+
+    if (const auto now = std::chrono::steady_clock::now(); now - last_probe_time >= probe_interval)
+    {
+        struct ::stat st;
+        if (::stat(kStoragePreservedProbeFilePath.data(), &st) == 0)
+            last_usage = st.st_size > 0 ? static_cast<size_t>(st.st_size) : 0;
+        else
+            last_usage = 0;
+        last_probe_time = now;
+    }
+    return last_usage;
+}
+
+static inline size_t GetInternalPreservedLimit() noexcept
+{
+    const auto system_usage = SystemPreservedUsageProbe();
+    return system_usage >= kStorageMinFileSystemFreeBytesInternal
+               ? system_usage
+               : kStorageMinFileSystemFreeBytesInternal - system_usage;
+}
+
 class Slot final
 {
 public:
@@ -523,7 +549,7 @@ protected:
             else if (auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
                          cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_path.c_str(),
                          kStorageThumbnailFileType.c_str(), kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
-                ret != 0)
+                     ret != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to generate thumbnail for cache file ",
                     cache_file_info.path, ", code: ", static_cast<int>(ret));
@@ -657,10 +683,10 @@ private:
         }
 
         // Check if free space is sufficient
-        if (doStats(); _stats.load(std::memory_order_acquire).free_bytes
-                       < (isInternal() ? static_cast<FileSize>(
-                                             watermarks.high_remain_bytes + kStorageMinFileSystemFreeBytesInternal)
-                                       : watermarks.high_remain_bytes))
+        if (doStats();
+            _stats.load(std::memory_order_acquire).free_bytes
+            < (isInternal() ? static_cast<FileSize>(watermarks.high_remain_bytes + GetInternalPreservedLimit())
+                            : watermarks.high_remain_bytes))
             goto l_free_up_space;
 
         _rotating.store(false, std::memory_order_release);
@@ -831,8 +857,8 @@ private:
 
                 // Check if free space is sufficient
                 if (doStats(); _stats.load(std::memory_order_acquire).free_bytes
-                               <= (isInternal() ? static_cast<FileSize>(watermarks.critical_remain_bytes
-                                                                        + kStorageMinFileSystemFreeBytesInternal)
+                               <= (isInternal() ? static_cast<FileSize>(
+                                                      watermarks.critical_remain_bytes + GetInternalPreservedLimit())
                                                 : watermarks.critical_remain_bytes))
                     goto l_continue_log;
 
@@ -1043,8 +1069,12 @@ private:
 
     bool probeCorrectlyMounted() const noexcept
     {
-        struct stat dev_sb {};
-        struct stat mnt_sb {};
+        struct stat dev_sb
+        {
+        };
+        struct stat mnt_sb
+        {
+        };
         bool mount_stats_valid = false;
         bool mount_path_missing = false;
 
@@ -1195,7 +1225,9 @@ private:
 
     bool doStats() const noexcept
     {
-        struct statvfs vfs {};
+        struct statvfs vfs
+        {
+        };
         const std::shared_lock lock(_op_mutex);
         if (::statvfs(_mount_path.c_str(), &vfs) != 0)
         {
