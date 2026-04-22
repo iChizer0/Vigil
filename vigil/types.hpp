@@ -899,7 +899,7 @@ private:
     static inline constexpr const std::array<std::pair<std::string_view, FileSize>, 4> kFormatAverageBytesMap = {
         std::make_pair<std::string_view, FileSize>("MP4", 100 * 1024 * 1024),          // 100 MB per minute
         std::make_pair<std::string_view, FileSize>("JPG", 10 * 1024 * 1024),           // 10 MB per image
-        std::make_pair<std::string_view, FileSize>("RAW", 200 * 1024 * 1024),          // 200 MB per image
+        std::make_pair<std::string_view, FileSize>("RAW", 20 * 1024 * 1024),           // 20 MB per image
         std::make_pair<std::string_view, FileSize>("", kStorageMinFileSystemFreeBytes) // Fallback
     };
 };
