@@ -192,8 +192,7 @@ public:
 
     bool operator==(const LocalTime &other) const noexcept
     {
-        return _local_tm->tm_wday == other._local_tm->tm_wday && _local_tm->tm_hour == other._local_tm->tm_hour
-               && _local_tm->tm_min == other._local_tm->tm_min && _local_tm->tm_sec == other._local_tm->tm_sec;
+        return std::memcmp(&_local_tm_storage, &other._local_tm_storage, sizeof(std::tm)) == 0;
     }
 
 private:

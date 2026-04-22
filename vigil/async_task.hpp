@@ -18,11 +18,10 @@
 #include <unordered_map>
 #include <utility>
 
-#include <nlohmann/json.hpp>
-
 #include "configs.hpp"
 #include "constants.hpp"
 #include "context.hpp"
+#include "json.hpp"
 #include "log.hpp"
 #include "status.hpp"
 #include "storage.hpp"

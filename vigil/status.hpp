@@ -12,9 +12,8 @@
 #include <string_view>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 #include "context.hpp"
+#include "json.hpp"
 #include "types.hpp"
 
 namespace vigil::status {

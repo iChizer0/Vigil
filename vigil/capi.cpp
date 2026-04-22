@@ -11,9 +11,8 @@
 #include <shared_mutex>
 #include <utility>
 
-#include <nlohmann/json.hpp>
-
 #include "inference.pb.h"
+#include "json.hpp"
 #include "vigil.hpp"
 #include "vigil_capi.h"
 #include "vigil_ctypes.h"

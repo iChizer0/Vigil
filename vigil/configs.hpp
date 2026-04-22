@@ -14,9 +14,8 @@
 #include <utility>
 #include <vector>
 
-#include <nlohmann/json.hpp>
-
 #include "context.hpp"
+#include "json.hpp"
 #include "log.hpp"
 #include "types.hpp"
 
@@ -38,7 +37,12 @@ struct InferenceRuleConfig
         j.at("iDebounceTimes").get_to(debounce_times);
         {
             auto &conf_rg = j.at("lConfidenceFilter");
-            confidence_filter = Range<float>(conf_rg.at(0).get<float>(), conf_rg.at(1).get<float>());
+            const auto lb = conf_rg.at(0).get<float>();
+            const auto ub = conf_rg.at(1).get<float>();
+            if (lb > ub || lb < 0.0f || ub > 1.0f)
+                throw Exception("Invalid confidence filter range [" + std::to_string(lb) + ", " + std::to_string(ub)
+                                + "] while parsing inference rule");
+            confidence_filter = Range<float>(lb, ub);
         }
         {
             auto &cls_set = j.at("lClassFilter");
@@ -151,7 +155,7 @@ struct TimerRuleConfig
 
 struct GPIOPinConfig
 {
-    const vg_config_gpio_pin_t *pin;
+    std::unique_ptr<vg_config_gpio_pin_t> pin;
 
     GPIOPinConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]]) : pin(nullptr)
     {
@@ -171,7 +175,8 @@ struct GPIOPinConfig
                 {
                     if (available_pins.pins[i].num == pin_number)
                     {
-                        pin = new (std::nothrow) vg_config_gpio_pin_t { available_pins.pins[i] };
+                        pin = std::make_unique<vg_config_gpio_pin_t>();
+                        std::memcpy(pin.get(), &available_pins.pins[i], sizeof(vg_config_gpio_pin_t));
                         break;
                     }
                 }
@@ -183,7 +188,8 @@ struct GPIOPinConfig
                 {
                     if (pin_name == available_pins.pins[i].name)
                     {
-                        pin = new (std::nothrow) vg_config_gpio_pin_t { available_pins.pins[i] };
+                        pin = std::make_unique<vg_config_gpio_pin_t>();
+                        std::memcpy(pin.get(), &available_pins.pins[i], sizeof(vg_config_gpio_pin_t));
                         break;
                     }
                 }
@@ -199,14 +205,7 @@ struct GPIOPinConfig
             throw Exception("Failed to find GPIO pin in C API while parsing GPIO pin config");
     }
 
-    ~GPIOPinConfig() noexcept
-    {
-        if (pin)
-        {
-            delete pin;
-            pin = nullptr;
-        }
-    }
+    ~GPIOPinConfig() = default;
 };
 
 struct GPIORuleConfig
@@ -223,7 +222,8 @@ struct GPIORuleConfig
         {
             const auto gpio_pin_cfg = GPIOPinConfig(j, ctx);
             if (!gpio_pin_cfg.pin)
-                throw Exception("Failed to find GPIO with name '" + pin_name + "' in C API while parsing GPIO rule");
+                throw Exception("Failed to find GPIO in C API while parsing GPIO rule");
+            pin_name = std::string(gpio_pin_cfg.pin->name);
             pin_number = gpio_pin_cfg.pin->num;
         }
         {
@@ -371,43 +371,12 @@ struct ScheduleRuleConfig
         }
         {
             auto &weekdays_vec = j.at("lActiveWeekdays");
-            // Parse weekday + ISO 8601 time string: "Day HH:MM:SS"
-            auto parse_weekday_local_time = [&](const std::string &time_str) -> LocalTime {
-                char day_buf[8] = {};
-                int h, m, s;
-                if (std::sscanf(time_str.c_str(), "%7s %d:%d:%d", day_buf, &h, &m, &s) != 4)
-                    throw Exception(
-                        "Invalid time format '" + time_str + "' while parsing schedule rule, expected 'Day HH:MM:SS'");
-
-                int d = -1;
-                std::string_view day_sv(day_buf);
-                for (size_t i = 0; i < kTMDayNamesMap.size(); ++i)
-                {
-                    if (day_sv == kTMDayNamesMap[i])
-                    {
-                        d = static_cast<int>(i);
-                        break;
-                    }
-                }
-                if (d < 0)
-                    throw Exception("Invalid day name '" + std::string(day_buf) + "' while parsing schedule rule");
-
-                if (h < 0 || h > 24)
-                    throw Exception("Invalid hour " + std::to_string(h) + " while parsing schedule rule");
-                if (m < 0 || m > 59)
-                    throw Exception("Invalid minute " + std::to_string(m) + " while parsing schedule rule");
-                if (s < 0 || s > 59)
-                    throw Exception("Invalid second " + std::to_string(s) + " while parsing schedule rule");
-                // 24:00:00 is valid (end of day), but 24:01:00 etc. is not
-                if (h == 24 && (m != 0 || s != 0))
-                    throw Exception("Hour 24 is only valid with 00:00 (end-of-day) while parsing schedule rule");
-
-                return LocalTime(d, h, m, s);
-            };
             for (const auto &tr_j: weekdays_vec)
             {
-                auto start = parse_weekday_local_time(tr_j.at("sStart").get<std::string>());
-                auto end = parse_weekday_local_time(tr_j.at("sEnd").get<std::string>());
+                const auto s_str = tr_j.at("sStart").get<std::string>();
+                const auto e_str = tr_j.at("sEnd").get<std::string>();
+                auto start = LocalTimeFromWeekday(s_str);
+                auto end = LocalTimeFromWeekday(e_str);
                 if (start == end)
                     throw Exception("Start time equals end time while parsing schedule rule");
                 active_weekdays.emplace_back(start, end);
@@ -422,21 +391,11 @@ struct ScheduleRuleConfig
         }
         {
             nlohmann::json weekdays_vec = nlohmann::json::array();
-            // Format as "Day HH:MM:SS" string
-            auto format_weekday_local_time = [&](const LocalTime &lt) -> std::string {
-                auto tm = lt.tm();
-                const size_t day_idx
-                    = (tm.tm_wday >= 0 && tm.tm_wday < static_cast<int>(kTMDayNamesMap.size())) ? tm.tm_wday : 0;
-                char buf[20] = {};
-                std::snprintf(buf, sizeof(buf), "%s %02d:%02d:%02d", kTMDayNamesMap[day_idx], tm.tm_hour, tm.tm_min,
-                    tm.tm_sec);
-                return std::string(buf);
-            };
             for (const auto &tr: active_weekdays)
             {
                 nlohmann::json tr_j;
-                tr_j["sStart"] = format_weekday_local_time(tr.start());
-                tr_j["sEnd"] = format_weekday_local_time(tr.end());
+                tr_j["sStart"] = LocalTimeToWeekday(tr.start());
+                tr_j["sEnd"] = LocalTimeToWeekday(tr.end());
                 weekdays_vec.push_back(tr_j);
             }
             j["lActiveWeekdays"] = weekdays_vec;
@@ -446,6 +405,53 @@ struct ScheduleRuleConfig
     bool operator==(const ScheduleRuleConfig &other) const noexcept
     {
         return enabled == other.enabled && active_weekdays == other.active_weekdays;
+    }
+
+private:
+    static inline LocalTime LocalTimeFromWeekday(std::string_view time_str)
+    {
+        // Parse weekday + ISO 8601 time string: "Day HH:MM:SS"
+        char day_buf[8] = {};
+        int h, m, s;
+        if (std::sscanf(time_str.data(), "%7s %d:%d:%d", day_buf, &h, &m, &s) != 4)
+            throw Exception("Invalid time format '" + std::string(time_str)
+                            + "' while parsing schedule rule, expected 'Day HH:MM:SS'");
+
+        int d = -1;
+        std::string_view day_sv(day_buf);
+        for (size_t i = 0; i < kTMDayNamesMap.size(); ++i)
+        {
+            if (day_sv == kTMDayNamesMap[i])
+            {
+                d = static_cast<int>(i);
+                break;
+            }
+        }
+        if (d < 0)
+            throw Exception("Invalid day name '" + std::string(day_buf) + "' while parsing schedule rule");
+
+        if (h < 0 || h > 24)
+            throw Exception("Invalid hour " + std::to_string(h) + " while parsing schedule rule");
+        if (m < 0 || m > 59)
+            throw Exception("Invalid minute " + std::to_string(m) + " while parsing schedule rule");
+        if (s < 0 || s > 59)
+            throw Exception("Invalid second " + std::to_string(s) + " while parsing schedule rule");
+        // 24:00:00 is valid (end of day), but 24:01:00 etc. is not
+        if (h == 24 && (m != 0 || s != 0))
+            throw Exception("Hour 24 is only valid with 00:00 (end-of-day) while parsing schedule rule");
+
+        return LocalTime(d, h, m, s);
+    }
+
+    static inline std::string LocalTimeToWeekday(const LocalTime &lt)
+    {
+        // Format as "Day HH:MM:SS" string
+        auto tm = lt.tm();
+        const size_t day_idx
+            = (tm.tm_wday >= 0 && tm.tm_wday < static_cast<int>(kTMDayNamesMap.size())) ? tm.tm_wday : 0;
+        char buf[32] = { 0 };
+        std::snprintf(buf, sizeof(buf), "%s %02d:%02d:%02d", kTMDayNamesMap[day_idx], tm.tm_hour, tm.tm_min, tm.tm_sec);
+        return std::string(buf);
     }
 };
 
@@ -466,9 +472,12 @@ struct RecordConfig
 
         {
             const auto settings_j = j.at("dWriterConfig");
+            const auto itv_ms = settings_j.at("iIntervalMs").get<long>();
+            if (itv_ms <= 0)
+                throw Exception(
+                    "Invalid recording interval " + std::to_string(itv_ms) + "ms while parsing RecordConfig");
             if (settings = FileWriterSettings::create(settings_j.at("sFormat").get<std::string>(),
-                    std::chrono::milliseconds(settings_j.at("iIntervalMs").get<long>()), kRecordWriterPrefixDefault,
-                    kVideoClipLengthDefault);
+                    std::chrono::milliseconds(itv_ms), kRecordWriterPrefixDefault, kVideoClipLengthDefault);
                 !settings)
                 throw Exception("Failed to create FileWriterSettings while parsing RecordConfig");
         }

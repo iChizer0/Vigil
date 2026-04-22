@@ -23,12 +23,11 @@
 #include <utility>
 #include <variant>
 
-#include <nlohmann/json.hpp>
-
 #include "async_task.hpp"
 #include "configs.hpp"
 #include "constants.hpp"
 #include "context.hpp"
+#include "json.hpp"
 #include "log.hpp"
 #include "rules.hpp"
 #include "status.hpp"
