@@ -62,7 +62,7 @@ static inline size_t SystemPreservedUsageProbe() noexcept
     {
         struct ::stat st;
         if (::stat(kStoragePreservedProbeFilePath.data(), &st) == 0)
-            last_usage = st.st_size > 0 ? static_cast<size_t>(st.st_size) : 0;
+            last_usage = st.st_blocks > 0 ? st.st_blocks * 512 : 0; // st_blocks is in 512-byte units
         else
             last_usage = 0;
         last_probe_time = now;
