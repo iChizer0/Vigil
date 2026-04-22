@@ -524,9 +524,16 @@ public:
 
     bool operator()(const Context &ctx) const noexcept override
     {
+        if (ctx.media_paused.load(std::memory_order_relaxed)
+            || ctx.media_writers_active.load(std::memory_order_relaxed) > 0)
+            return false;
+
         const auto now = ctx.shared_time.steadyTime();
         if (const auto interval = currentInterval(ctx); now - _last_trigger_time >= interval)
         {
+            if (ctx.shared_rule_event.getCurrent())
+                return false;
+
             _last_trigger_time = now;
             return true;
         }
