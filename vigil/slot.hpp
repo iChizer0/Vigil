@@ -1506,7 +1506,6 @@ private:
         "ext4",
         "fat",
         "vfat",
-        "exfat",
     };
     static inline constexpr const std::chrono::milliseconds kManagerProbeInterval = std::chrono::milliseconds(500);
     static inline constexpr const std::chrono::seconds kManagerRecoverDelay = std::chrono::seconds(3);

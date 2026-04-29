@@ -551,15 +551,12 @@ private:
         if (int mount_rc = try_mark(FAN_MARK_MOUNT); mount_rc < 0)
         {
             const int mount_err = errno;
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "FAN_MARK_MOUNT failed: ", std::strerror(mount_err));
-
-            // Some filesystems (e.g., FAT/exFAT or certain network mounts) don't
+            // Some filesystems (e.g., FAT or certain network mounts) don't
             // support FAN_MARK_MOUNT. In those cases, retry with FAN_MARK_FILESYSTEM
             // to keep a single O(1) mark over the whole tree.
             if (int fs_rc = try_mark(FAN_MARK_FILESYSTEM); fs_rc < 0)
             {
                 const int fs_err = errno;
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "FAN_MARK_FILESYSTEM failed: ", std::strerror(fs_err));
 
                 ::close(_fanotify_fd);
                 _fanotify_fd = -1;
@@ -857,7 +854,7 @@ private:
     {
         bool pending_changes = false;
         for (struct fanotify_event_metadata *metadata = reinterpret_cast<struct fanotify_event_metadata *>(buffer);
-            !_shutdown.load(std::memory_order_acquire) && FAN_EVENT_OK(metadata, len);)
+             !_shutdown.load(std::memory_order_acquire) && FAN_EVENT_OK(metadata, len);)
         {
             if (metadata->vers != FANOTIFY_METADATA_VERSION) [[unlikely]]
             {
