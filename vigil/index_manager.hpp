@@ -901,7 +901,7 @@ private:
             }
             catch (const std::exception &e)
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG,
                     "Invalidate all entries and reindex requested due to exception: ", e.what());
                 requestReindex(true);
                 pending_changes = false;
