@@ -8,7 +8,6 @@
 #include <charconv>
 #include <chrono>
 #include <climits>
-#include <compare>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +15,7 @@
 #include <exception>
 #include <filesystem>
 #include <iomanip>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -239,9 +239,9 @@ public:
     };
 
     explicit IndexManager(Context &ctx, const std::string &watch_path)
-        : _ctx(ctx), _watch_path(fs::absolute(watch_path)), _mount_point(detectMountPoint(_watch_path)),
-          _shutdown(false), _indexable(true), _indexing(false), _fanotify_fd(-1), _mount_fd(-1), _generation_current(0),
-          _generation_target(1)
+        : _ctx(ctx), _watch_path(fs::absolute(watch_path).lexically_normal()),
+          _mount_point(detectMountPoint(_watch_path)), _shutdown(false), _indexable(true), _indexing(false),
+          _fanotify_fd(-1), _mount_fd(-1), _generation_current(0), _generation_target(1)
     {
         if (!fs::exists(_watch_path))
             throw std::runtime_error("Watch directory does not exist: " + _watch_path.string());
@@ -568,32 +568,49 @@ private:
         }
     }
 
-    bool isUnderWatchPath(const fs::path &path) const noexcept
+    bool makeRelativeToWatchPath(const fs::path &path, fs::path &rel_path) const noexcept
     {
-        // Check if path starts with watch path
-        const auto &watch_str = _watch_path.native();
-        const auto &path_str = path.native();
-        // Allow exact match (for watch path itself) or proper subpath
-        if (auto ord = path_str.length() <=> watch_str.length(); ord == std::strong_ordering::less)
-            return false;
-        else if (ord == std::strong_ordering::equal)
-            return path_str == watch_str;
-        return path_str.compare(0, watch_str.length(), watch_str) == 0 && (path_str[watch_str.length()] == '/');
-    }
-
-    bool containsHiddenComponent(const fs::path &path) const noexcept
-    {
-        fs::path rel;
         try
         {
-            rel = fs::relative(path, _watch_path);
+            const fs::path normalized_path
+                = path.is_absolute() ? path.lexically_normal() : (_watch_path / path).lexically_normal();
+
+            if (normalized_path == _watch_path)
+            {
+                rel_path.clear();
+                return true;
+            }
+
+            const auto &watch_str = _watch_path.native();
+            const auto &path_str = normalized_path.native();
+
+            if (watch_str == "/")
+            {
+                if (path_str.empty() || path_str.front() != '/')
+                    return false;
+                rel_path = path_str.size() > 1 ? fs::path(path_str.substr(1)) : fs::path();
+                return true;
+            }
+
+            const auto watch_len = watch_str.length();
+            if (path_str.length() <= watch_len || path_str.compare(0, watch_len, watch_str) != 0
+                || path_str[watch_len] != '/')
+                return false;
+
+            rel_path = fs::path(path_str.substr(watch_len + 1));
+            return true;
         }
         catch (const std::exception &e)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to compute relative path for: ", path, ", error: ", e.what());
-            return true; // Treat errors as hidden components
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Failed to compute lexical relative path for: ", path,
+                ", error: ", e.what());
+            return false;
         }
-        for (const auto &component: rel)
+    }
+
+    static bool containsHiddenComponent(const fs::path &rel_path) noexcept
+    {
+        for (const auto &component: rel_path)
         {
             if (component.native().starts_with('.'))
                 return true;
@@ -1006,42 +1023,31 @@ private:
 
     EventResult handleEvent(uint64_t mask, const fs::path &path) noexcept
     {
-        if (path == _watch_path)
-            return EventResult::REINDEX_IMMEDIATELY;
-        if (!isUnderWatchPath(path) || containsHiddenComponent(path))
+        fs::path rel_path;
+        if (!makeRelativeToWatchPath(path, rel_path))
             return EventResult::SKIPPED;
-        return tryIncrementalUpdate(mask, path);
-    }
-
-    EventResult tryIncrementalUpdate(uint64_t mask, const fs::path &path) noexcept
-    {
-        // Handle root removal incrementally
-        if (mask & FAN_DELETE_SELF)
+        if (rel_path.empty())
         {
-            if (path == _watch_path)
+            if (mask & (FAN_DELETE_SELF | FAN_MOVE_SELF))
             {
                 handleRootRemoved();
                 return EventResult::SKIPPED;
             }
+            return EventResult::REINDEX_IMMEDIATELY;
         }
+        if (containsHiddenComponent(rel_path))
+            return EventResult::SKIPPED;
+        return tryIncrementalUpdate(mask, path, rel_path);
+    }
 
-        // Get relative path from watch path
-        fs::path rel_path;
-        try
-        {
-            rel_path = fs::relative(path, _watch_path);
-        }
-        catch (...)
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to compute relative path for incremental update: ", path);
-            return EventResult::REINDEX;
-        }
+    EventResult tryIncrementalUpdate(uint64_t mask, const fs::path &path, const fs::path &rel_path) noexcept
+    {
         if (rel_path.empty() || rel_path == ".")
             return EventResult::REINDEX; // Path is the watch path itself
 
         // Get the first component (entry name) and check if it's nested
         auto it = rel_path.begin();
-        const std::string &entry_name = it->native();
+        const std::string entry_name = it->native();
         const bool is_nested = std::next(it, 1) != rel_path.end();
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Attempting incremental update for entry: ", std::quoted(entry_name),
             ", nested: ", is_nested, ", mask: ", VG_HEX(mask, 8));
