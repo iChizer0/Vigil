@@ -141,16 +141,7 @@ public:
     }
 
     vg_sta_e removeFilesOrDirectories(const std::string &slot_dev_path,
-        std::vector<std::filesystem::path> &relative_paths)
-    {
-        SlotFileOpsProgress progress(SlotFileOpsProgress::Type::Remove);
-        const auto ret = removeFilesOrDirectories(slot_dev_path, relative_paths, &progress);
-        relative_paths = std::move(progress.success_paths);
-        return ret;
-    }
-
-    vg_sta_e removeFilesOrDirectories(const std::string &slot_dev_path,
-        const std::vector<std::filesystem::path> &relative_paths, SlotFileOpsProgress *progress,
+        const std::vector<std::filesystem::path> &relative_paths, SlotFileOpsProgress *progress = nullptr,
         const CancellationCheck &should_cancel = {}, const SlotFileOpsProgressCallback &on_progress = {})
     {
         std::shared_ptr<Slot> slot;

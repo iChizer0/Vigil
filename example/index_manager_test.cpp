@@ -3,7 +3,9 @@
 #include <iostream>
 #include <thread>
 
-#include "vigil/vigil.hpp"
+#include "vigil/context.hpp"
+#include "vigil/index_manager.hpp"
+#include "vigil_ctypes.h"
 
 void print_size(const auto &result)
 {

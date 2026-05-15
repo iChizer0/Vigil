@@ -21,7 +21,7 @@
 #include "configs.hpp"
 #include "constants.hpp"
 #include "context.hpp"
-#include "json.hpp"
+#include "json.hpp" // IWYU pragma: keep
 #include "log.hpp"
 #include "status.hpp"
 #include "storage.hpp"
@@ -298,8 +298,8 @@ protected:
             j["iProcessedCount"] = _action_result.file_ops_progress->processed_count;
             j["iSuccessCount"] = _action_result.file_ops_progress->success_count;
             j["iFailedCount"] = _action_result.file_ops_progress->failed_count;
-            // Skip reporting individual paths for now to avoid potential performance overhead of serializing large
-            // lists of paths
+            // Intentionally report aggregate counts only; retaining per-path results can become expensive for large
+            // storage operations.
         }
     }
 

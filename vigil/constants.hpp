@@ -5,7 +5,6 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
-#include <string>
 #include <string_view>
 
 namespace vigil::constants {
@@ -43,7 +42,7 @@ static inline constexpr const std::string_view kStorageMountBasePath = "/mnt";
 static inline constexpr const char *kStorageFirstLevelDirNameTimeFormat = "%Y-%m-%d";
 static inline constexpr const char *kStorageFileNamePrefixTimeFormat = "%H.%M.%S";
 static inline constexpr const std::string_view kStorageThumbnailDirName = ".thumb";
-static inline constexpr const std::string kStorageThumbnailFileType = "JPG";
+static inline constexpr const char *kStorageThumbnailFileType = "JPG";
 static inline constexpr const std::string_view kStorageThumbnailFileExt = ".thumb.jpg";
 static inline constexpr const int kStorageThumbnailMaxWH = 1024;
 static inline constexpr const size_t kStorageNetlinkBufferSize = 4096;

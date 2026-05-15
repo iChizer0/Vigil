@@ -32,6 +32,19 @@ using namespace vigil::constants;
 using namespace vigil::types;
 using namespace vigil::index_manager;
 
+namespace detail {
+
+    template<class... Ts>
+    struct Overloaded: Ts...
+    {
+        using Ts::operator()...;
+    };
+
+    template<class... Ts>
+    Overloaded(Ts...) -> Overloaded<Ts...>;
+
+} // namespace detail
+
 // - MARK: Adaptable Writer
 
 template<typename T>
@@ -183,7 +196,8 @@ protected:
 
     inline bool shouldContinueWritingImpl() const noexcept
     {
-        return this->ctxRef().shared_writer_settings.getRevision() == _settings_revision && _slot.isReadyToWrite();
+        return this->ctxRef().record_rule_enabled.load(std::memory_order_relaxed)
+               && this->ctxRef().shared_writer_settings.getRevision() == _settings_revision && _slot.isReadyToWrite();
     }
 
     inline void onThumbnailFrameImpl(const MediaFrame::FrameType &frame) noexcept
@@ -562,15 +576,6 @@ private:
         return _is_clip_finish;
     }
 
-    template<class... Ts>
-    struct Overloaded: Ts...
-    {
-        using Ts::operator()...;
-    };
-
-    template<class... Ts>
-    Overloaded(Ts...) -> Overloaded<Ts...>;
-
     inline bool writeMediaFrame(const MediaFrame &media_frame) noexcept
     {
         if (!media_frame.frame)
@@ -578,32 +583,32 @@ private:
             VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_WARN, "Media frame is empty, skipping write");
             return false;
         }
-        return std::visit(Overloaded { [&](const VideoFrame &vf) {
-                                          const auto video_frame = vf.toRef();
-                                          const auto ret = this->ctxRef().c_api.media.video_file_write_video_frame_cb(
-                                              _fd, &video_frame, this->ctxRef().c_api.media.user_data);
-                                          if (ret != 0)
-                                          {
-                                              VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
-                                                  "Failed to write video frame to file with fd ", _fd,
-                                                  ", code: ", static_cast<int>(ret));
-                                              return false;
-                                          }
-                                          return true;
-                                      },
-                              [&](const AudioFrame &af) {
-                                  const auto audio_frame = af.toRef();
-                                  const auto ret = this->ctxRef().c_api.media.video_file_write_audio_frame_cb(_fd,
-                                      &audio_frame, this->ctxRef().c_api.media.user_data);
-                                  if (ret != 0)
-                                  {
-                                      VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
-                                          "Failed to write audio frame to file with fd ", _fd,
-                                          ", code: ", static_cast<int>(ret));
-                                      return false;
-                                  }
-                                  return true;
-                              } },
+        return std::visit(
+            detail::Overloaded { [&](const VideoFrame &vf) {
+                                    const auto video_frame = vf.toRef();
+                                    const auto ret = this->ctxRef().c_api.media.video_file_write_video_frame_cb(_fd,
+                                        &video_frame, this->ctxRef().c_api.media.user_data);
+                                    if (ret != 0)
+                                    {
+                                        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                                            "Failed to write video frame to file with fd ", _fd,
+                                            ", code: ", static_cast<int>(ret));
+                                        return false;
+                                    }
+                                    return true;
+                                },
+                [&](const AudioFrame &af) {
+                    const auto audio_frame = af.toRef();
+                    const auto ret = this->ctxRef().c_api.media.video_file_write_audio_frame_cb(_fd, &audio_frame,
+                        this->ctxRef().c_api.media.user_data);
+                    if (ret != 0)
+                    {
+                        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "Failed to write audio frame to file with fd ",
+                            _fd, ", code: ", static_cast<int>(ret));
+                        return false;
+                    }
+                    return true;
+                } },
             *media_frame.frame);
     }
 

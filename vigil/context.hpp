@@ -311,6 +311,14 @@ struct Context
                 else
                     return;
             }
+
+            if (queue.empty() || queue.back().time_stamp <= frame.time_stamp) [[likely]]
+            {
+                queue.emplace_back(std::forward<T>(frame));
+                tryDropFramesInternal();
+                return;
+            }
+
             auto rit = queue.crbegin();
             for (; rit != queue.crend(); ++rit)
             {
@@ -322,7 +330,7 @@ struct Context
         }
 
     private:
-        inline void tryDropFramesInternal() noexcept
+        void tryDropFramesInternal() noexcept
         {
             auto s = queue.begin();
             auto e = queue.begin();

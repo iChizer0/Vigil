@@ -1,4 +1,5 @@
 #pragma once
+#include <vector>
 #ifndef VIGIL_INDEX_MANAGER_HPP
 #define VIGIL_INDEX_MANAGER_HPP
 
@@ -22,6 +23,7 @@
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <unordered_set>
@@ -395,22 +397,64 @@ private:
     {
         bool remove_self = false;
         size_t removed_size = 0;
+
         try
         {
-            for (const auto &entry: fs::directory_iterator(entry_path, fs::directory_options::skip_permission_denied))
+            std::vector<std::string> entry_to_remove;
+            std::error_code ec;
+            for (const auto &entry:
+                fs::directory_iterator(entry_path, fs::directory_options::skip_permission_denied, ec))
             {
-                if (removed_size >= target_size_bytes)
-                    break;
-                size_t size = 0;
-                if (auto sta = indexFileOrSubdirectory(entry.path(), size); sta == IndexStatus::SUCCESS)
+                if (ec)
                 {
-                    RemoveWithThumbnailCheck(entry.path());
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to iterate entry ", entry.path(), ": ", ec.message());
+                    continue;
+                }
+                entry_to_remove.emplace_back(entry.path().filename().string());
+            }
+            // Sort paths to ensure deterministic order of removal, A-Z, hidden files (starting with .) will be removed
+            // last
+            std::sort(entry_to_remove.begin(), entry_to_remove.end());
+            for (auto it = entry_to_remove.begin(); it != entry_to_remove.end() && removed_size < target_size_bytes;)
+            {
+                if (it->starts_with('.'))
+                {
+                    ++it;
+                    continue; // Skip hidden files until the end
+                }
+
+                const auto p = entry_path / *it;
+                size_t size = 0;
+                if (auto sta = indexFileOrSubdirectory(p, size); sta == IndexStatus::SUCCESS)
+                {
+                    RemoveWithThumbnailCheck(p);
+                    it = entry_to_remove.erase(it);
                     removed_size += size;
                 }
                 else if (sta == IndexStatus::PARTIAL)
                 {
-                    remove_self = true;
+                    ++it;
+                    continue;
+                }
+                else if (sta == IndexStatus::CANCELED)
+                {
                     break;
+                }
+            }
+
+            for (auto it = entry_to_remove.begin(); it != entry_to_remove.end() && removed_size < target_size_bytes;
+                 ++it)
+            {
+                const auto p = entry_path / *it;
+                size_t size = 0;
+                if (auto sta = indexFileOrSubdirectory(p, size); sta == IndexStatus::SUCCESS)
+                {
+                    RemoveWithThumbnailCheck(p);
+                    removed_size += size;
+                }
+                else if (sta == IndexStatus::PARTIAL)
+                {
+                    continue;
                 }
                 else if (sta == IndexStatus::CANCELED)
                 {
@@ -699,12 +743,18 @@ private:
     bool indexRootEntries(DIR &dir, const fs::path &dir_path)
     {
         std::unordered_set<std::string> seen_entries;
+        {
+            const std::shared_lock entries_lock(_entries_mutex);
+            seen_entries.reserve(_entries.size());
+        }
         bool partial_index = false;
         for (struct dirent *entry; (entry = ::readdir(&dir)) != nullptr;)
         {
-            const std::string name = entry->d_name;
-            if (name.starts_with('.'))
+            const std::string_view name_view = entry->d_name;
+            if (name_view.starts_with('.'))
                 continue; // Skip ., .. and hidden files and directories
+
+            const std::string name(name_view);
 
             seen_entries.insert(name);
 

@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "context.hpp"
-#include "json.hpp"
+#include "json.hpp" // IWYU pragma: keep
 #include "types.hpp"
 
 namespace vigil::status {
@@ -51,9 +51,6 @@ struct SlotFileOpsProgress
     size_t processed_count = 0;
     size_t success_count = 0;
     size_t failed_count = 0;
-
-    std::vector<std::filesystem::path> success_paths;
-    std::vector<std::pair<std::filesystem::path, int>> failed_paths_with_errnos;
 
     explicit SlotFileOpsProgress(Type t) : type(t) { }
 

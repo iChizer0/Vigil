@@ -691,7 +691,7 @@ struct BaseFrame: public NonCopyable<BaseFrame>
     {
         if (data_ && bytes_len_ > 0)
         {
-            if (data = new (std::nothrow) uint8_t[bytes_len_]; data)
+            if (data = new uint8_t[bytes_len_]; data)
                 std::memcpy(data, data_, bytes_len_);
         }
     }

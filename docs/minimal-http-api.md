@@ -354,10 +354,7 @@ The payload depends on the `sTask` field.
         "iRelayTimeoutRemain": 25, // Integer, relay timeout remain in seconds
         "iRelayTimeout": 300, // Integer, relay timeout in seconds
         "sRelayDirectory": "..." // String, relay directory name
-    },
-    "lRemovedFilesOrDirectories": [ // Array of strings (optional), present only for "REMOVE_FILES_OR_DIRECTORIES" on success
-        "DCIM/20251016/event.mp4" // String, successfully removed path
-    ]
+    }
 }
 ```
 
@@ -451,7 +448,8 @@ Runtime notes:
 - Queue limit: 6 pending tasks.
 - History limit: 3 completed tasks per `{sAction, sSlotDevPath}`.
 - If no entries match, `lTasks` / `lCancelledTasks` are omitted and the response may be just `{ "code": 0 }`.
-- Sync `REMOVE_FILES_OR_DIRECTORIES` returns only successfully removed paths; failed-path detail is not exposed.
+- Sync `REMOVE_FILES_OR_DIRECTORIES` reports aggregate success or failure through the common `code` / `message` fields only; per-path results are not returned.
+- Async `REMOVE_FILES_OR_DIRECTORIES` exposes aggregate progress counts in `dResult`, but does not expose per-path result lists.
 
 ## Capture API
 

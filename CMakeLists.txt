@@ -10,6 +10,11 @@ option(VIGIL_BUILD_EXAMPLES "Build example executables" ON)
 option(VIGIL_USE_SYSTEM_NLOHMANN_JSON "Use system-provided nlohmann_json" OFF)
 option(VIGIL_USE_SYSTEM_PROTOBUF "Use system-provided Protobuf" OFF)
 option(VIGIL_USE_BUILDROOT_SYSROOT "Use Buildroot sysroot for cross-compilation" OFF)
+option(VIGIL_ENABLE_JEMALLOC "Route C++ global new/delete through jemalloc" ON)
+option(VIGIL_USE_SYSTEM_JEMALLOC "Use system-provided jemalloc instead of the bundled submodule" OFF)
+set(VIGIL_JEMALLOC_CONFIGURE_HOST "" CACHE STRING "Optional --host triplet passed to bundled jemalloc configure")
+
+include(GNUInstallDirs)
 
 if(NOT VIGIL_USE_BUILDROOT_SYSROOT)
 	set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -62,6 +67,131 @@ if(VIGIL_USE_BUILDROOT_SYSROOT)
 	# Set pkg-config to look in the buildroot sysroot
 	set(ENV{PKG_CONFIG_SYSROOT_DIR} "${BUILDROOT_SYSROOT}")
 	set(ENV{PKG_CONFIG_LIBDIR} "${BUILDROOT_SYSROOT}/usr/lib/pkgconfig:${BUILDROOT_SYSROOT}/usr/lib64/pkgconfig:${BUILDROOT_SYSROOT}/usr/share/pkgconfig")
+endif()
+
+set(VIGIL_JEMALLOC_TARGET)
+set(VIGIL_JEMALLOC_EXTERNAL_PROJECT)
+if(VIGIL_ENABLE_JEMALLOC)
+	if(VIGIL_USE_SYSTEM_JEMALLOC)
+		pkg_check_modules(JEMALLOC REQUIRED IMPORTED_TARGET jemalloc)
+		set(VIGIL_JEMALLOC_TARGET PkgConfig::JEMALLOC)
+	else()
+		set(VIGIL_JEMALLOC_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/jemalloc")
+		if(NOT EXISTS "${VIGIL_JEMALLOC_SOURCE_DIR}/autogen.sh")
+			execute_process(
+				COMMAND git submodule update --init --recursive 3rdparty/jemalloc
+				WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+				RESULT_VARIABLE JEMALLOC_SUBMODULE_RESULT
+			)
+			if(NOT JEMALLOC_SUBMODULE_RESULT EQUAL 0)
+				message(FATAL_ERROR "Failed to fetch jemalloc submodule (exit code ${JEMALLOC_SUBMODULE_RESULT})")
+			endif()
+		endif()
+
+		find_program(VIGIL_MAKE_EXECUTABLE NAMES gmake make REQUIRED)
+		find_program(VIGIL_AUTOCONF_EXECUTABLE NAMES autoconf REQUIRED)
+		include(ExternalProject)
+		if(CMAKE_CROSSCOMPILING AND NOT VIGIL_JEMALLOC_CONFIGURE_HOST)
+			if(CMAKE_C_COMPILER_TARGET)
+				set(VIGIL_JEMALLOC_CONFIGURE_HOST "${CMAKE_C_COMPILER_TARGET}")
+			else()
+				get_filename_component(VIGIL_C_COMPILER_NAME "${CMAKE_C_COMPILER}" NAME)
+				if(VIGIL_C_COMPILER_NAME MATCHES "^(.+)-(gcc|cc|clang)(-[0-9.]+)?$")
+					set(VIGIL_JEMALLOC_CONFIGURE_HOST "${CMAKE_MATCH_1}")
+				endif()
+			endif()
+			if(NOT VIGIL_JEMALLOC_CONFIGURE_HOST)
+				message(FATAL_ERROR "Cross-compiling bundled jemalloc requires -DVIGIL_JEMALLOC_CONFIGURE_HOST=<target-triplet> (for example arm-linux-gnueabihf).")
+			endif()
+			message(STATUS "Using jemalloc configure host triplet: ${VIGIL_JEMALLOC_CONFIGURE_HOST}")
+		endif()
+		execute_process(
+			COMMAND git -C "${VIGIL_JEMALLOC_SOURCE_DIR}" describe --tags --long --match [0-9]*
+			OUTPUT_VARIABLE VIGIL_JEMALLOC_VERSION
+			RESULT_VARIABLE VIGIL_JEMALLOC_VERSION_RESULT
+			OUTPUT_STRIP_TRAILING_WHITESPACE
+			ERROR_QUIET
+		)
+		if(VIGIL_JEMALLOC_VERSION_RESULT EQUAL 0 AND VIGIL_JEMALLOC_VERSION)
+			set(VIGIL_JEMALLOC_VERSION_ARG "--with-version=${VIGIL_JEMALLOC_VERSION}")
+		else()
+			set(VIGIL_JEMALLOC_VERSION_ARG "--with-version=VERSION")
+		endif()
+
+		set(VIGIL_JEMALLOC_PREFIX_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/jemalloc-project")
+		set(VIGIL_JEMALLOC_EP_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/jemalloc-src")
+		set(VIGIL_JEMALLOC_INSTALL_DIR "${CMAKE_CURRENT_BINARY_DIR}/_deps/jemalloc-install")
+		set(VIGIL_JEMALLOC_BUILD_LIBRARY "${VIGIL_JEMALLOC_EP_SOURCE_DIR}/lib/libjemalloc_pic.a")
+		set(VIGIL_JEMALLOC_LIBRARY "${VIGIL_JEMALLOC_INSTALL_DIR}/lib/libjemalloc_pic.a")
+		file(MAKE_DIRECTORY "${VIGIL_JEMALLOC_INSTALL_DIR}/include" "${VIGIL_JEMALLOC_INSTALL_DIR}/lib")
+
+		set(VIGIL_JEMALLOC_CONFIGURE_ARGS
+			--prefix=<INSTALL_DIR>
+			--with-jemalloc-prefix=je_
+			${VIGIL_JEMALLOC_VERSION_ARG}
+			--disable-cxx
+			--disable-shared
+			--enable-static
+		)
+		if(VIGIL_JEMALLOC_CONFIGURE_HOST)
+			list(APPEND VIGIL_JEMALLOC_CONFIGURE_ARGS "--host=${VIGIL_JEMALLOC_CONFIGURE_HOST}")
+		endif()
+
+		set(VIGIL_JEMALLOC_CONFIGURE_ENV
+			"CC=${CMAKE_C_COMPILER}"
+			"CXX=${CMAKE_CXX_COMPILER}"
+		)
+		foreach(tool AR RANLIB STRIP)
+			if(CMAKE_${tool})
+				list(APPEND VIGIL_JEMALLOC_CONFIGURE_ENV "${tool}=${CMAKE_${tool}}")
+			endif()
+		endforeach()
+		if(CMAKE_C_FLAGS)
+			list(APPEND VIGIL_JEMALLOC_CONFIGURE_ENV "CFLAGS=${CMAKE_C_FLAGS}")
+		endif()
+		if(CMAKE_CXX_FLAGS)
+			list(APPEND VIGIL_JEMALLOC_CONFIGURE_ENV "CXXFLAGS=${CMAKE_CXX_FLAGS}")
+		endif()
+		set(VIGIL_JEMALLOC_SYSROOT "${CMAKE_SYSROOT}")
+		if(NOT VIGIL_JEMALLOC_SYSROOT AND VIGIL_USE_BUILDROOT_SYSROOT)
+			set(VIGIL_JEMALLOC_SYSROOT "${BUILDROOT_SYSROOT}")
+		endif()
+		if(VIGIL_JEMALLOC_SYSROOT)
+			list(APPEND VIGIL_JEMALLOC_CONFIGURE_ENV
+				"CPPFLAGS=--sysroot=${VIGIL_JEMALLOC_SYSROOT}"
+				"LDFLAGS=--sysroot=${VIGIL_JEMALLOC_SYSROOT}"
+			)
+		endif()
+
+		ExternalProject_Add(vigil_jemalloc_project
+			PREFIX "${VIGIL_JEMALLOC_PREFIX_DIR}"
+			SOURCE_DIR "${VIGIL_JEMALLOC_EP_SOURCE_DIR}"
+			INSTALL_DIR "${VIGIL_JEMALLOC_INSTALL_DIR}"
+			DOWNLOAD_COMMAND ${CMAKE_COMMAND} -E rm -rf <SOURCE_DIR>
+				COMMAND ${CMAKE_COMMAND} -E copy_directory "${VIGIL_JEMALLOC_SOURCE_DIR}" <SOURCE_DIR>
+			UPDATE_COMMAND ""
+			PATCH_COMMAND ""
+			CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ${VIGIL_JEMALLOC_CONFIGURE_ENV} <SOURCE_DIR>/autogen.sh ${VIGIL_JEMALLOC_CONFIGURE_ARGS}
+			BUILD_COMMAND ${VIGIL_MAKE_EXECUTABLE} build_lib_static
+			INSTALL_COMMAND ${VIGIL_MAKE_EXECUTABLE} install_lib_static install_include
+			BUILD_IN_SOURCE TRUE
+			BUILD_BYPRODUCTS "${VIGIL_JEMALLOC_BUILD_LIBRARY}"
+			INSTALL_BYPRODUCTS "${VIGIL_JEMALLOC_LIBRARY}"
+		)
+
+		add_library(vigil_jemalloc STATIC IMPORTED GLOBAL)
+		set_target_properties(vigil_jemalloc PROPERTIES
+			IMPORTED_LOCATION "${VIGIL_JEMALLOC_LIBRARY}"
+			INTERFACE_INCLUDE_DIRECTORIES "${VIGIL_JEMALLOC_INSTALL_DIR}/include"
+		)
+		add_dependencies(vigil_jemalloc vigil_jemalloc_project)
+		set(VIGIL_JEMALLOC_TARGET
+			$<BUILD_INTERFACE:vigil_jemalloc>
+			$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/${CMAKE_INSTALL_LIBDIR}/libjemalloc_pic.a>
+		)
+		set(VIGIL_JEMALLOC_INSTALL_LIBRARY "${VIGIL_JEMALLOC_LIBRARY}")
+		set(VIGIL_JEMALLOC_EXTERNAL_PROJECT vigil_jemalloc_project)
+	endif()
 endif()
 
 pkg_check_modules(BLKID QUIET blkid)
@@ -149,9 +279,14 @@ add_library(vigil::vigil ALIAS vigil)
 target_sources(vigil
 	PRIVATE
 		vigil/capi.cpp
+		$<$<BOOL:${VIGIL_ENABLE_JEMALLOC}>:vigil/allocator.cpp>
 		${PROTO_SRCS}
 		${PROTO_HDRS}
 )
+
+if(VIGIL_ENABLE_JEMALLOC AND VIGIL_JEMALLOC_EXTERNAL_PROJECT)
+	add_dependencies(vigil ${VIGIL_JEMALLOC_EXTERNAL_PROJECT})
+endif()
 
 target_include_directories(vigil
 	PUBLIC
@@ -182,6 +317,7 @@ target_link_libraries(vigil
 		nlohmann_json::nlohmann_json
 		${Protobuf_LIBRARIES}
 		${BLKID_LIBRARIES}
+		${VIGIL_JEMALLOC_TARGET}
 		atomic
 )
 
@@ -211,7 +347,9 @@ if(VIGIL_BUILD_EXAMPLES)
 	target_compile_options(vigil_mask_test PRIVATE -std=c++20)
 endif()
 
-include(GNUInstallDirs)
+if(VIGIL_ENABLE_JEMALLOC AND VIGIL_JEMALLOC_INSTALL_LIBRARY)
+	install(FILES "${VIGIL_JEMALLOC_INSTALL_LIBRARY}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
 
 install(TARGETS vigil
 	EXPORT VigilTargets

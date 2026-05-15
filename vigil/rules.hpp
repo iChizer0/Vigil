@@ -193,7 +193,7 @@ private:
         {
             if (!(_conf_rg & det.confidence))
                 continue;
-            if (!_cls_set.empty() && std::find(_cls_set.begin(), _cls_set.end(), det.class_name) == _cls_set.end())
+            if (!_cls_set.empty() && !_cls_set.contains(det.class_name))
                 continue;
             if (_msk_rng
                 && !_msk_rng->at(static_cast<size_t>((det.object.top_left.x + det.object.bottom_right.x) >> 1),
@@ -232,7 +232,7 @@ private:
     int _active_times_min;
 
     Range<float> _conf_rg;
-    std::vector<std::string> _cls_set;
+    std::unordered_set<std::string> _cls_set;
     std::unique_ptr<Mask<kMaskWidth, kMaskHeight>> _msk_rng;
 };
 
@@ -272,6 +272,7 @@ public:
     }
 
 private:
+    std::unordered_set<std::string> _activated_rule_ids;
     std::vector<std::unique_ptr<InferenceRule>> _rules;
     mutable std::string _last_activated_id;
 };

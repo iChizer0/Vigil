@@ -27,7 +27,7 @@
 #include "configs.hpp"
 #include "constants.hpp"
 #include "context.hpp"
-#include "json.hpp"
+#include "json.hpp" // IWYU pragma: keep
 #include "log.hpp"
 #include "rules.hpp"
 #include "status.hpp"
@@ -882,13 +882,10 @@ public:
                             if (!control_config.files_or_directories_to_remove)
                                 throw Exception(
                                     "Missing files or directories to remove for RemoveFilesOrDirectories action");
-                            auto to_remove = *control_config.files_or_directories_to_remove;
-                            if (ret = _storage->removeFilesOrDirectories(control_config.slot_dev_path, to_remove);
+                            if (ret = _storage->removeFilesOrDirectories(control_config.slot_dev_path,
+                                    *control_config.files_or_directories_to_remove);
                                 ret != 0)
                                 throw Exception("Failed to remove files or directories on storage slot");
-                            res_j["lRemovedFilesOrDirectories"] = nlohmann::json::array();
-                            for (const auto &path: to_remove)
-                                res_j["lRemovedFilesOrDirectories"].emplace_back(path.string());
                         }
                         break;
                         default:

@@ -161,7 +161,7 @@ public:
 
     std::shared_ptr<IndexManager> getIndexManager() const noexcept
     {
-        return _index_manager.load(std::memory_order_acquire);
+        return loadIndexManager();
     }
 
     SlotStatus getStatus() const noexcept
@@ -177,7 +177,7 @@ public:
             uuid = _uuid;
             format = _type;
         }
-        const auto idx_mgr = _index_manager.load(std::memory_order_acquire);
+        const auto idx_mgr = loadIndexManager();
         return SlotStatus {
             .dev_path = _dev_path,
             .mount_path = _mount_path,
@@ -301,7 +301,7 @@ public:
         }
 
         // Reset index manager
-        _index_manager.store(nullptr, std::memory_order_release);
+        storeIndexManager(nullptr);
 
         // Reset rotating status
         _rotating.store(false, std::memory_order_release);
@@ -370,6 +370,7 @@ public:
         auto &active_progress = progress ? *progress : local_progress;
         active_progress = SlotFileOpsProgress(SlotFileOpsProgress::Type::Remove);
         active_progress.requested_count = relative_paths.size();
+        vg_sta_e ret = 0;
 
         auto update_progress = [&]() {
             if (on_progress)
@@ -385,14 +386,12 @@ public:
 
             try
             {
-                if (const auto ret = removeFileOrDirectory(relative_path); ret == 0)
-                {
-                    active_progress.success_paths.emplace_back(relative_path);
+                if (const auto path_ret = removeFileOrDirectory(relative_path); path_ret == 0)
                     ++active_progress.success_count;
-                }
                 else
                 {
-                    active_progress.failed_paths_with_errnos.emplace_back(relative_path, ret);
+                    if (ret == 0)
+                        ret = path_ret;
                     ++active_progress.failed_count;
                 }
             }
@@ -400,6 +399,8 @@ public:
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Exception occurred while removing file or directory ",
                     relative_path, " on slot with device path ", _dev_path, ": ", e.what());
+                if (ret == 0)
+                    ret = EIO;
                 ++active_progress.failed_count;
             }
 
@@ -407,7 +408,7 @@ public:
             update_progress();
         }
 
-        return 0;
+        return ret;
     }
 
     vg_sta_e freeUpUsedSpace(SlotFileOpsProgress *progress = nullptr, const CancellationCheck &should_cancel = {},
@@ -428,35 +429,37 @@ public:
 
         try
         {
-            std::vector<std::filesystem::path> entries;
-            for (const auto &entry: std::filesystem::directory_iterator(getRecordRootPath(),
-                     std::filesystem::directory_options::skip_permission_denied))
-            {
-                const auto &file_name = entry.path().filename().string();
-                if (file_name.starts_with('.'))
-                    continue; // Skip hidden files and dirs
-                entries.emplace_back(entry.path());
-            }
+            const auto record_root_path = getRecordRootPath();
+            const auto is_hidden_entry = [](const std::filesystem::directory_entry &entry) {
+                const auto file_name = entry.path().filename();
+                const auto &native_name = file_name.native();
+                return !native_name.empty()
+                       && native_name.front() == static_cast<std::filesystem::path::value_type>('.');
+            };
 
-            active_progress.requested_count = entries.size();
             update_progress();
 
-            // Skip adding per-entry paths to the progress record to avoid the memory overhead of retaining and
-            // serializing potentially large path lists during quota-driven eviction.
-            for (const auto &entry_path: entries)
+            for (const auto &entry: std::filesystem::directory_iterator(record_root_path,
+                     std::filesystem::directory_options::skip_permission_denied))
             {
                 if (should_cancel && should_cancel())
                 {
                     ret = ECANCELED;
                     break;
                 }
+                if (is_hidden_entry(entry))
+                    continue; // Skip hidden files and dirs
+                ++active_progress.requested_count;
 
+                const auto entry_path = entry.path();
                 std::error_code ec;
                 std::filesystem::remove_all(entry_path, ec);
                 if (ec)
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove file or directory: ", entry_path,
                         ", error: ", ec.message());
+                    if (ret == 0)
+                        ret = EIO;
                     ++active_progress.failed_count;
                 }
                 else
@@ -471,7 +474,7 @@ public:
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to iterate record root path for freeing up space: ", e.what());
             ret = EIO;
         }
-        if (auto idx_mgr = _index_manager.load(std::memory_order_acquire); idx_mgr)
+        if (auto idx_mgr = loadIndexManager(); idx_mgr)
             idx_mgr->requestReindex(true);
 
         return ret;
@@ -548,7 +551,7 @@ protected:
             }
             else if (auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
                          cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_path.c_str(),
-                         kStorageThumbnailFileType.c_str(), kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
+                         kStorageThumbnailFileType, kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
                      ret != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to generate thumbnail for cache file ",
@@ -632,6 +635,17 @@ protected:
     // - MARK: Slot Private Methods
 
 private:
+    std::shared_ptr<IndexManager> loadIndexManager(std::memory_order order = std::memory_order_acquire) const noexcept
+    {
+        return std::atomic_load_explicit(&_index_manager, order);
+    }
+
+    void storeIndexManager(std::shared_ptr<IndexManager> index_manager,
+        std::memory_order order = std::memory_order_release) const noexcept
+    {
+        std::atomic_store_explicit(&_index_manager, index_manager, order);
+    }
+
     void resetWriteStatsUnsafe()
     {
         _write_stats.reset();
@@ -663,7 +677,7 @@ private:
         }
 
         // Get index manager
-        auto idx_mgr = _index_manager.load(std::memory_order_acquire);
+        auto idx_mgr = loadIndexManager();
         if (!idx_mgr)
         {
             _rotating.store(false, std::memory_order_release);
@@ -847,7 +861,7 @@ private:
                 // Check if quota limit is exceeded
                 if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit >= 0)
                 {
-                    if (auto idx_mgr = _index_manager.load(std::memory_order_acquire); !idx_mgr)
+                    if (auto idx_mgr = loadIndexManager(); !idx_mgr)
                         goto l_continue_evt;
                     else if (auto index_result = idx_mgr->size(); !index_result.valid)
                         goto l_continue_evt;
@@ -1435,12 +1449,11 @@ private:
 
     bool doCreateIndexManager() noexcept
     {
-        if (!_index_manager.load(std::memory_order_acquire))
+        if (!loadIndexManager())
         {
             try
             {
-                _index_manager.store(std::make_shared<IndexManager>(std::ref(_ctx), getRecordRootPath()),
-                    std::memory_order_release);
+                storeIndexManager(std::make_shared<IndexManager>(std::ref(_ctx), getRecordRootPath()));
             }
             catch (const std::exception &e)
             {
@@ -1454,7 +1467,7 @@ private:
 
     bool doSyncIndex() noexcept
     {
-        auto idx_mgr = _index_manager.load(std::memory_order_acquire);
+        auto idx_mgr = loadIndexManager();
         if (!idx_mgr)
             return false;
         idx_mgr->requestReindex();
@@ -1558,7 +1571,7 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _quota_rotate;
 
     // Index manager, e.g., 'YYYY-MM-DD' directories
-    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<std::shared_ptr<IndexManager>> _index_manager;
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::shared_ptr<IndexManager> _index_manager;
 
     // Writer task count
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> _writer_task_count;

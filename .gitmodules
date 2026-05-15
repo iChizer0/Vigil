@@ -1,3 +1,6 @@
 [submodule "3rdparty/nlohmann_json"]
 	path = 3rdparty/nlohmann_json
 	url = https://github.com/nlohmann/json
+[submodule "3rdparty/jemalloc"]
+	path = 3rdparty/jemalloc
+	url = https://github.com/jemalloc/jemalloc

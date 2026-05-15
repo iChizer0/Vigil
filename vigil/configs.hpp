@@ -6,7 +6,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
-#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -15,7 +14,7 @@
 #include <vector>
 
 #include "context.hpp"
-#include "json.hpp"
+#include "json.hpp" // IWYU pragma: keep
 #include "log.hpp"
 #include "types.hpp"
 
@@ -46,15 +45,21 @@ struct InferenceRuleConfig
         }
         {
             auto &cls_set = j.at("lClassFilter");
-            class_filter = cls_set.get<std::unordered_set<std::string>>();
+            if (!cls_set.is_array())
+                throw Exception("Class filter must be an array while parsing inference rule");
+            class_filter.reserve(cls_set.size());
+            for (const auto &cls_j: cls_set)
+                class_filter.emplace(cls_j.get<std::string>());
         }
         if (j.contains("lRegionFilter"))
         {
             auto &roi_vec = j.at("lRegionFilter");
+            region_filter.reserve(roi_vec.size());
             for (const auto &roi_j: roi_vec)
             {
                 auto &polygon_j = roi_j.at("lPolygon");
                 ROI<float> roi;
+                roi.polygon.points.reserve(polygon_j.size());
                 for (const auto &pt_j: polygon_j)
                 {
                     roi.polygon.points.push_back(Point<float> {
@@ -106,6 +111,7 @@ struct InferenceRuleSetConfig
 
     InferenceRuleSetConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
+        rules.reserve(j.size());
         for (const auto &rule_j: j)
         {
             rules.emplace_back(rule_j, ctx);
@@ -371,6 +377,7 @@ struct ScheduleRuleConfig
         }
         {
             auto &weekdays_vec = j.at("lActiveWeekdays");
+            active_weekdays.reserve(weekdays_vec.size());
             for (const auto &tr_j: weekdays_vec)
             {
                 const auto s_str = tr_j.at("sStart").get<std::string>();
@@ -773,9 +780,10 @@ struct StorageControlConfig
             {
                 auto &files_vec = j.at("lFilesOrDirectoriesToRemove");
                 std::vector<std::filesystem::path> to_remove;
+                to_remove.reserve(files_vec.size());
                 for (const auto &file_j: files_vec)
                     to_remove.emplace_back(file_j.get<std::string>());
-                files_or_directories_to_remove = to_remove;
+                files_or_directories_to_remove = std::move(to_remove);
             }
         }
 
