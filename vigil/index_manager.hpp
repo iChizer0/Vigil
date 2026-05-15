@@ -1,5 +1,4 @@
 #pragma once
-#include <vector>
 #ifndef VIGIL_INDEX_MANAGER_HPP
 #define VIGIL_INDEX_MANAGER_HPP
 
@@ -28,6 +27,7 @@
 #include <thread>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -397,11 +397,11 @@ private:
     {
         bool remove_self = false;
         size_t removed_size = 0;
+        std::vector<std::string> entry_to_remove;
+        std::error_code ec;
 
         try
         {
-            std::vector<std::string> entry_to_remove;
-            std::error_code ec;
             for (const auto &entry:
                 fs::directory_iterator(entry_path, fs::directory_options::skip_permission_denied, ec))
             {
@@ -415,51 +415,44 @@ private:
             // Sort paths to ensure deterministic order of removal, A-Z, hidden files (starting with .) will be removed
             // last
             std::sort(entry_to_remove.begin(), entry_to_remove.end());
-            for (auto it = entry_to_remove.begin(); it != entry_to_remove.end() && removed_size < target_size_bytes;)
-            {
-                if (it->starts_with('.'))
-                {
-                    ++it;
-                    continue; // Skip hidden files until the end
-                }
-
-                const auto p = entry_path / *it;
-                size_t size = 0;
-                if (auto sta = indexFileOrSubdirectory(p, size); sta == IndexStatus::SUCCESS)
-                {
-                    RemoveWithThumbnailCheck(p);
-                    it = entry_to_remove.erase(it);
-                    removed_size += size;
-                }
-                else if (sta == IndexStatus::PARTIAL)
-                {
-                    ++it;
-                    continue;
-                }
-                else if (sta == IndexStatus::CANCELED)
-                {
-                    break;
-                }
-            }
-
             for (auto it = entry_to_remove.begin(); it != entry_to_remove.end() && removed_size < target_size_bytes;
                  ++it)
             {
+                if (it->starts_with('.'))
+                    continue; // Skip hidden files until the end
                 const auto p = entry_path / *it;
-                size_t size = 0;
-                if (auto sta = indexFileOrSubdirectory(p, size); sta == IndexStatus::SUCCESS)
+                size_t sz = 0;
+                if (const auto sta = indexFileOrSubdirectory(p, sz); sta == IndexStatus::SUCCESS) [[likely]]
                 {
-                    RemoveWithThumbnailCheck(p);
-                    removed_size += size;
+                    if (RemoveWithThumbnailCheck(p)) [[likely]]
+                        removed_size += sz;
+                    it->clear();
                 }
                 else if (sta == IndexStatus::PARTIAL)
                 {
+                    it->clear();
                     continue;
                 }
                 else if (sta == IndexStatus::CANCELED)
-                {
                     break;
+            }
+
+            for (auto it = entry_to_remove.cbegin(); it != entry_to_remove.cend() && removed_size < target_size_bytes;
+                 ++it)
+            {
+                if (it->empty())
+                    continue;
+                const auto p = entry_path / *it;
+                size_t sz = 0;
+                if (auto sta = indexFileOrSubdirectory(p, sz); sta == IndexStatus::SUCCESS) [[likely]]
+                {
+                    if (RemoveWithThumbnailCheck(p)) [[likely]]
+                        removed_size += sz;
                 }
+                else if (sta == IndexStatus::PARTIAL)
+                    continue;
+                else if (sta == IndexStatus::CANCELED)
+                    break;
             }
         }
         catch (const std::exception &e)
@@ -755,7 +748,6 @@ private:
                 continue; // Skip ., .. and hidden files and directories
 
             const std::string name(name_view);
-
             seen_entries.insert(name);
 
             // Handle new entries (skip shared lock)

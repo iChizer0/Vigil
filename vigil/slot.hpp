@@ -366,11 +366,11 @@ public:
         if (auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
             return EPERM;
 
+        vg_sta_e ret = 0;
         auto local_progress = SlotFileOpsProgress(SlotFileOpsProgress::Type::Remove);
         auto &active_progress = progress ? *progress : local_progress;
         active_progress = SlotFileOpsProgress(SlotFileOpsProgress::Type::Remove);
         active_progress.requested_count = relative_paths.size();
-        vg_sta_e ret = 0;
 
         auto update_progress = [&]() {
             if (on_progress)
