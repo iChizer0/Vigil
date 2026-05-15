@@ -10,11 +10,19 @@ option(VIGIL_BUILD_EXAMPLES "Build example executables" ON)
 option(VIGIL_USE_SYSTEM_NLOHMANN_JSON "Use system-provided nlohmann_json" OFF)
 option(VIGIL_USE_SYSTEM_PROTOBUF "Use system-provided Protobuf" OFF)
 option(VIGIL_USE_BUILDROOT_SYSROOT "Use Buildroot sysroot for cross-compilation" OFF)
-option(VIGIL_ENABLE_JEMALLOC "Route C++ global new/delete through jemalloc" ON)
+option(VIGIL_ENABLE_JEMALLOC "Opt in to process-wide C++ global new/delete replacement through jemalloc" ON)
+option(VIGIL_ENABLE_JEMALLOC_STATS "Build bundled jemalloc with stats support for allocator/segment diagnostics" OFF)
+option(VIGIL_ENABLE_JEMALLOC_PROFILING "Build bundled jemalloc with heap profiling support for allocator/segment diagnostics" OFF)
 option(VIGIL_USE_SYSTEM_JEMALLOC "Use system-provided jemalloc instead of the bundled submodule" OFF)
 set(VIGIL_JEMALLOC_CONFIGURE_HOST "" CACHE STRING "Optional --host triplet passed to bundled jemalloc configure")
 
 include(GNUInstallDirs)
+
+if((VIGIL_ENABLE_JEMALLOC_STATS OR VIGIL_ENABLE_JEMALLOC_PROFILING) AND NOT VIGIL_ENABLE_JEMALLOC)
+	message(FATAL_ERROR "Jemalloc stats/profiling diagnostics require VIGIL_ENABLE_JEMALLOC=ON so the target process actually uses jemalloc.")
+endif()
+
+set(VIGIL_NEEDS_JEMALLOC ${VIGIL_ENABLE_JEMALLOC})
 
 if(NOT VIGIL_USE_BUILDROOT_SYSROOT)
 	set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -71,8 +79,12 @@ endif()
 
 set(VIGIL_JEMALLOC_TARGET)
 set(VIGIL_JEMALLOC_EXTERNAL_PROJECT)
-if(VIGIL_ENABLE_JEMALLOC)
+if(VIGIL_NEEDS_JEMALLOC)
 	if(VIGIL_USE_SYSTEM_JEMALLOC)
+		if(VIGIL_ENABLE_JEMALLOC_STATS OR VIGIL_ENABLE_JEMALLOC_PROFILING)
+			message(WARNING "VIGIL_ENABLE_JEMALLOC_STATS/PROFILING cannot verify capabilities of a system jemalloc. "
+				"Prefer the bundled jemalloc when diagnosing memory segments.")
+		endif()
 		pkg_check_modules(JEMALLOC REQUIRED IMPORTED_TARGET jemalloc)
 		set(VIGIL_JEMALLOC_TARGET PkgConfig::JEMALLOC)
 	else()
@@ -133,6 +145,12 @@ if(VIGIL_ENABLE_JEMALLOC)
 			--disable-shared
 			--enable-static
 		)
+		if(VIGIL_ENABLE_JEMALLOC_STATS)
+			list(APPEND VIGIL_JEMALLOC_CONFIGURE_ARGS --enable-stats)
+		endif()
+		if(VIGIL_ENABLE_JEMALLOC_PROFILING)
+			list(APPEND VIGIL_JEMALLOC_CONFIGURE_ARGS --enable-prof)
+		endif()
 		if(VIGIL_JEMALLOC_CONFIGURE_HOST)
 			list(APPEND VIGIL_JEMALLOC_CONFIGURE_ARGS "--host=${VIGIL_JEMALLOC_CONFIGURE_HOST}")
 		endif()
@@ -230,16 +248,18 @@ endif()
 if(VIGIL_USE_BUILDROOT_SYSROOT)
 	if(NOT Protobuf_FOUND)
 		pkg_check_modules(Protobuf REQUIRED protobuf)
-		# Dynamically find protoc in the buildroot host directory
-		file(GLOB PROTOC_CANDIDATES "${SDK_ROOT}/sysdrv/source/buildroot/buildroot-*/output/host/bin/protoc")
-		if(PROTOC_CANDIDATES)
-			list(GET PROTOC_CANDIDATES 0 Protobuf_PROTOC_EXECUTABLE)
-		else()
-			find_program(Protobuf_PROTOC_EXECUTABLE protoc)
-		endif()
-		if(NOT Protobuf_PROTOC_EXECUTABLE)
-			message(FATAL_ERROR "protoc not found")
-		endif()
+	endif()
+	# Dynamically find protoc in the buildroot host directory
+	file(GLOB PROTOC_CANDIDATES "${SDK_ROOT}/sysdrv/source/buildroot/buildroot-*/output/host/bin/protoc")
+	if(PROTOC_CANDIDATES)
+		list(GET PROTOC_CANDIDATES 0 Protobuf_PROTOC_EXECUTABLE)
+	else()
+		find_program(Protobuf_PROTOC_EXECUTABLE protoc)
+	endif()
+	if(NOT Protobuf_PROTOC_EXECUTABLE)
+		message(FATAL_ERROR "protoc not found")
+	endif()
+	if(NOT COMMAND protobuf_generate_cpp)
 		function(protobuf_generate_cpp SRCS HDRS)
 			foreach(FIL ${ARGN})
 				get_filename_component(ABS_FIL ${FIL} ABSOLUTE)
@@ -284,7 +304,7 @@ target_sources(vigil
 		${PROTO_HDRS}
 )
 
-if(VIGIL_ENABLE_JEMALLOC AND VIGIL_JEMALLOC_EXTERNAL_PROJECT)
+if(VIGIL_NEEDS_JEMALLOC AND VIGIL_JEMALLOC_EXTERNAL_PROJECT)
 	add_dependencies(vigil ${VIGIL_JEMALLOC_EXTERNAL_PROJECT})
 endif()
 
@@ -317,9 +337,13 @@ target_link_libraries(vigil
 		nlohmann_json::nlohmann_json
 		${Protobuf_LIBRARIES}
 		${BLKID_LIBRARIES}
-		${VIGIL_JEMALLOC_TARGET}
 		atomic
 )
+
+if(VIGIL_NEEDS_JEMALLOC)
+	target_compile_definitions(vigil PRIVATE VIGIL_JEMALLOC_GLOBAL_NEW_DELETE=1)
+	target_link_libraries(vigil PRIVATE ${VIGIL_JEMALLOC_TARGET})
+endif()
 
 if(VIGIL_BUILD_EXAMPLES)
 	add_executable(vigil_example example/main.cpp)
@@ -347,7 +371,7 @@ if(VIGIL_BUILD_EXAMPLES)
 	target_compile_options(vigil_mask_test PRIVATE -std=c++20)
 endif()
 
-if(VIGIL_ENABLE_JEMALLOC AND VIGIL_JEMALLOC_INSTALL_LIBRARY)
+if(VIGIL_NEEDS_JEMALLOC AND VIGIL_JEMALLOC_INSTALL_LIBRARY)
 	install(FILES "${VIGIL_JEMALLOC_INSTALL_LIBRARY}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()
 
