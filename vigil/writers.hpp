@@ -167,7 +167,9 @@ public:
 
     virtual ~SlotAdaptedWriter() noexcept
     {
-        _slot.moveAndAddCacheFile(_cache_file_info);
+        if (const auto sta = this->event()->status.load(std::memory_order_acquire);
+            sta == WriteEvent::Status::Completed || sta == WriteEvent::Status::Interrupted)
+            _slot.moveAndAddCacheFile(_cache_file_info);
         _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
     }
 
@@ -403,7 +405,7 @@ private:
     WriteEvent::Status waitUntilWriteFinish() noexcept override
     {
         if (this->ctxRef().media_paused.load(std::memory_order_relaxed)) [[unlikely]]
-            return WriteEvent::Status::Interrupted;
+            return WriteEvent::Status::Canceled;
         if (const auto ret = this->ctxRef().c_api.media.image_capture_cb(this->getFilePath().c_str(),
                 this->settings().format.c_str(), this->ctxRef().c_api.media.user_data);
             ret != 0)
