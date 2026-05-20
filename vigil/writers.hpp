@@ -402,9 +402,11 @@ public:
 private:
     WriteEvent::Status waitUntilWriteFinish() noexcept override
     {
-        const auto ret = this->ctxRef().c_api.media.image_capture_cb(this->getFilePath().c_str(),
-            this->settings().format.c_str(), this->ctxRef().c_api.media.user_data);
-        if (ret != 0)
+        if (this->ctxRef().media_paused.load(std::memory_order_relaxed)) [[unlikely]]
+            return WriteEvent::Status::Interrupted;
+        if (const auto ret = this->ctxRef().c_api.media.image_capture_cb(this->getFilePath().c_str(),
+                this->settings().format.c_str(), this->ctxRef().c_api.media.user_data);
+            ret != 0)
         {
             VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "ImageWriter failed to capture image to file at path ",
                 this->getFilePath(), ": ", static_cast<int>(ret));
