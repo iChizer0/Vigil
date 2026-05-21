@@ -102,13 +102,6 @@ public:
     {
         disable();
         ensureStateForceUnmounted();
-
-        // Detach slot check callback (if current attached)
-        {
-            const std::unique_lock lock2(_ctx.slot_check_mutex);
-            if (_ctx.slot_check.first == static_cast<const void *>(this))
-                _ctx.slot_check = std::make_pair(nullptr, nullptr);
-        }
     }
 
     const std::filesystem::path &devPath() const noexcept
@@ -305,6 +298,13 @@ public:
 
         // Reset rotating status
         _rotating.store(false, std::memory_order_release);
+
+        // Detach slot check callback (if current attached)
+        {
+            const std::unique_lock lock2(_ctx.slot_check_mutex);
+            if (_ctx.slot_check.first == static_cast<const void *>(this))
+                _ctx.slot_check = std::make_pair(nullptr, nullptr);
+        }
     }
 
     vg_sta_e setQuotaLimitBytes(FileSize bytes)
@@ -1144,7 +1144,7 @@ private:
     {
         const std::unique_lock lock(_op_mutex);
         // Sync the filesystem before unmounting (syncfs)
-        if (auto fd = ::open(_mount_path.c_str(), O_RDONLY); fd < 0)
+        if (const auto fd = ::open(_mount_path.c_str(), O_RDONLY); fd < 0)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open mount path ", _mount_path,
                 " for syncing before unmounting: ", static_cast<int>(errno));
