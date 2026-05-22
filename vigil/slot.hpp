@@ -1178,6 +1178,25 @@ private:
         return true;
     }
 
+    bool doFsck() const noexcept
+    {
+        if (isInternal())
+            return true;
+        try
+        {
+            if (const auto ret = Execute("fsck", { "-a", _dev_path.string() })(); ret != 0)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to run fsck on device ", _dev_path, ", code: ", ret);
+            }
+        }
+        catch (const std::exception &e)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Exception occurred while running fsck on device ", _dev_path, ": ",
+                e.what());
+        }
+        return true;
+    }
+
     bool doMount() const noexcept
     {
         const std::unique_lock lock(_op_mutex);
@@ -1267,6 +1286,8 @@ private:
         auto state = _state.load(std::memory_order_acquire);
         if (state != SlotState::NotMounted)
             return false;
+        if (!doFsck())
+            goto l_mount_error;
         if (!doMount())
             goto l_mount_error;
         // Update stats

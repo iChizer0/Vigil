@@ -708,6 +708,8 @@ private:
                 {
                     if (indexRootEntries(*dir, _watch_path))
                         _generation_current.store(generation, std::memory_order_release);
+                    else
+                        std::this_thread::sleep_for(kStorageIndexFailRetryDelay);
                 }
                 catch (const std::exception &e)
                 {
@@ -721,7 +723,7 @@ private:
                 != _generation_target.load(std::memory_order_acquire))
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Changes detected during indexing, indexing again...");
-                std::this_thread::yield();
+                std::this_thread::sleep_for(kStorageIndexRetryDelay);
                 continue;
             }
 
