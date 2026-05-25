@@ -87,6 +87,7 @@ struct SlotStatus
     std::optional<std::string> type;
     bool selected;
     bool enabled;
+    bool dirty;
     bool syncing;
     bool writing;
     bool rotating;
@@ -109,6 +110,7 @@ struct SlotStatus
         j["sType"] = type;
         j["bSelected"] = selected;
         j["bEnabled"] = enabled;
+        j["bDirty"] = dirty;
         j["bSyncing"] = syncing;
         j["bWriting"] = writing;
         j["bRotating"] = rotating;

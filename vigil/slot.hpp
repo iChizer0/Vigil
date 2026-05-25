@@ -86,8 +86,8 @@ public:
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
           _internal(internal), _data_dir_name(data_dir_name), _info_mutex(), _label(), _uuid(), _type(), _mutex(),
           _op_mutex(), _stop_token(false), _manager_thread(nullptr), _writer_thread(nullptr), _state(SlotState::Error),
-          _stats(), _quota_limit_bytes(-1), _quota_rotate(true), _index_manager(nullptr), _writer_task_count(0),
-          _rotating(false), _write_stats(), _relay(ctx, _mount_path / _data_dir_name)
+          _dirty(false), _stats(), _quota_limit_bytes(-1), _quota_rotate(true), _index_manager(nullptr),
+          _writer_task_count(0), _rotating(false), _write_stats(), _relay(ctx, _mount_path / _data_dir_name)
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Creating storage slot for device path ", _dev_path, " at mount path ",
             _mount_path, ", removable: ", _removable ? "true" : "false");
@@ -181,6 +181,7 @@ public:
             .type = std::move(format),
             .selected = false,
             .enabled = is_enabled,
+            .dirty = _dirty.load(std::memory_order_acquire),
             .syncing = idx_mgr ? idx_mgr->indexing() : false,
             .writing = isWriting(),
             .rotating = isRotating(),
@@ -1144,25 +1145,32 @@ private:
     {
         const std::unique_lock lock(_op_mutex);
         // Sync the filesystem before unmounting (syncfs)
-        if (const auto fd = ::open(_mount_path.c_str(), O_RDONLY); fd < 0)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open mount path ", _mount_path,
-                " for syncing before unmounting: ", static_cast<int>(errno));
-        }
-        else if (::syncfs(fd) != 0)
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to sync filesystem at mount path ", _mount_path,
-                " before unmounting: ", static_cast<int>(errno));
+            const auto fd = ::open(_mount_path.c_str(), O_RDONLY);
+            if (fd < 0)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open mount path ", _mount_path,
+                    " for syncing before unmounting: ", static_cast<int>(errno));
+            }
+            else if (::syncfs(fd) != 0)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to sync filesystem at mount path ", _mount_path,
+                    " before unmounting: ", static_cast<int>(errno));
+            }
             ::close(fd);
         }
-        else
-            ::close(fd);
         // Unmount the device
-        if (::umount2(_mount_path.c_str(), MNT_DETACH) != 0)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to unmount storage slot at path ", _mount_path, ": ",
-                static_cast<int>(errno));
-            return false;
+            const bool umount_force = ::umount2(_mount_path.c_str(), MNT_FORCE) == 0;
+            const bool umount_detach = !umount_force && (::umount2(_mount_path.c_str(), MNT_DETACH) == 0);
+            if (!umount_force && !umount_detach)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to unmount storage slot at path ", _mount_path, ": ",
+                    static_cast<int>(errno));
+                return false;
+            }
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Storage slot at path ", _mount_path,
+                " unmounted, force: ", umount_force, ", detach: ", umount_detach);
         }
         {
             std::error_code ec;
@@ -1184,7 +1192,7 @@ private:
             return true;
         try
         {
-            if (const auto ret = Execute("fsck", { "-a", _dev_path.string() })(); ret != 0)
+            if (const auto ret = Execute("fsck", { "-n", _dev_path.string() })(); ret != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to run fsck on device ", _dev_path, ", code: ", ret);
             }
@@ -1200,8 +1208,9 @@ private:
     bool doMount() const noexcept
     {
         const std::unique_lock lock(_op_mutex);
+        if (std::error_code ec; std::filesystem::exists(_mount_path, ec))
         {
-            std::error_code ec;
+            ::umount2(_mount_path.c_str(), MNT_DETACH); // Detach if already mounted, ignore error
             std::filesystem::remove_all(_mount_path, ec);
             if (ec)
             {
@@ -1585,6 +1594,9 @@ private:
 
     // Shared slot state machine
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<SlotState> _state;
+
+    // Filesystem check flag
+    alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _dirty;
 
     // Partition and quota stats
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<SlotStats> _stats;
