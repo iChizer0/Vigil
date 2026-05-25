@@ -93,7 +93,7 @@ public:
             _mount_path, ", removable: ", _removable ? "true" : "false");
         if (ensureStateResetToInitial())
         {
-            ensureStateMounted();
+            ensureStateMounted(true);
             ensureStateResetToInitial(); // Reset to initial state after mounting
         }
     }
@@ -1186,23 +1186,35 @@ private:
         return true;
     }
 
-    bool doFsck() const noexcept
+    bool doFsck(bool stop_on_dirty) const noexcept
     {
         if (isInternal())
             return true;
-        try
+
+        std::string_view fs_type;
         {
-            if (const auto ret = Execute("fsck", { "-n", _dev_path.string() })(); ret != 0)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to run fsck on device ", _dev_path, ", code: ", ret);
-            }
+            const std::shared_lock lock(_info_mutex);
+            if (_type.has_value())
+                fs_type = *_type;
         }
-        catch (const std::exception &e)
+
+        if (const auto res = FSCK(_dev_path, fs_type).dirty(); res != FSCK::Result::Clean)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Exception occurred while running fsck on device ", _dev_path, ": ",
-                e.what());
+            _dirty.store(false, std::memory_order_release);
+            return true;
         }
-        return true;
+        else if (res == FSCK::Result::Dirty)
+        {
+            _dirty.store(true, std::memory_order_release);
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Filesystem on device ", _dev_path, " is marked dirty");
+            return !stop_on_dirty;
+        }
+        else
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Unable to determine filesystem dirty flag for device ", _dev_path,
+                ", type: ", fs_type, ", code: ", static_cast<int>(res));
+            return false;
+        }
     }
 
     bool doMount() const noexcept
@@ -1289,13 +1301,13 @@ private:
         return true;
     }
 
-    bool ensureStateMounted() noexcept
+    bool ensureStateMounted(bool stop_on_dirty = false) noexcept
     {
         // Only mount if not mounted
         auto state = _state.load(std::memory_order_acquire);
         if (state != SlotState::NotMounted)
             return false;
-        if (!doFsck())
+        if (!doFsck(stop_on_dirty))
             goto l_mount_error;
         if (!doMount())
             goto l_mount_error;
@@ -1596,7 +1608,7 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<SlotState> _state;
 
     // Filesystem check flag
-    alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _dirty;
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _dirty;
 
     // Partition and quota stats
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<SlotStats> _stats;
