@@ -401,7 +401,6 @@ private:
         }
 
         std::list<std::string> dev_2_remove;
-        ;
         if (_netlink_fd >= 0)
         {
             char buffer[kStorageNetlinkBufferSize];
@@ -469,15 +468,29 @@ private:
             }
         }
 
-        const std::unique_lock lock(_slots_mutex);
+        {
+            const std::shared_lock lock(_slots_mutex);
+            for (const auto &[dev_path, _]: _slots)
+            {
+                if (dev_2_slot_info_vec.contains(dev_path))
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Skipping existing storage slot for device ", dev_path);
+                    dev_2_slot_info_vec.erase(dev_path);
+                }
+            }
+        }
+
         for (const auto &[dev_path, info]: dev_2_slot_info_vec)
         {
-            if (_slots.find(dev_path) == _slots.end())
+            auto slot = std::make_shared<Slot>(_ctx, dev_path, info.mount_point, info.removable, info.internal,
+                _data_dir_name);
             {
-                auto slot = std::make_shared<Slot>(_ctx, dev_path, info.mount_point, info.removable, info.internal,
-                    _data_dir_name);
-                _slots.emplace(dev_path, std::move(slot));
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Added storage slot for device ", dev_path);
+                const std::unique_lock lock(_slots_mutex);
+                if (!_slots.contains(dev_path)) [[likely]]
+                {
+                    _slots.emplace(dev_path, std::move(slot));
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Added storage slot for device ", dev_path);
+                }
             }
         }
     }
