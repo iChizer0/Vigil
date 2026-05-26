@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -399,6 +400,8 @@ private:
             _initial_scan_done = true;
         }
 
+        std::list<std::string> dev_2_remove;
+        ;
         if (_netlink_fd >= 0)
         {
             char buffer[kStorageNetlinkBufferSize];
@@ -442,15 +445,27 @@ private:
                                 SlotInfo { getMountPath(devname), isDevRemovable(devname), false });
                     }
                     else if (action == "remove")
-                    {
-                        dev_2_slot_info_vec.erase(dev_path);
-                        {
-                            const std::unique_lock lock(_slots_mutex);
-                            _slots.erase(dev_path);
-                        }
-                        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Removed storage slot for device ", dev_path);
-                    }
+                        dev_2_remove.emplace_back(dev_path);
                 }
+            }
+        }
+
+        for (const auto &dev_path: dev_2_remove)
+        {
+            dev_2_slot_info_vec.erase(dev_path);
+            std::shared_ptr<Slot> slot = nullptr;
+            {
+                const std::unique_lock lock(_slots_mutex);
+                if (auto it = _slots.find(dev_path); it != _slots.end())
+                {
+                    slot = it->second;
+                    _slots.erase(it);
+                }
+            }
+            if (slot)
+            {
+                slot.reset();
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Removed storage slot for device ", dev_path);
             }
         }
 
