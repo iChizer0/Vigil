@@ -771,12 +771,7 @@ private:
                     goto l_check_state_loop_delayed;
 
                 case SlotState::NotMounted:
-                    if (!ensureStateMounted())
-                    {
-                        VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to mount storage slot for device path ", _dev_path,
-                            ", will retry");
-                        goto l_wait_and_continue;
-                    }
+                    ensureStateMounted();
                     goto l_check_state_loop;
 
                 case SlotState::Mounted:
@@ -784,12 +779,7 @@ private:
                     goto l_check_state_loop_delayed;
 
                 case SlotState::Configured:
-                    if (!ensureStateReady())
-                    {
-                        VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN,
-                            "Failed to make configured storage slot ready for device path ", _dev_path, ", will retry");
-                        goto l_wait_and_continue;
-                    }
+                    ensureStateReady();
                     goto l_check_state_loop;
 
                 case SlotState::Indexing:
