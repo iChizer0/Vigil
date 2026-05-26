@@ -154,6 +154,7 @@ vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue)
         const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
         if (vigil_instance_scoped_suspend_count == 1)
         {
+            vigil_instance->context().shared_writer_settings.sync(vigil_instance->context().c_api.media);
             if (reset_media_queue)
                 vigil_instance->context().clearMediaBuffer();
             vigil_instance->context().media_paused.store(false, std::memory_order_release);

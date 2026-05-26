@@ -254,6 +254,17 @@ struct Context
             }
         }
 
+        void sync(const vg_config_media_t &media_api)
+        {
+            const std::unique_lock lock(mutex);
+            const auto old_settings = settings;
+            if (!old_settings)
+                return;
+            settings = FileWriterSettings::create(old_settings->format, old_settings->interval,
+                old_settings->file_name_prefix, old_settings->video_clip_length, media_api);
+            revision.fetch_add(1, std::memory_order_release);
+        }
+
         std::pair<size_t, std::shared_ptr<FileWriterSettings>> get() const noexcept
         {
             const std::shared_lock lock(mutex);
