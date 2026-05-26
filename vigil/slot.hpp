@@ -545,24 +545,37 @@ protected:
 
         if (cache_file_info.thumbnail && _ctx.c_api.media.thumbnail_generate_cb)
         {
-            if (!EnsureDirectoryExists(thumbnail_path.parent_path(), true, false, &_ctx))
+            const auto thumbnail_cache_path = getRecordCachePath() / thumbnail_path.filename();
+            if (const auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
+                    cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_cache_path.c_str(),
+                    kStorageThumbnailFileType, kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
+                ret == 0) [[likely]]
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create thumbnail directory at ",
-                    thumbnail_path.parent_path());
-            }
-            else if (auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
-                         cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_path.c_str(),
-                         kStorageThumbnailFileType, kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
-                     ret != 0)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to generate thumbnail for cache file ",
-                    cache_file_info.path, ", code: ", static_cast<int>(ret));
-            }
-            else
-                EnsureOwnerAndPermissions(thumbnail_path, kStorageDefaultUid, kStorageDefaultGid,
+                EnsureOwnerAndPermissions(thumbnail_cache_path, kStorageDefaultUid, kStorageDefaultGid,
                     fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
                         | fs::perms::others_read,
                     &this->ctxRef());
+                std::error_code ec;
+                if (EnsureDirectoryExists(thumbnail_path.parent_path(), true, false, &_ctx)) [[likely]]
+                {
+                    if (std::filesystem::rename(thumbnail_cache_path, thumbnail_path, ec); ec)
+                    {
+                        VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to move thumbnail from ", thumbnail_cache_path,
+                            " to ", thumbnail_path, ": ", ec.message());
+                    }
+                }
+                else
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to create thumbnail directory at ",
+                        thumbnail_path.parent_path());
+                }
+                std::filesystem::remove_all(thumbnail_cache_path, ec);
+            }
+            else
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to generate thumbnail for cache file ",
+                    cache_file_info.path, ", code: ", static_cast<int>(ret));
+            }
         }
 
         size_t size = 0;
@@ -618,17 +631,17 @@ protected:
         return;
     }
 
-    std::filesystem::path getRecordQuotaLimitPath() const
+    std::filesystem::path getRecordQuotaLimitPath() const noexcept
     {
         return getRecordRootPath() / kRecordQuotaLimitFileName;
     }
 
-    std::filesystem::path getRecordQuotaNoRotatePath() const
+    std::filesystem::path getRecordQuotaNoRotatePath() const noexcept
     {
         return getRecordRootPath() / kRecordQuotaNoRotateFileName;
     }
 
-    std::filesystem::path getRecordCachePath() const
+    std::filesystem::path getRecordCachePath() const noexcept
     {
         return getRecordRootPath() / kRecordCacheDirName;
     }

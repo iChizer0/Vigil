@@ -7,6 +7,7 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <compare>
 #include <cstddef>
@@ -869,21 +870,38 @@ struct WaterMarks
     FileSize high_remain_bytes;
     FileSize recycle_bytes;
 
-    static inline WaterMarks from(const std::string &format) noexcept
+    static inline WaterMarks from(FileSize limit) noexcept
+    {
+        return WaterMarks {
+            .critical_remain_bytes = static_cast<FileSize>(kStorageCriticalWaterMarkFactor * limit),
+            .high_remain_bytes = static_cast<FileSize>(kStorageHighWaterMarkFactor * limit),
+            .recycle_bytes = static_cast<FileSize>(kStorageRecycleFactor * limit),
+        };
+    }
+
+    static inline WaterMarks from(const std::string &format, std::chrono::seconds duration, size_t bitrate) noexcept
     {
         size_t i = 0;
-        for (; i < kFormatAverageBytesMap.size(); ++i)
+        for (; i < kFormatMaxBytesMap.size(); ++i)
         {
-            if (kFormatAverageBytesMap[i].first == format)
+            if (kFormatMaxBytesMap[i].first == format)
                 break;
         }
-        const auto avg = kFormatAverageBytesMap[i].second;
+        FileSize limit = kFormatMaxBytesMap[i].second;
+        if (format == "MP4")
+        {
+            const auto duration_seconds = std::max(static_cast<size_t>(duration.count()), static_cast<size_t>(1));
+            limit = bitrate > 0
+                        ? static_cast<FileSize>(std::ceil(duration_seconds * bitrate / static_cast<float>(CHAR_BIT)))
+                        : (duration_seconds * limit);
+        }
+        return WaterMarks::from(limit);
+    }
 
-        return WaterMarks {
-            .critical_remain_bytes = static_cast<FileSize>(kStorageCriticalWaterMarkFactor * avg),
-            .high_remain_bytes = static_cast<FileSize>(kStorageHighWaterMarkFactor * avg),
-            .recycle_bytes = static_cast<FileSize>(kStorageRecycleFactor * avg),
-        };
+    bool operator==(const WaterMarks &other) const noexcept
+    {
+        return critical_remain_bytes == other.critical_remain_bytes && high_remain_bytes == other.high_remain_bytes
+               && recycle_bytes == other.recycle_bytes;
     }
 
     template<typename T, std::enable_if_t<std::is_unsigned_v<T>, bool> = true>
@@ -895,8 +913,8 @@ struct WaterMarks
     }
 
 private:
-    static inline constexpr const std::array<std::pair<std::string_view, FileSize>, 4> kFormatAverageBytesMap = {
-        std::make_pair<std::string_view, FileSize>("MP4", 100 * 1024 * 1024),          // 100 MB per minute
+    static inline constexpr const std::array<std::pair<std::string_view, FileSize>, 4> kFormatMaxBytesMap = {
+        std::make_pair<std::string_view, FileSize>("MP4", 3 * 1024 * 1024),            // 3 MB per second of video
         std::make_pair<std::string_view, FileSize>("JPG", 10 * 1024 * 1024),           // 10 MB per image
         std::make_pair<std::string_view, FileSize>("RAW", 20 * 1024 * 1024),           // 20 MB per image
         std::make_pair<std::string_view, FileSize>("", kStorageMinFileSystemFreeBytes) // Fallback
@@ -917,20 +935,25 @@ struct FileWriterSettings
 
     bool operator==(const FileWriterSettings &other) const noexcept
     {
-        return type == other.type && format == other.format && interval == other.interval;
+        return type == other.type && format == other.format && interval == other.interval
+               && file_name_prefix == other.file_name_prefix && video_clip_length == other.video_clip_length
+               && watermarks == other.watermarks;
     }
 
     static std::shared_ptr<FileWriterSettings> create(const std::string &fmt, std::chrono::milliseconds itv,
-        std::string_view fnp, std::chrono::seconds vcl)
+        std::string_view fnp, std::chrono::seconds vcl, const vg_config_media_t &media_api)
     {
-        return std::shared_ptr<FileWriterSettings>(new FileWriterSettings(fmt, itv, fnp, vcl));
+        size_t bitrate = 0;
+        if (media_api.video_file_max_bitrate_estimate_cb)
+            media_api.video_file_max_bitrate_estimate_cb(&bitrate, media_api.user_data);
+        return std::shared_ptr<FileWriterSettings>(new FileWriterSettings(fmt, itv, fnp, vcl, bitrate));
     }
 
 private:
     FileWriterSettings(const std::string &fmt, std::chrono::milliseconds itv, std::string_view fnp,
-        std::chrono::seconds vcl)
+        std::chrono::seconds vcl, size_t br)
         : type(from(fmt)), format(fmt), interval(itv), file_name_prefix(fnp), video_clip_length(vcl),
-          watermarks(WaterMarks::from(format))
+          watermarks(WaterMarks::from(format, vcl, br))
     {
     }
 

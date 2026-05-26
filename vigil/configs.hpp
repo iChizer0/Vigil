@@ -484,7 +484,8 @@ struct RecordConfig
                 throw Exception(
                     "Invalid recording interval " + std::to_string(itv_ms) + "ms while parsing RecordConfig");
             if (settings = FileWriterSettings::create(settings_j.at("sFormat").get<std::string>(),
-                    std::chrono::milliseconds(itv_ms), kRecordWriterPrefixDefault, kVideoClipLengthDefault);
+                    std::chrono::milliseconds(itv_ms), kRecordWriterPrefixDefault, kVideoClipLengthDefault,
+                    ctx.c_api.media);
                 !settings)
                 throw Exception("Failed to create FileWriterSettings while parsing RecordConfig");
         }
@@ -797,7 +798,7 @@ struct CaptureConfig
     std::filesystem::path output;
     std::shared_ptr<FileWriterSettings> settings;
 
-    CaptureConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
+    CaptureConfig(const nlohmann::json &j, const Context &ctx)
     {
         j.at("sOutput").get_to(output);
         {
@@ -811,7 +812,7 @@ struct CaptureConfig
                         "Invalid video length seconds " + std::to_string(l) + " while parsing CaptureConfig");
             }
             settings = FileWriterSettings::create(j.at("sFormat").get<std::string>(), std::chrono::milliseconds(0),
-                kCaptureWriterPrefixDefault, video_length);
+                kCaptureWriterPrefixDefault, video_length, ctx.c_api.media);
             if (!settings)
                 throw Exception("Failed to create FileWriterSettings while parsing CaptureConfig");
         }

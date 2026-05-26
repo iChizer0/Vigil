@@ -53,6 +53,8 @@ typedef struct vg_audio_frame_t
 typedef struct vg_config_media_t
 {
     void *user_data; /**< User data pointer passed to all media callbacks. */
+    vg_sta_e (*video_file_max_bitrate_estimate_cb)(size_t *bitrate_bps,
+        void *user_data); /**< Provides an estimated max bitrate. */
     vg_sta_e (*video_file_create_cb)(int *fd, const char *filepath, const char *format,
         void *user_data); /**< Creates or opens a media sink and outputs a file descriptor (parent folder already
                              exists). */

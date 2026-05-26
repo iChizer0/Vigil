@@ -174,13 +174,16 @@ public:
 
     class EntryIndex
     {
-    private:
-        enum Status : int64_t { INVALIDATED = -1 };
+    public:
         struct Index
         {
             int64_t size;
             size_t revision;
         };
+
+    private:
+        enum Status : int64_t { INVALIDATED = -1 };
+
         alignas(kHardwareDestructiveInterferenceSize) std::atomic<Index> _index;
 
     public:
@@ -191,6 +194,11 @@ public:
 
         EntryIndex(EntryIndex &&) = delete;
         EntryIndex &operator=(EntryIndex &&) = delete;
+
+        inline Index current() const noexcept
+        {
+            return _index.load(std::memory_order_acquire);
+        }
 
         inline size_t size() const noexcept
         {
@@ -645,16 +653,6 @@ private:
         }
     }
 
-    static bool containsHiddenComponent(const fs::path &rel_path) noexcept
-    {
-        for (const auto &component: rel_path)
-        {
-            if (component.native().starts_with('.'))
-                return true;
-        }
-        return false;
-    }
-
     void indexerLoop() noexcept
     {
         while (!_shutdown.load(std::memory_order_acquire))
@@ -830,8 +828,8 @@ private:
         for (struct dirent *entry; status == IndexStatus::SUCCESS && (entry = ::readdir(dir)) != nullptr;)
         {
             const std::string_view name = entry->d_name;
-            if (name.starts_with('.'))
-                continue; // Skip ., .. and hidden files and directories
+            if (name == "." || name == "..")
+                continue; // Skip ., .. special entries
 
             const fs::path full_path = dir_path / name;
             status = indexFileOrSubdirectory(full_path, total);
@@ -934,25 +932,20 @@ private:
                     & (FAN_CLOSE_WRITE | FAN_CREATE | FAN_DELETE | FAN_MOVE | FAN_DELETE_SELF | FAN_MOVE_SELF))
                 {
                     // For FID-based events, extract the path
-                    if (metadata->event_len > sizeof(struct fanotify_event_metadata))
+                    if (metadata->event_len > metadata->metadata_len)
                     {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Processing FID event, mask: ", VG_HEX(metadata->mask, 8));
                         result = handleFidEvent(metadata);
                     }
+                    else if (metadata->fd >= 0)
+                    {
+                        VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Processing FD event, mask: ", VG_HEX(metadata->mask, 8));
+                        result = handleFdEvent(metadata);
+                    }
                     else
                     {
-                        // Non-FID event with fd
-                        if (metadata->fd >= 0) [[likely]]
-                        {
-                            VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG,
-                                "Processing FD event, mask: ", VG_HEX(metadata->mask, 8));
-                            result = handleFdEvent(metadata);
-                        }
-                        else [[unlikely]]
-                        {
-                            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN,
-                                "Skipped event with no FID or FD, mask: ", VG_HEX(metadata->mask, 8));
-                        }
+                        VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN,
+                            "Skipped event with no FID or FD, mask: ", VG_HEX(metadata->mask, 8));
                     }
                 }
                 else
@@ -994,49 +987,51 @@ private:
             metadata = FAN_EVENT_NEXT(metadata, len);
         }
         if (pending_changes)
-        {
             requestReindex(false);
-        }
     }
 
     EventResult handleFidEvent(struct fanotify_event_metadata *metadata)
     {
-        struct fanotify_event_info_fid *fid = reinterpret_cast<struct fanotify_event_info_fid *>(metadata + 1);
-        if (fid->hdr.info_type != FAN_EVENT_INFO_TYPE_DFID_NAME) [[unlikely]]
-            throw std::runtime_error("Unexpected fanotify FID event info type: " + std::to_string(fid->hdr.info_type));
-
+        struct fanotify_event_info_header *hdr = reinterpret_cast<struct fanotify_event_info_header *>(
+            reinterpret_cast<char *>(metadata) + metadata->metadata_len);
+        if (hdr->len == 0) [[unlikely]]
+            throw std::runtime_error("FID event with zero-length info");
+        if (hdr->info_type != FAN_EVENT_INFO_TYPE_DFID_NAME) [[unlikely]]
+            throw std::runtime_error("FID event with unexpected info type: " + std::to_string(hdr->info_type));
+        struct fanotify_event_info_fid *fid = reinterpret_cast<struct fanotify_event_info_fid *>(hdr);
         struct file_handle *file_handle = reinterpret_cast<struct file_handle *>(fid->handle);
+
         // Filename follows the file handle data (f_handle array)
         const char *filename = reinterpret_cast<const char *>(file_handle->f_handle + file_handle->handle_bytes);
         // Skip empty name or hidden files
-        if (auto pc = filename; !pc || *pc == '\0' || *pc == '.')
+        if (!filename || *filename == '\0' || std::strcmp(filename, ".") == 0 || std::strcmp(filename, "..") == 0)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Skipped FID event with empty or hidden filename");
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Skipped FID event with empty or special filename");
             return EventResult::SKIPPED;
         }
 
         // Get the directory path from the file handle
-        int dir_fd = ::open_by_handle_at(_mount_fd, file_handle, O_RDONLY | O_DIRECTORY);
-        if (dir_fd < 0)
+        const int fd = ::open_by_handle_at(_mount_fd, file_handle, O_RDONLY | O_DIRECTORY);
+        if (fd < 0)
             throw std::runtime_error("FID open_by_handle_at failed: " + std::to_string(errno));
 
         fs::path full_path;
 
         {
             char proc_path[64] { "/proc/self/fd/" };
-            std::to_chars(proc_path + std::char_traits<char>::length(proc_path), proc_path + sizeof(proc_path), dir_fd)
+            std::to_chars(proc_path + std::char_traits<char>::length(proc_path), proc_path + sizeof(proc_path), fd)
                 .ptr[0]
                 = '\0';
 
-            char dir_path[PATH_MAX];
-            const ssize_t path_len = ::readlink(proc_path, dir_path, sizeof(dir_path) - 1);
+            char path[PATH_MAX];
+            const ssize_t path_len = ::readlink(proc_path, path, sizeof(path) - 1);
 
-            ::close(dir_fd);
+            ::close(fd);
             if (path_len < 0)
                 throw std::runtime_error("FID readlink failed: " + std::to_string(errno));
 
-            dir_path[path_len] = '\0';
-            full_path = fs::path(dir_path) / filename;
+            path[path_len] = '\0';
+            full_path = fs::path(path) / filename;
         }
 
         return handleEvent(metadata->mask, full_path);
@@ -1079,8 +1074,8 @@ private:
             }
             return EventResult::REINDEX_IMMEDIATELY;
         }
-        if (containsHiddenComponent(rel_path))
-            return EventResult::SKIPPED;
+        if (const auto it = rel_path.begin(); it->native().starts_with('.'))
+            return EventResult::SKIPPED; // Skip hidden files and directories at root level
         return tryIncrementalUpdate(mask, path, rel_path);
     }
 
@@ -1159,7 +1154,16 @@ private:
             return EventResult::REINDEX;
         }
         else
-        { // Lazy reindex it
+        {
+            bool incremental = false;
+            if (const auto cur = it->second->current(); it->second->isValid())
+            {
+                size_t size = 0;
+                if (indexFileOrSubdirectory(path, size) == IndexStatus::SUCCESS)
+                    incremental = it->second->tryUpdateSize(cur.size + size, cur.revision);
+            }
+            if (incremental)
+                return EventResult::INCREMENTAL;
             it->second->markInvalidated();
             return EventResult::REINDEX;
         }

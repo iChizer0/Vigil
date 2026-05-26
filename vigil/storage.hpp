@@ -367,20 +367,21 @@ private:
             bool internal;
         };
         std::unordered_map<std::string, SlotInfo> dev_2_slot_info_vec;
-        if (_ctx.c_api.storage.internal_device_path)
-        {
-            std::string mount_point;
-            if (_ctx.c_api.storage.internal_mount_point)
-                mount_point = _ctx.c_api.storage.internal_mount_point;
-            else
-                mount_point
-                    = getMountPath(std::filesystem::path(_ctx.c_api.storage.internal_device_path).filename().string());
-            dev_2_slot_info_vec.emplace(_ctx.c_api.storage.internal_device_path,
-                SlotInfo { std::move(mount_point), false, true });
-        }
 
         if (!_initial_scan_done)
         {
+            if (_ctx.c_api.storage.internal_device_path)
+            {
+                std::string mount_point;
+                if (_ctx.c_api.storage.internal_mount_point)
+                    mount_point = _ctx.c_api.storage.internal_mount_point;
+                else
+                    mount_point = getMountPath(
+                        std::filesystem::path(_ctx.c_api.storage.internal_device_path).filename().string());
+                dev_2_slot_info_vec.emplace(_ctx.c_api.storage.internal_device_path,
+                    SlotInfo { std::move(mount_point), false, true });
+            }
+
             std::error_code ec;
             for (const auto &entry: std::filesystem::directory_iterator("/sys/class/block", ec))
             {
@@ -473,10 +474,7 @@ private:
             for (const auto &[dev_path, _]: _slots)
             {
                 if (dev_2_slot_info_vec.contains(dev_path))
-                {
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Skipping existing storage slot for device ", dev_path);
                     dev_2_slot_info_vec.erase(dev_path);
-                }
             }
         }
 

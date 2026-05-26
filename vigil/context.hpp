@@ -29,6 +29,9 @@ using namespace vigil::constants;
 
 struct Context
 {
+    // C API
+    const vg_config_t c_api;
+
     // Logging utility
     template<typename... Args>
     void log(vg_log_level_e level, Args &&...args) const noexcept
@@ -236,8 +239,7 @@ struct Context
     private:
         mutable std::shared_mutex mutex;
         alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> revision = 0;
-        std::shared_ptr<FileWriterSettings> settings = FileWriterSettings::create(kRecordWriterDefaultFormat,
-            kRecordWriterDefaultIntervalMs, kRecordWriterPrefixDefault, kVideoClipLengthDefault);
+        std::shared_ptr<FileWriterSettings> settings = nullptr;
 
     public:
         void update(const std::shared_ptr<FileWriterSettings> &new_settings) noexcept
@@ -261,7 +263,7 @@ struct Context
         WaterMarks getWaterMarks() const noexcept
         {
             const std::shared_lock lock(mutex);
-            return settings ? settings->watermarks : WaterMarks::from("");
+            return settings ? settings->watermarks : WaterMarks::from(kStorageMinFileSystemFreeBytes);
         }
 
         size_t getRevision() const noexcept
@@ -426,11 +428,14 @@ struct Context
         }
     } shared_inference_result;
 
-    // C API
-    const vg_config_t c_api;
-
     // Constructor
-    Context(const vg_config_t &cfg) : c_api(cfg) { }
+    Context(const vg_config_t &cfg) : c_api(cfg)
+    {
+        {
+            shared_writer_settings.update(FileWriterSettings::create(kRecordWriterDefaultFormat,
+                kRecordWriterDefaultIntervalMs, kRecordWriterPrefixDefault, kVideoClipLengthDefault, cfg.media));
+        }
+    }
 
     // Destructor
     ~Context() = default;
