@@ -276,7 +276,7 @@ Get the current status of all storage slots.
             "sType": "ext4", // String (optional), filesystem type, null if not available or not formatted yet, may not exist if eState < NOT_MOUNTED
             "bSelected": true, // Boolean, whether this slot is the target enabled slot according to current configuration
             "bEnabled": true, // Boolean, whether this slot is currently enabled
-            "bDirty": false, // Boolean, whether the filesystem on this slot is marked dirty and may need fsck
+            "bDirty": false, // Boolean, whether the filesystem on this slot is marked dirty and may need fsck (not auto mounted if not enabled)
             "bSyncing": false, // Boolean, whether this slot is currently performing sync tasks (e.g., flushing write cache)
             "bWriting": false, // Boolean, whether this slot currently has activate writing tasks (e.g., recording videos, writing images)
             "bRotating": false, // Boolean, whether this slot is currently performing quota rotation
@@ -442,7 +442,7 @@ The payload depends on the `sTask` field.
 
 Runtime notes:
 
-- `FORMAT` and `EJECT` are cancelable only while queued.
+- `FORMAT` and `EJECT` are cancelable only while queued, formatting is only allowed on state is `NOT_FORMATTED_OR_FORMAT_UNSUPPORTED` or `NOT_MOUNTED`.
 - `FREE_UP` and `REMOVE_FILES_OR_DIRECTORIES` are also cancelable while running.
 - Accepted cancellations may still report `sStatus: "CANCEL_REQUESTED"`; the final `CANCELED` state is visible through a later `ASYNC_STATUS` request.
 - Only one async task runs globally.

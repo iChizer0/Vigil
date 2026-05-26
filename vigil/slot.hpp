@@ -492,7 +492,7 @@ public:
             return EPERM;
         const std::unique_lock lock(_mutex);
         if (const auto state = _state.load(std::memory_order_acquire);
-            state != SlotState::NotFormattedOrFormatUnsupported)
+            state != SlotState::NotFormattedOrFormatUnsupported && state != SlotState::NotMounted)
             return EPERM;
         if (!ensureStateFormatted())
             return EIO;
@@ -1052,7 +1052,8 @@ private:
     bool ensureStateFormatted() noexcept // Never auto-format, must be called explicitly
     {
         auto state = _state.load(std::memory_order_acquire);
-        if (state != SlotState::NotFormattedOrFormatUnsupported || state == SlotState::Formatting)
+        if ((state != SlotState::NotFormattedOrFormatUnsupported && state != SlotState::NotMounted)
+            || state == SlotState::Formatting)
             return false;
         if (!_state.compare_exchange_strong(state, SlotState::Formatting, std::memory_order_acq_rel,
                 std::memory_order_acquire))
