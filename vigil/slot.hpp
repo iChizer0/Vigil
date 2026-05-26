@@ -749,7 +749,7 @@ private:
             {
                 case SlotState::Error: {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Storage slot for device path ", _dev_path,
-                        " is in error state, will retry mounting");
+                        " is in error state, will retry");
                     // Error state requires a longer delay before retrying
                     const auto s = std::chrono::steady_clock::now();
                     do
@@ -1198,7 +1198,7 @@ private:
                 fs_type = *_type;
         }
 
-        if (const auto res = FSCK(_dev_path, fs_type).dirty(); res != FSCK::Result::Clean)
+        if (const auto res = FSCK(_dev_path, fs_type).dirty(); res == FSCK::Result::Clean)
         {
             _dirty.store(false, std::memory_order_release);
             return true;
