@@ -2,6 +2,7 @@
 #ifndef VIGIL_INDEX_MANAGER_HPP
 #define VIGIL_INDEX_MANAGER_HPP
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -25,6 +26,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -42,6 +44,10 @@
 #include "context.hpp"
 #include "log.hpp"
 #include "types.hpp"
+
+#ifndef VG_INDEX_MGR_TRACE_DEBUG
+#define VG_INDEX_MGR_TRACE_DEBUG 0
+#endif
 
 namespace vigil::index_manager {
 
@@ -117,7 +123,10 @@ inline bool EnsureDirectoryExists(const fs::path &path, bool update_permissions 
         return true;
     }
     else
+    {
         std::filesystem::remove_all(path, ec);
+        ec.clear();
+    }
     if (std::filesystem::create_directories(path, ec); ec)
     {
         if (ctx)
@@ -175,15 +184,20 @@ public:
     class EntryIndex
     {
     public:
+        enum Status : int64_t { INVALIDATED = -1 };
+
         struct Index
         {
             int64_t size;
             size_t revision;
+
+            inline bool isValid() const noexcept
+            {
+                return size >= 0;
+            }
         };
 
     private:
-        enum Status : int64_t { INVALIDATED = -1 };
-
         alignas(kHardwareDestructiveInterferenceSize) std::atomic<Index> _index;
 
     public:
@@ -208,7 +222,7 @@ public:
 
         inline bool isValid() const noexcept
         {
-            return _index.load(std::memory_order_acquire).size >= 0;
+            return _index.load(std::memory_order_acquire).isValid();
         }
 
         inline auto revision() const noexcept
@@ -248,28 +262,50 @@ public:
         }
     };
 
-    explicit IndexManager(Context &ctx, const std::string &watch_path)
-        : _ctx(ctx), _watch_path(fs::absolute(watch_path).lexically_normal()),
-          _mount_point(detectMountPoint(_watch_path)), _shutdown(false), _indexable(true), _indexing(false),
-          _fanotify_fd(-1), _mount_fd(-1), _generation_current(0), _generation_target(1)
+    explicit IndexManager(Context &ctx, const fs::path &mount_point, const fs::path &watch_path)
+        : _ctx(ctx), _mount_point(mount_point), _watch_path(fs::absolute(watch_path).lexically_normal()),
+          _shutdown(false), _indexable(true), _indexing(false), _mount_fd(-1), _fanotify_fd(-1), _generation_current(0),
+          _generation_target(1)
     {
         if (!fs::exists(_watch_path))
             throw std::runtime_error("Watch directory does not exist: " + _watch_path.string());
         if (!fs::is_directory(_watch_path))
             throw std::runtime_error("Watch path is not a directory: " + _watch_path.string());
-        // Open fd to mount point for use with open_by_handle_at
-        if (_mount_fd = ::open(_mount_point.c_str(), O_RDONLY); _mount_fd < 0)
+        if (!IsPathUnderRoot(_mount_point, _watch_path))
             throw std::runtime_error(
-                "Failed to open mount point: " + _mount_point.string() + ", errno: " + std::to_string(errno));
+                "Watch path " + _watch_path.string() + " is not under mount point " + _mount_point.string());
 
-        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "IndexManager watching path: ", _watch_path,
+        try
+        {
+            // Open fd to mount point for use with open_by_handle_at
+            if (_mount_fd = ::open(_mount_point.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC); _mount_fd < 0)
+                throw std::runtime_error(
+                    "Failed to open mount point: " + _mount_point.string() + ", errno: " + std::to_string(errno));
+
+            if (_fanotify_fd = ::fanotify_init(
+                    FAN_CLOEXEC | FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME | FAN_UNLIMITED_QUEUE, O_RDONLY | O_LARGEFILE);
+                _fanotify_fd < 0)
+                throw std::runtime_error("Failed to initialize fanotify: " + std::to_string(errno));
+
+            constexpr static const uint64_t kEventMask
+                = FAN_CLOSE_WRITE | FAN_CREATE | FAN_DELETE | FAN_MOVE | FAN_ONDIR | FAN_DELETE_SELF | FAN_MOVE_SELF;
+            if (const int ret = ::fanotify_mark(_fanotify_fd, FAN_MARK_ADD | FAN_MARK_FILESYSTEM, kEventMask, AT_FDCWD,
+                    _mount_point.c_str());
+                ret != 0)
+                throw std::runtime_error("Failed to mark target for fanotify: " + std::to_string(errno));
+
+            // Start worker threads
+            _watcher_thread = std::thread(&IndexManager::watcherLoop, this);
+            _indexer_thread = std::thread(&IndexManager::indexerLoop, this);
+        }
+        catch (...)
+        {
+            shutdown();
+            throw;
+        }
+
+        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "IndexManager initialized, watching path: ", _watch_path,
             ", mount point: ", _mount_point);
-
-        initFanotify();
-
-        // Start worker threads
-        _watcher_thread = std::thread(&IndexManager::watcherLoop, this);
-        _indexer_thread = std::thread(&IndexManager::indexerLoop, this);
     }
 
     ~IndexManager() noexcept
@@ -282,11 +318,6 @@ public:
 
     IndexManager(IndexManager &&) = delete;
     IndexManager &operator=(IndexManager &&) = delete;
-
-    const fs::path &mountPoint() const noexcept
-    {
-        return _mount_point;
-    }
 
     bool indexing() const noexcept
     {
@@ -344,46 +375,56 @@ public:
 
     size_t tryReleaseSpace(size_t target_size_bytes) noexcept
     {
-        const std::unique_lock lock(_indexer_mutex);
+        if (target_size_bytes == 0)
+            return 0;
         size_t removed_size = 0;
+        const std::unique_lock lock(_indexer_mutex);
         {
             const std::shared_lock entries_lock(_entries_mutex);
-            for (auto it = _entries.begin(); it != _entries.end() && removed_size < target_size_bytes;)
+            for (auto it = _entries.begin();
+                 it != _entries.end() && removed_size < target_size_bytes && !_shutdown.load(std::memory_order_acquire);
+                 ++it)
             {
-                if (!it->second->isValid())
-                {
-                    ++it;
-                    continue;
-                }
+                const auto &entry_name = it->first;
+                const auto &entry_index = it->second;
+                if (!entry_index->isValid())
+                    continue; // Skip invalid entries
+                const fs::path entry_path = _watch_path / entry_name;
+                const size_t entry_size = entry_index->size();
                 const auto size_to_remove = target_size_bytes - removed_size;
-                bool remove_entry = true;
-                size_t removed_from_entry = 0;
-                try
-                {
-                    const fs::path entry_path = _watch_path / it->first;
-                    const size_t entry_size = it->second->size();
-                    if (entry_size > size_to_remove)
-                        std::tie(remove_entry, removed_from_entry) = removeInsideEntry(entry_path, size_to_remove);
-                    else
-                        removed_from_entry = entry_size;
+                bool remove_entry = false;
+                size_t removed_size_under_entry = 0;
+                if (entry_size > size_to_remove)
+                    std::tie(remove_entry, removed_size_under_entry) = removeInsideEntry(entry_path, size_to_remove);
+                else
+                    remove_entry = true;
 
-                    if (remove_entry)
-                    {
-                        fs::remove_all(entry_path);
-                        removed_size += entry_size;
-                    }
-                    else
-                        removed_size += removed_from_entry;
-                }
-                catch (const std::exception &e)
+                std::error_code ec;
+                if (remove_entry)
                 {
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove entry ", it->first, ": ", e.what());
-                    ++it;
+                    fs::remove_all(entry_path, ec);
+                    if (!ec) [[likely]]
+                        removed_size += entry_size;
+                    entry_index->markInvalidated();
+                }
+                else if (removed_size_under_entry > 0)
+                {
+                    removed_size += removed_size_under_entry;
+                    entry_index->markInvalidated();
+                }
+                else
+                    ec.assign(EBADF, std::generic_category()); // No space removed, treat as failure to remove
+                if (ec) [[unlikely]]
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove space under entry: ", entry_path,
+                        ", code:", ec.value());
                 }
             }
-            _generation_target.fetch_add(1, std::memory_order_release);
+            if (removed_size)
+                _generation_target.fetch_add(1, std::memory_order_release);
         }
-        _indexer_cv.notify_one();
+        if (removed_size)
+            _indexer_cv.notify_one();
         return removed_size;
     }
 
@@ -403,9 +444,18 @@ public:
 private:
     std::pair<bool, size_t> removeInsideEntry(const fs::path &entry_path, size_t target_size_bytes) const noexcept
     {
-        bool remove_self = false;
-        size_t removed_size = 0;
+        {
+            struct stat st;
+            if (::lstat(entry_path.c_str(), &st) != 0)
+                return { false, 0 }; // Failed to stat, treat as no space removed but entry should not be removed
+            if (!S_ISDIR(st.st_mode))
+                return { true, 0 }; // Not a directory, caller should remove the whole entry
+        }
+
         std::vector<std::string> entry_to_remove;
+        size_t removed_size = 0;
+        size_t remove_count_success = 0;
+        size_t remove_count_fail_or_skip = 0;
         std::error_code ec;
 
         try
@@ -413,9 +463,13 @@ private:
             for (const auto &entry:
                 fs::directory_iterator(entry_path, fs::directory_options::skip_permission_denied, ec))
             {
+                if (_shutdown.load(std::memory_order_acquire)) [[unlikely]]
+                    return { false, removed_size };
                 if (ec)
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to iterate entry ", entry.path(), ": ", ec.message());
+                    ec.clear(); // Best effort, try to remove what we can
+                    ++remove_count_fail_or_skip;
                     continue;
                 }
                 entry_to_remove.emplace_back(entry.path().filename().string());
@@ -433,7 +487,12 @@ private:
                 if (const auto sta = indexFileOrSubdirectory(p, sz); sta == IndexStatus::SUCCESS) [[likely]]
                 {
                     if (RemoveWithThumbnailCheck(p)) [[likely]]
+                    {
                         removed_size += sz;
+                        ++remove_count_success;
+                    }
+                    else
+                        ++remove_count_fail_or_skip;
                     it->clear();
                 }
                 else if (sta == IndexStatus::PARTIAL)
@@ -444,7 +503,6 @@ private:
                 else if (sta == IndexStatus::CANCELED)
                     break;
             }
-
             for (auto it = entry_to_remove.cbegin(); it != entry_to_remove.cend() && removed_size < target_size_bytes;
                  ++it)
             {
@@ -452,10 +510,15 @@ private:
                     continue;
                 const auto p = entry_path / *it;
                 size_t sz = 0;
-                if (auto sta = indexFileOrSubdirectory(p, sz); sta == IndexStatus::SUCCESS) [[likely]]
+                if (const auto sta = indexFileOrSubdirectory(p, sz); sta == IndexStatus::SUCCESS) [[likely]]
                 {
                     if (RemoveWithThumbnailCheck(p)) [[likely]]
+                    {
                         removed_size += sz;
+                        ++remove_count_success;
+                    }
+                    else
+                        ++remove_count_fail_or_skip;
                 }
                 else if (sta == IndexStatus::PARTIAL)
                     continue;
@@ -466,50 +529,18 @@ private:
         catch (const std::exception &e)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove inside entry ", entry_path, ": ", e.what());
-            remove_self = true;
+            ++remove_count_fail_or_skip;
         }
-        return { remove_self, removed_size };
-    }
-
-    static fs::path detectMountPoint(const fs::path &path)
-    {
-        const fs::path abs_path = fs::absolute(path);
-        struct stat path_stat;
-        if (::stat(abs_path.c_str(), &path_stat) != 0)
-            throw std::runtime_error("Failed to stat path: " + abs_path.string() + ", errno: " + std::to_string(errno));
-
-        const dev_t target_dev = path_stat.st_dev;
-        fs::path current = abs_path;
-        fs::path mount_point = current;
-
-        // Traverse up until we hit root or find a different device
-        while (current.has_parent_path() && current != current.parent_path())
-        {
-            const fs::path parent = current.parent_path();
-            struct stat parent_stat;
-            if (::stat(parent.c_str(), &parent_stat) != 0)
-                break; // Can't stat parent, use current as mount point
-
-            if (parent_stat.st_dev != target_dev)
-            {
-                mount_point = current;
-                break; // Parent is on different device - current is the mount point
-            }
-
-            // Same device, continue up
-            mount_point = parent;
-            current = parent;
-        }
-
-        return mount_point;
+        // If all entries to remove are successfully removed under the entry, remove the entry itself
+        return { (entry_to_remove.size() == remove_count_success) && (remove_count_fail_or_skip == 0), removed_size };
     }
 
     // Reference to context
     Context &_ctx;
 
     // Path management
-    const fs::path _watch_path;  // Directory to index and watch
     const fs::path _mount_point; // Auto-detected mount point for fanotify
+    const fs::path _watch_path;  // Directory to index and watch
 
     // Shutdown control
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _shutdown;
@@ -523,8 +554,8 @@ private:
     std::map<std::string, std::shared_ptr<EntryIndex>> _entries;
 
     // Kernel fanotify
-    int _fanotify_fd;
     int _mount_fd; // fd to root dir, used for open_by_handle_at
+    int _fanotify_fd;
 
     // Thread synchronization
     std::mutex _indexer_mutex;
@@ -564,7 +595,6 @@ private:
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Exception occurred while shutting down indexer thread: ", e.what());
         }
 
-        // Close fanotify fd to unblock poll()
         if (_fanotify_fd >= 0)
         {
             ::close(_fanotify_fd);
@@ -574,42 +604,6 @@ private:
         {
             ::close(_mount_fd);
             _mount_fd = -1;
-        }
-    }
-
-    void initFanotify()
-    {
-        _fanotify_fd = ::fanotify_init(FAN_CLOEXEC | FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME | FAN_UNLIMITED_QUEUE,
-            O_RDONLY | O_LARGEFILE);
-        if (_fanotify_fd < 0)
-            throw std::runtime_error("Failed to initialize fanotify: " + std::to_string(errno));
-
-        auto try_mark = [this](uint64_t mark_flag) {
-            const uint64_t event_mask
-                = FAN_CLOSE_WRITE | FAN_CREATE | FAN_DELETE | FAN_MOVE | FAN_ONDIR | FAN_DELETE_SELF | FAN_MOVE_SELF;
-            return ::fanotify_mark(_fanotify_fd, FAN_MARK_ADD | mark_flag, event_mask, AT_FDCWD, _mount_point.c_str());
-        };
-
-        // Prefer a mount mark, but fall back to a filesystem mark if the
-        // kernel/filesystem rejects FAN_MARK_MOUNT (common on some removable or
-        // network filesystems).
-        if (int mount_rc = try_mark(FAN_MARK_MOUNT); mount_rc < 0)
-        {
-            const int mount_err = errno;
-            // Some filesystems (e.g., FAT or certain network mounts) don't
-            // support FAN_MARK_MOUNT. In those cases, retry with FAN_MARK_FILESYSTEM
-            // to keep a single O(1) mark over the whole tree.
-            if (int fs_rc = try_mark(FAN_MARK_FILESYSTEM); fs_rc < 0)
-            {
-                const int fs_err = errno;
-
-                ::close(_fanotify_fd);
-                _fanotify_fd = -1;
-
-                throw std::runtime_error(
-                    "Failed to mark target for fanotify (mount: " + std::string(std::strerror(mount_err))
-                    + ", filesystem: " + std::string(std::strerror(fs_err)) + ")");
-            }
         }
     }
 
@@ -864,25 +858,26 @@ private:
         return IndexStatus::SUCCESS;
     }
 
-    static constexpr inline const size_t kFanotifyBufferSize = 8192;
-    static constexpr inline const size_t kFanotifyPoolTimeoutMs = 500;
-    static constexpr inline const size_t kFanotifyPoolDelayMs = 1000;
+    static constexpr inline const size_t kFanotifyBufferSize = 65535;
+    static constexpr inline const size_t kFanotifyPollTimeoutMs = 500;
+    static constexpr inline const size_t kFanotifyPollDelayMs = 1000;
 
     void watcherLoop() noexcept
     {
-        alignas(struct fanotify_event_metadata) char buffer[kFanotifyBufferSize];
+        void *buffer
+            = ::operator new(kFanotifyBufferSize, std::align_val_t { alignof(struct fanotify_event_metadata) });
         while (!_shutdown.load(std::memory_order_acquire))
         {
             struct pollfd pfd = { _fanotify_fd, POLLIN, 0 };
-            if (int ret = ::poll(&pfd, 1, kFanotifyPoolTimeoutMs); ret < 0)
+            if (const int ret = ::poll(&pfd, 1, kFanotifyPollTimeoutMs); ret < 0)
             {
-                if (int err = errno; err == EINTR)
+                if (const int err = errno; err == EINTR)
                     continue;
                 else
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Poll error in watcher loop: ", std::strerror(err));
                     requestReindex(true);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(kFanotifyPoolDelayMs));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kFanotifyPollDelayMs));
                     continue;
                 }
             }
@@ -892,28 +887,30 @@ private:
             if (!(pfd.revents & POLLIN))
                 continue;
 
-            const ssize_t len = ::read(_fanotify_fd, buffer, sizeof(buffer));
+            const ssize_t len = ::read(pfd.fd, buffer, kFanotifyBufferSize);
             if (len <= 0)
-            { // 0 on EOF
-                if (int err = errno; err == EINTR || err == EAGAIN)
-                    continue;
+            {
+                if (const int err = errno; err == EINTR || err == EAGAIN)
+                    continue; // 0 on EOF
                 else
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Read error in watcher loop: ", std::strerror(err));
                     requestReindex(true);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(kFanotifyPoolDelayMs));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kFanotifyPollDelayMs));
                     continue;
                 }
             }
             processFanotifyEvents(buffer, len);
         }
+        ::operator delete(buffer, std::align_val_t { alignof(struct fanotify_event_metadata) });
     }
 
-    void processFanotifyEvents(char *buffer, ssize_t len) noexcept
+    void processFanotifyEvents(void *buffer, ssize_t len) noexcept
     {
         bool pending_changes = false;
         for (struct fanotify_event_metadata *metadata = reinterpret_cast<struct fanotify_event_metadata *>(buffer);
-             !_shutdown.load(std::memory_order_acquire) && FAN_EVENT_OK(metadata, len);)
+             FAN_EVENT_OK(metadata, len) && !_shutdown.load(std::memory_order_acquire);
+             metadata = FAN_EVENT_NEXT(metadata, len))
         {
             if (metadata->vers != FANOTIFY_METADATA_VERSION) [[unlikely]]
             {
@@ -934,12 +931,16 @@ private:
                     // For FID-based events, extract the path
                     if (metadata->event_len > metadata->metadata_len)
                     {
+#if VG_INDEX_MGR_TRACE_DEBUG
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Processing FID event, mask: ", VG_HEX(metadata->mask, 8));
+#endif
                         result = handleFidEvent(metadata);
                     }
                     else if (metadata->fd >= 0)
                     {
+#if VG_INDEX_MGR_TRACE_DEBUG
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Processing FD event, mask: ", VG_HEX(metadata->mask, 8));
+#endif
                         result = handleFdEvent(metadata);
                     }
                     else
@@ -983,8 +984,6 @@ private:
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN,
                         "Unknown EventResult from event handler: ", static_cast<int>(result));
             }
-
-            metadata = FAN_EVENT_NEXT(metadata, len);
         }
         if (pending_changes)
             requestReindex(false);
@@ -1019,9 +1018,17 @@ private:
 
         {
             char proc_path[64] { "/proc/self/fd/" };
-            std::to_chars(proc_path + std::char_traits<char>::length(proc_path), proc_path + sizeof(proc_path), fd)
-                .ptr[0]
-                = '\0';
+            const auto res = std::to_chars(proc_path + std::char_traits<char>::length(proc_path),
+                proc_path + sizeof(proc_path) - 1, fd);
+            if (res.ec != std::errc()) [[unlikely]]
+            {
+                ::close(fd);
+                throw std::runtime_error("FID proc path formatting failed");
+            }
+            *res.ptr = '\0';
+#if VG_INDEX_MGR_TRACE_DEBUG
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "FID event filename: \"", filename, "\", proc path: ", proc_path);
+#endif
 
             char path[PATH_MAX];
             const ssize_t path_len = ::readlink(proc_path, path, sizeof(path) - 1);
@@ -1043,10 +1050,11 @@ private:
 
         {
             char proc_path[64] { "/proc/self/fd/" };
-            std::to_chars(proc_path + std::char_traits<char>::length(proc_path), proc_path + sizeof(proc_path),
-                metadata->fd)
-                .ptr[0]
-                = '\0';
+            const auto res = std::to_chars(proc_path + std::char_traits<char>::length(proc_path),
+                proc_path + sizeof(proc_path) - 1, metadata->fd);
+            if (res.ec != std::errc()) [[unlikely]]
+                throw std::runtime_error("FD proc path formatting failed");
+            *res.ptr = '\0';
 
             char file_path[PATH_MAX];
             const ssize_t path_len = ::readlink(proc_path, file_path, sizeof(file_path) - 1);
@@ -1063,6 +1071,9 @@ private:
     EventResult handleEvent(uint64_t mask, const fs::path &path) noexcept
     {
         fs::path rel_path;
+#if VG_INDEX_MGR_TRACE_DEBUG
+        VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Handling event for path: ", path, ", mask: ", VG_HEX(mask, 8));
+#endif
         if (!makeRelativeToWatchPath(path, rel_path))
             return EventResult::SKIPPED;
         if (rel_path.empty())
@@ -1146,7 +1157,6 @@ private:
 
     EventResult handleIncrementalAdd(const std::string &entry_name, bool is_nested, const fs::path &path) noexcept
     {
-        (void)is_nested;
         const std::shared_lock entries_lock(_entries_mutex);
         if (auto it = _entries.find(entry_name); it == _entries.end())
         {
@@ -1155,8 +1165,13 @@ private:
         }
         else
         {
+            if (!is_nested)
+            {
+                it->second->markInvalidated();
+                return EventResult::REINDEX;
+            }
             bool incremental = false;
-            if (const auto cur = it->second->current(); it->second->isValid())
+            if (const auto cur = it->second->current(); cur.isValid())
             {
                 size_t size = 0;
                 if (indexFileOrSubdirectory(path, size) == IndexStatus::SUCCESS)

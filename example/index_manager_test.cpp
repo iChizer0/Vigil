@@ -23,31 +23,32 @@ void print_size(const auto &result)
 
 int main(int argc, char *argv[])
 {
-    if (argc != 2)
+    if (argc != 3)
     {
-        std::cerr << "Usage: " << argv[0] << " <watch_path>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <mount_point> <watch_path>" << std::endl;
+        std::cerr << "  mount_point: Mount point of the filesystem" << std::endl;
         std::cerr << "  watch_path: Directory to index and watch" << std::endl;
-        std::cerr << "  (mount point is auto-detected)" << std::endl;
         return 1;
     }
 
-    const char *watch_path = argv[1];
+    const char *mount_point = argv[1];
+    const char *watch_path = argv[2];
 
     vg_config_t cfg = {};
     vigil::Context ctx(cfg);
 
     try
     {
-        vigil::index_manager::IndexManager manager(ctx, watch_path);
+        vigil::index_manager::IndexManager manager(ctx, mount_point, watch_path);
         {
             std::cout << "Starting index manager:" << std::endl;
+            std::cout << "  Mount point: " << mount_point << std::endl;
             std::cout << "  Watch path:  " << watch_path << std::endl;
-            std::cout << "  Mount point: " << manager.mountPoint().string() << " (auto-detected)" << std::endl;
 
             // Wait for initial indexing to complete
             std::cout << "Waiting for initial index..." << std::endl;
         }
-        while (manager.indexing())
+        while (!manager.indexed() || manager.indexing())
         {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }

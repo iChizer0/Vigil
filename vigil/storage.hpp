@@ -165,16 +165,7 @@ public:
             return EPERM;
         }
 
-        auto do_remove
-            = [&]() { return slot->removeFilesOrDirectories(relative_paths, progress, should_cancel, on_progress); };
-
-        if (auto mgr = slot->getIndexManager(); mgr)
-        {
-            const auto guard = mgr->suspend();
-            return do_remove();
-        }
-        else
-            return do_remove();
+        return slot->removeFilesOrDirectories(relative_paths, progress, should_cancel, on_progress);
     }
 
     vg_sta_e freeUpSlot(const std::string &slot_dev_path, SlotFileOpsProgress *progress = nullptr,
@@ -317,10 +308,9 @@ private:
             int r;
             return ifs >> r && r == 1;
         };
-        std::error_code ec;
-        if (std::filesystem::exists(sys_path / "partition", ec))
+        if (std::error_code ec; std::filesystem::exists(sys_path / "partition", ec))
         {
-            if (auto target = std::filesystem::canonical(sys_path, ec); !ec)
+            if (const auto target = std::filesystem::canonical(sys_path, ec); !ec)
             {
                 if (check_removable(target.parent_path()))
                     return true;
@@ -382,23 +372,29 @@ private:
                     SlotInfo { std::move(mount_point), false, true });
             }
 
-            std::error_code ec;
-            for (const auto &entry: std::filesystem::directory_iterator("/sys/class/block", ec))
+            try
             {
-                const auto dev_name = entry.path().filename().string();
-                if (dev_name.starts_with("loop") || dev_name.starts_with("ram") || dev_name.starts_with("sr"))
-                    continue;
-                if (!isValidDevName(dev_name))
-                    continue;
-                if (std::filesystem::exists(entry.path() / "partition", ec))
+                for (const auto &entry: std::filesystem::directory_iterator("/sys/class/block"))
                 {
-                    if (isDevHidden(dev_name))
+                    const auto dev_name = entry.path().filename().string();
+                    if (dev_name.starts_with("loop") || dev_name.starts_with("ram") || dev_name.starts_with("sr"))
                         continue;
-                    dev_2_slot_info_vec.emplace("/dev/" + dev_name,
-                        SlotInfo { getMountPath(dev_name), isDevRemovable(dev_name), false });
+                    if (!isValidDevName(dev_name))
+                        continue;
+                    if (std::error_code ec2; std::filesystem::exists(entry.path() / "partition", ec2))
+                    {
+                        if (isDevHidden(dev_name))
+                            continue;
+                        dev_2_slot_info_vec.emplace("/dev/" + dev_name,
+                            SlotInfo { getMountPath(dev_name), isDevRemovable(dev_name), false });
+                    }
                 }
+                _initial_scan_done = true;
             }
-            _initial_scan_done = true;
+            catch (const std::exception &e)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Exception occurred while scanning block devices: ", e.what());
+            }
         }
 
         std::list<std::string> dev_2_remove;

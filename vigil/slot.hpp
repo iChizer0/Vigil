@@ -152,11 +152,6 @@ public:
         return _uuid;
     }
 
-    std::shared_ptr<IndexManager> getIndexManager() const noexcept
-    {
-        return loadIndexManager();
-    }
-
     SlotStatus getStatus() const noexcept
     {
         const auto is_enabled = isEnabled();
@@ -170,7 +165,7 @@ public:
             uuid = _uuid;
             format = _type;
         }
-        const auto idx_mgr = loadIndexManager();
+        const auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
         return SlotStatus {
             .dev_path = _dev_path,
             .mount_path = _mount_path,
@@ -295,7 +290,7 @@ public:
         }
 
         // Reset index manager
-        storeIndexManager(nullptr);
+        std::atomic_store_explicit(&_index_manager, std::shared_ptr<IndexManager>(nullptr), std::memory_order_release);
 
         // Reset rotating status
         _rotating.store(false, std::memory_order_release);
@@ -475,7 +470,7 @@ public:
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to iterate record root path for freeing up space: ", e.what());
             ret = EIO;
         }
-        if (auto idx_mgr = loadIndexManager(); idx_mgr)
+        if (auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire); idx_mgr)
             idx_mgr->requestReindex(true);
 
         return ret;
@@ -649,17 +644,6 @@ protected:
     // - MARK: Slot Private Methods
 
 private:
-    std::shared_ptr<IndexManager> loadIndexManager(std::memory_order order = std::memory_order_acquire) const noexcept
-    {
-        return std::atomic_load_explicit(&_index_manager, order);
-    }
-
-    void storeIndexManager(std::shared_ptr<IndexManager> index_manager,
-        std::memory_order order = std::memory_order_release) const noexcept
-    {
-        std::atomic_store_explicit(&_index_manager, index_manager, order);
-    }
-
     void resetWriteStatsUnsafe()
     {
         _write_stats.reset();
@@ -691,7 +675,7 @@ private:
         }
 
         // Get index manager
-        auto idx_mgr = loadIndexManager();
+        auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
         if (!idx_mgr)
         {
             _rotating.store(false, std::memory_order_release);
@@ -865,7 +849,7 @@ private:
                 // Check if quota limit is exceeded
                 if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit >= 0)
                 {
-                    if (auto idx_mgr = loadIndexManager(); !idx_mgr)
+                    if (auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire); !idx_mgr)
                         goto l_continue_evt;
                     else if (auto index_result = idx_mgr->size(); !index_result.valid)
                         goto l_continue_evt;
@@ -1495,11 +1479,14 @@ private:
 
     bool doCreateIndexManager() noexcept
     {
-        if (!loadIndexManager())
+        auto mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
+        if (!mgr)
         {
             try
             {
-                storeIndexManager(std::make_shared<IndexManager>(std::ref(_ctx), getRecordRootPath()));
+                auto new_mgr = std::make_shared<IndexManager>(std::ref(_ctx), _mount_path, getRecordRootPath());
+                return std::atomic_compare_exchange_strong_explicit(&_index_manager, &mgr, new_mgr,
+                    std::memory_order_acq_rel, std::memory_order_acquire);
             }
             catch (const std::exception &e)
             {
@@ -1513,7 +1500,7 @@ private:
 
     bool doSyncIndex() noexcept
     {
-        auto idx_mgr = loadIndexManager();
+        auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
         if (!idx_mgr)
             return false;
         idx_mgr->requestReindex();
@@ -1536,14 +1523,14 @@ private:
             return false;            // Early return if state changed, indexing should only be done by one thread
         state = SlotState::Indexing; // Update expected state
         if (!doCreateIndexManager())
-            goto l_index_again;
+            goto l_index_error;
         if (!doSyncIndex())
-            goto l_index_again;
+            goto l_index_error;
         return _state.compare_exchange_strong(state, SlotState::Ready, std::memory_order_acq_rel,
             std::memory_order_acquire);
 
-    l_index_again:
-        while (!_state.compare_exchange_strong(state, SlotState::Configured, std::memory_order_acq_rel,
+    l_index_error:
+        while (!_state.compare_exchange_strong(state, SlotState::Error, std::memory_order_acq_rel,
             std::memory_order_acquire))
             std::this_thread::yield();
         return false;

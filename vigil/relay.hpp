@@ -31,8 +31,9 @@ class Relay final
 {
 public:
     Relay(Context &ctx, const std::filesystem::path &target_dir)
-        : _ctx(ctx), _target_dir_path(target_dir), _relay_dir_path(_ctx.c_api.storage.relay_directory_path), _mutex(),
-          _relay_dir_mutex(), _relay_dir_name(), _relay_thread(nullptr), _last_active_time()
+        : _ctx(ctx), _target_dir_path(target_dir),
+          _relay_dir_path(_ctx.c_api.storage.relay_directory_path ? _ctx.c_api.storage.relay_directory_path : ""),
+          _mutex(), _relay_dir_mutex(), _relay_dir_name(), _relay_thread(nullptr), _last_active_time()
     {
     }
 
@@ -48,7 +49,7 @@ public:
         if (status.relay_directory.empty())
             status.relay_timeout_remain = std::chrono::seconds(0);
         else if (auto duration = std::chrono::steady_clock::now() - _last_active_time.load(std::memory_order_acquire);
-            duration < kRelayTimeout)
+                 duration < kRelayTimeout)
             status.relay_timeout_remain = std::chrono::duration_cast<std::chrono::seconds>(kRelayTimeout - duration);
         status.relay_timeout = kRelayTimeout;
         return status;
@@ -56,6 +57,12 @@ public:
 
     vg_sta_e enableOrHeartbeatNginxRelay()
     {
+        if (_relay_dir_path.empty())
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Nginx relay directory path is not configured");
+            return ENOTSUP;
+        }
+
         const std::unique_lock api_lock(_mutex);
         {
             if (isRelayEnabled())
@@ -69,6 +76,7 @@ public:
         try
         {
             std::error_code ec;
+
             // Check if target directory exists
             if (!std::filesystem::is_directory(_target_dir_path, ec))
             {
@@ -89,7 +97,10 @@ public:
                 if (!ec)
                     break;
                 if (ec == std::errc::file_exists)
+                {
+                    ec.clear();
                     continue;
+                }
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create relay symlink ", relay_path, ": ", ec.message());
                 relay_dir_name.clear();
                 break;
