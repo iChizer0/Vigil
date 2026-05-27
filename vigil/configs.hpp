@@ -468,7 +468,8 @@ struct RecordConfig
     size_t settings_rev;
     std::shared_ptr<FileWriterSettings> settings;
 
-    RecordConfig(bool e, const std::shared_ptr<FileWriterSettings> &s) : enabled(e), settings(s)
+    RecordConfig(bool e, std::pair<size_t, std::shared_ptr<FileWriterSettings>> p)
+        : enabled(e), settings_rev(p.first), settings(p.second)
     {
         if (!settings)
             throw Exception("FileWriterSettings is null while constructing RecordConfig");
@@ -500,8 +501,7 @@ struct RecordConfig
 
     static RecordConfig from(const Context &ctx)
     {
-        return RecordConfig(ctx.record_rule_enabled.load(std::memory_order_acquire),
-            ctx.shared_writer_settings.get().second);
+        return RecordConfig(ctx.record_rule_enabled.load(std::memory_order_acquire), ctx.shared_writer_settings.get());
     }
 
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
