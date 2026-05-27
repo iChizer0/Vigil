@@ -465,6 +465,7 @@ private:
 struct RecordConfig
 {
     bool enabled;
+    size_t settings_rev;
     std::shared_ptr<FileWriterSettings> settings;
 
     RecordConfig(bool e, const std::shared_ptr<FileWriterSettings> &s) : enabled(e), settings(s)
@@ -473,7 +474,7 @@ struct RecordConfig
             throw Exception("FileWriterSettings is null while constructing RecordConfig");
     }
 
-    RecordConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
+    RecordConfig(const nlohmann::json &j, const Context &ctx)
     {
         enabled = j.at("bRuleEnabled").get<bool>();
 
@@ -483,9 +484,13 @@ struct RecordConfig
             if (itv_ms <= 0)
                 throw Exception(
                     "Invalid recording interval " + std::to_string(itv_ms) + "ms while parsing RecordConfig");
-            if (settings = FileWriterSettings::create(settings_j.at("sFormat").get<std::string>(),
-                    std::chrono::milliseconds(itv_ms), kRecordWriterPrefixDefault, kVideoClipLengthDefault,
-                    ctx.c_api.media);
+            settings_rev = ctx.shared_writer_settings.get().first;
+            const auto fmt = settings_j.at("sFormat").get<std::string>();
+            if (settings = FileWriterSettings::create(fmt, std::chrono::milliseconds(itv_ms),
+                    kRecordWriterPrefixDefault, kVideoClipLengthDefault,
+                    WaterMarks::from(fmt,
+                        CaptureTypeFrom(fmt) == CaptureType::Video ? kVideoClipLengthDefault.count() : 1,
+                        &ctx.c_api.media));
                 !settings)
                 throw Exception("Failed to create FileWriterSettings while parsing RecordConfig");
         }
@@ -508,10 +513,13 @@ struct RecordConfig
         }
     }
 
-    void sync(Context &ctx) const noexcept
+    vg_sta_e sync(Context &ctx) const noexcept
     {
         ctx.record_rule_enabled.store(enabled, std::memory_order_release);
-        ctx.shared_writer_settings.update(settings);
+        if (ctx.shared_writer_settings.update(settings_rev, settings))
+            return 0;
+        else
+            return EAGAIN;
     }
 };
 
@@ -805,14 +813,17 @@ struct CaptureConfig
             std::chrono::seconds video_length = std::chrono::seconds::max();
             if (j.contains("iVideoLengthSeconds"))
             {
-                if (auto l = j.at("iVideoLengthSeconds").get<int>(); l > 0)
+                if (const auto l = j.at("iVideoLengthSeconds").get<int>(); l > 0)
                     video_length = std::chrono::seconds(l);
                 else
                     throw Exception(
                         "Invalid video length seconds " + std::to_string(l) + " while parsing CaptureConfig");
             }
-            settings = FileWriterSettings::create(j.at("sFormat").get<std::string>(), std::chrono::milliseconds(0),
-                kCaptureWriterPrefixDefault, video_length, ctx.c_api.media);
+            const auto fmt = j.at("sFormat").get<std::string>();
+            settings = FileWriterSettings::create(fmt, std::chrono::milliseconds(0), kCaptureWriterPrefixDefault,
+                video_length,
+                WaterMarks::from(fmt, CaptureTypeFrom(fmt) == CaptureType::Video ? kCaptureWaterMarkBatch : 1,
+                    &ctx.c_api.media));
             if (!settings)
                 throw Exception("Failed to create FileWriterSettings while parsing CaptureConfig");
         }

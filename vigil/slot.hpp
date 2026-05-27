@@ -183,8 +183,8 @@ public:
             .state = state,
             .stats = _stats.load(std::memory_order_acquire),
             .quota_minimum_recommend_bytes = [this]() -> FileSize {
-                const auto watermarks = _ctx.shared_writer_settings.getWaterMarks();
-                return std::max(watermarks.high_remain_bytes + watermarks.recycle_bytes,
+                const auto [_, s] = _ctx.shared_writer_settings.get();
+                return std::max(s ? (s->watermarks.high_remain_bytes + s->watermarks.recycle_bytes) : 0,
                     static_cast<FileSize>(kStorageMinSupportedFileSystemBytes));
             }(),
             .quota_preserved_bytes = isInternal() ? static_cast<FileSize>(kStorageMinFileSystemFreeBytesInternal) : 0,
@@ -683,22 +683,27 @@ private:
         }
 
         const auto limit = _quota_limit_bytes.load(std::memory_order_acquire);
-        const auto watermarks = _ctx.shared_writer_settings.getWaterMarks();
+        const auto [_, s] = _ctx.shared_writer_settings.get();
+        if (!s)
+        {
+            _rotating.store(false, std::memory_order_release);
+            return;
+        }
 
         // Check if quota limit is exceeded
         if (limit >= 0)
         {
             if (auto index_result = idx_mgr->size(); !index_result.valid)
                 return;
-            else if (index_result.size + watermarks.high_remain_bytes > limit)
+            else if (index_result.size + s->watermarks.high_remain_bytes > limit)
                 goto l_free_up_space;
         }
 
         // Check if free space is sufficient
         if (doStats();
             _stats.load(std::memory_order_acquire).free_bytes
-            < (isInternal() ? static_cast<FileSize>(watermarks.high_remain_bytes + GetInternalPreservedLimit())
-                            : watermarks.high_remain_bytes))
+            < (isInternal() ? static_cast<FileSize>(s->watermarks.high_remain_bytes + GetInternalPreservedLimit())
+                            : s->watermarks.high_remain_bytes))
             goto l_free_up_space;
 
         _rotating.store(false, std::memory_order_release);
@@ -712,9 +717,9 @@ private:
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Storage slot for device path ", _dev_path,
             " is low on free space, quota limit: ", limit, " bytes, estimated write bytes in next ",
             kManagerEstimatedWriteBytesPeriod.count(), " minutes: ", estimated_write_bytes_in_period,
-            " bytes, will free up ", watermarks.recycle_bytes, " bytes");
+            " bytes, will free up ", s->watermarks.recycle_bytes, " bytes");
 
-        const auto freed = idx_mgr->tryReleaseSpace(watermarks.recycle_bytes);
+        const auto freed = idx_mgr->tryReleaseSpace(s->watermarks.recycle_bytes);
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Freed up ", freed, " bytes on storage slot for device path", _dev_path);
     }
 
@@ -879,13 +884,13 @@ private:
                 {
                     switch (settings->type)
                     {
-                        case FileWriterSettings::CaptureType::Image:
+                        case CaptureType::Image:
                             if (auto writer = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
                                     rev, std::ref(_ctx), std::move(settings), std::move(event));
                                 writer && !handle_write(*writer))
                                 return;
                             break;
-                        case FileWriterSettings::CaptureType::Video:
+                        case CaptureType::Video:
                             if (auto writer = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
                                     rev, std::ref(_ctx), std::move(settings), std::move(event));
                                 writer && !handle_write(*writer))

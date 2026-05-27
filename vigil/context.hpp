@@ -13,6 +13,7 @@
 #include <mutex>
 #include <queue>
 #include <shared_mutex>
+#include <thread>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -239,42 +240,63 @@ struct Context
     private:
         mutable std::shared_mutex mutex;
         alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> revision = 0;
-        std::shared_ptr<FileWriterSettings> settings = nullptr;
+        std::shared_ptr<FileWriterSettings> settings = FileWriterSettings::create(kRecordWriterDefaultFormat,
+            kRecordWriterDefaultIntervalMs, kRecordWriterPrefixDefault, kVideoClipLengthDefault,
+            WaterMarks::from(kRecordWriterDefaultFormat,
+                CaptureTypeFrom(kRecordWriterDefaultFormat) == CaptureType::Video ? kVideoClipLengthDefault.count() : 1,
+                nullptr));
 
     public:
-        void update(const std::shared_ptr<FileWriterSettings> &new_settings) noexcept
+        bool update(size_t rev, std::shared_ptr<FileWriterSettings> new_settings) noexcept
         {
-            if (!new_settings)
-                return;
+            if (!new_settings) [[unlikely]]
+                return false;
             const std::unique_lock lock(mutex);
-            if (!settings || *settings != *new_settings)
+            if (const auto cur = revision.load(std::memory_order_acquire); rev == cur)
             {
-                settings = new_settings;
-                revision.fetch_add(1, std::memory_order_release);
+                if (!settings || *settings != *new_settings)
+                {
+                    settings = std::move(new_settings);
+                    revision.store(cur + 1, std::memory_order_release);
+                }
+                return true;
             }
+            return false;
         }
 
-        void sync(const vg_config_media_t &media_api)
+        void sync(const vg_config_media_t &media_capi) noexcept
         {
-            const std::unique_lock lock(mutex);
-            const auto old_settings = settings;
-            if (!old_settings)
-                return;
-            settings = FileWriterSettings::create(old_settings->format, old_settings->interval,
-                old_settings->file_name_prefix, old_settings->video_clip_length, media_api);
-            revision.fetch_add(1, std::memory_order_release);
+            try
+            {
+                for (;;)
+                {
+                    auto [rev, old] = get();
+                    if (!old)
+                        return;
+                    auto new_settings = FileWriterSettings::create(old->format, old->interval, old->file_name_prefix,
+                        old->video_clip_length,
+                        WaterMarks::from(old->format,
+                            CaptureTypeFrom(old->format) == CaptureType::Video ? old->video_clip_length.count() : 1,
+                            &media_capi));
+                    if (!new_settings)
+                    {
+                        std::this_thread::yield();
+                        continue;
+                    }
+                    if (update(rev, std::move(new_settings)))
+                        return;
+                }
+            }
+            catch (...)
+            {
+                return; // Should not happen
+            }
         }
 
         std::pair<size_t, std::shared_ptr<FileWriterSettings>> get() const noexcept
         {
             const std::shared_lock lock(mutex);
             return { revision.load(std::memory_order_acquire), settings };
-        }
-
-        WaterMarks getWaterMarks() const noexcept
-        {
-            const std::shared_lock lock(mutex);
-            return settings ? settings->watermarks : WaterMarks::from(kStorageMinFileSystemFreeBytes);
         }
 
         size_t getRevision() const noexcept
@@ -440,13 +462,7 @@ struct Context
     } shared_inference_result;
 
     // Constructor
-    Context(const vg_config_t &cfg) : c_api(cfg)
-    {
-        {
-            shared_writer_settings.update(FileWriterSettings::create(kRecordWriterDefaultFormat,
-                kRecordWriterDefaultIntervalMs, kRecordWriterPrefixDefault, kVideoClipLengthDefault, cfg.media));
-        }
-    }
+    Context(const vg_config_t &cfg) : c_api(cfg) { }
 
     // Destructor
     ~Context() = default;

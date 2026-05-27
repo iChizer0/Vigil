@@ -864,22 +864,27 @@ struct CacheFileInfo final
     ~CacheFileInfo() = default;
 };
 
+enum class CaptureType { Video, Image };
+
+inline CaptureType CaptureTypeFrom(const std::string &fmt)
+{
+    if (fmt == "MP4")
+        return CaptureType::Video;
+    else if (fmt == "JPG" || fmt == "RAW")
+        return CaptureType::Image;
+    else
+        throw Exception("Unsupported file writer format: " + fmt);
+}
+
 struct WaterMarks
 {
     FileSize critical_remain_bytes;
     FileSize high_remain_bytes;
     FileSize recycle_bytes;
 
-    static inline WaterMarks from(FileSize limit) noexcept
-    {
-        return WaterMarks {
-            .critical_remain_bytes = static_cast<FileSize>(kStorageCriticalWaterMarkFactor * limit),
-            .high_remain_bytes = static_cast<FileSize>(kStorageHighWaterMarkFactor * limit),
-            .recycle_bytes = static_cast<FileSize>(kStorageRecycleFactor * limit),
-        };
-    }
+    typedef int64_t (*media_max_bytes_estimate)(const char *format, size_t batch, void *user_data);
 
-    static inline WaterMarks from(const std::string &format, std::chrono::seconds duration, size_t bitrate) noexcept
+    static inline WaterMarks from(const std::string &format, size_t batch, const vg_config_media_t *media_capi) noexcept
     {
         size_t i = 0;
         for (; i < kFormatMaxBytesMap.size(); ++i)
@@ -888,14 +893,18 @@ struct WaterMarks
                 break;
         }
         FileSize limit = kFormatMaxBytesMap[i].second;
-        if (format == "MP4")
+        batch = std::max(batch, static_cast<size_t>(1));
+        limit *= batch;
+        if (media_capi && media_capi->max_bytes_estimate)
         {
-            const auto duration_seconds = std::max(static_cast<size_t>(duration.count()), static_cast<size_t>(1));
-            limit = bitrate > 0
-                        ? static_cast<FileSize>(std::ceil(duration_seconds * bitrate / static_cast<float>(CHAR_BIT)))
-                        : (duration_seconds * limit);
+            if (const auto res = media_capi->max_bytes_estimate(format.c_str(), batch, media_capi->user_data); res > 0)
+                limit = static_cast<FileSize>(res);
         }
-        return WaterMarks::from(limit);
+        return WaterMarks {
+            .critical_remain_bytes = static_cast<FileSize>(kStorageCriticalWaterMarkFactor * limit),
+            .high_remain_bytes = static_cast<FileSize>(kStorageHighWaterMarkFactor * limit),
+            .recycle_bytes = static_cast<FileSize>(kStorageRecycleFactor * limit),
+        };
     }
 
     bool operator==(const WaterMarks &other) const noexcept
@@ -923,7 +932,6 @@ private:
 
 struct FileWriterSettings
 {
-    enum class CaptureType { Video, Image };
     const CaptureType type;
     const std::string format;
     const std::chrono::milliseconds interval;
@@ -941,30 +949,17 @@ struct FileWriterSettings
     }
 
     static std::shared_ptr<FileWriterSettings> create(const std::string &fmt, std::chrono::milliseconds itv,
-        std::string_view fnp, std::chrono::seconds vcl, const vg_config_media_t &media_api)
+        std::string_view fnp, std::chrono::seconds vcl, WaterMarks wm)
     {
-        size_t bitrate = 0;
-        if (media_api.video_file_max_bitrate_estimate_cb)
-            media_api.video_file_max_bitrate_estimate_cb(&bitrate, media_api.user_data);
-        return std::shared_ptr<FileWriterSettings>(new FileWriterSettings(fmt, itv, fnp, vcl, bitrate));
+        const auto type = CaptureTypeFrom(fmt);
+        return std::shared_ptr<FileWriterSettings>(new (std::nothrow) FileWriterSettings(type, fmt, itv, fnp, vcl, wm));
     }
 
 private:
-    FileWriterSettings(const std::string &fmt, std::chrono::milliseconds itv, std::string_view fnp,
-        std::chrono::seconds vcl, size_t br)
-        : type(from(fmt)), format(fmt), interval(itv), file_name_prefix(fnp), video_clip_length(vcl),
-          watermarks(WaterMarks::from(format, vcl, br))
+    FileWriterSettings(CaptureType tp, const std::string &fmt, std::chrono::milliseconds itv, std::string_view fnp,
+        std::chrono::seconds vcl, WaterMarks wms) noexcept
+        : type(tp), format(fmt), interval(itv), file_name_prefix(fnp), video_clip_length(vcl), watermarks(wms)
     {
-    }
-
-    CaptureType from(const std::string &fmt) const
-    {
-        if (fmt == "MP4")
-            return CaptureType::Video;
-        else if (fmt == "JPG" || fmt == "RAW")
-            return CaptureType::Image;
-        else
-            throw Exception("Unsupported file writer format: " + fmt);
     }
 };
 

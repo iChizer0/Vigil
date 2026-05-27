@@ -204,7 +204,7 @@ struct CaptureStatus
         oj["sOutputDirectory"] = evt->output_directory;
         {
             oj["sFormat"] = evt->settings->format;
-            if (evt->settings->type == FileWriterSettings::CaptureType::Video
+            if (evt->settings->type == CaptureType::Video
                 && evt->settings->video_clip_length != std::chrono::seconds::max())
                 oj["iVideoLengthSeconds"] = evt->settings->video_clip_length.count();
         }

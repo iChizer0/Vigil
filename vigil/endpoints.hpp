@@ -246,7 +246,8 @@ public:
                     throw Exception("Failed to store record config to file");
             }
 
-            record_config.sync(*_ctx);
+            if (ret = record_config.sync(*_ctx); ret != 0)
+                throw Exception("Try again to sync record config to context");
         }
         catch (const std::exception &e)
         {
@@ -1216,11 +1217,11 @@ private:
             return nullptr;
         switch (event->settings->type)
         {
-            case FileWriterSettings::CaptureType::Image:
+            case CaptureType::Image:
                 _ctx->capture_media_buffer.clearToLastKeyFrame();
                 return std::make_unique<ImageWriter<CaptureAdaptedWriter<CaptureEndpoint>>>(std::ref(*this), event,
                     std::ref(*_ctx), event->settings, event->event);
-            case FileWriterSettings::CaptureType::Video:
+            case CaptureType::Video:
                 _ctx->capture_media_buffer.clearToLastKeyFrame();
                 return std::make_unique<VideoWriter<CaptureAdaptedWriter<CaptureEndpoint>>>(std::ref(*this), event,
                     std::ref(*_ctx), event->settings, event->event);
