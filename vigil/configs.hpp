@@ -486,10 +486,12 @@ struct RecordConfig
                     "Invalid recording interval " + std::to_string(itv_ms) + "ms while parsing RecordConfig");
             settings_rev = ctx.shared_writer_settings.get().first;
             const auto fmt = settings_j.at("sFormat").get<std::string>();
-            if (settings = FileWriterSettings::create(fmt, std::chrono::milliseconds(itv_ms),
+            const auto t = CaptureTypeFrom(fmt);
+            if (t == CaptureType::Unknown)
+                throw Exception("Invalid capture format '" + fmt + "' while parsing RecordConfig");
+            if (settings = FileWriterSettings::create(t, fmt, std::chrono::milliseconds(itv_ms),
                     kRecordWriterPrefixDefault, kVideoClipLengthDefault,
-                    WaterMarks::from(fmt,
-                        CaptureTypeFrom(fmt) == CaptureType::Video ? kVideoClipLengthDefault.count() : 1,
+                    WaterMarks::from(fmt, t == CaptureType::Video ? kVideoClipLengthDefault.count() : 1,
                         &ctx.c_api.media));
                 !settings)
                 throw Exception("Failed to create FileWriterSettings while parsing RecordConfig");
@@ -820,10 +822,12 @@ struct CaptureConfig
                         "Invalid video length seconds " + std::to_string(l) + " while parsing CaptureConfig");
             }
             const auto fmt = j.at("sFormat").get<std::string>();
-            settings = FileWriterSettings::create(fmt, std::chrono::milliseconds(0), kCaptureWriterPrefixDefault,
+            const auto t = CaptureTypeFrom(fmt);
+            if (t == CaptureType::Unknown)
+                throw Exception("Invalid capture format '" + fmt + "' while parsing CaptureConfig");
+            settings = FileWriterSettings::create(t, fmt, std::chrono::milliseconds(0), kCaptureWriterPrefixDefault,
                 video_length,
-                WaterMarks::from(fmt, CaptureTypeFrom(fmt) == CaptureType::Video ? kCaptureWaterMarkBatch : 1,
-                    &ctx.c_api.media));
+                WaterMarks::from(fmt, t == CaptureType::Video ? kCaptureWaterMarkBatch : 1, &ctx.c_api.media));
             if (!settings)
                 throw Exception("Failed to create FileWriterSettings while parsing CaptureConfig");
         }

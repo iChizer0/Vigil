@@ -240,11 +240,7 @@ struct Context
     private:
         mutable std::shared_mutex mutex;
         alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> revision = 0;
-        std::shared_ptr<FileWriterSettings> settings = FileWriterSettings::create(kRecordWriterDefaultFormat,
-            kRecordWriterDefaultIntervalMs, kRecordWriterPrefixDefault, kVideoClipLengthDefault,
-            WaterMarks::from(kRecordWriterDefaultFormat,
-                CaptureTypeFrom(kRecordWriterDefaultFormat) == CaptureType::Video ? kVideoClipLengthDefault.count() : 1,
-                nullptr));
+        std::shared_ptr<FileWriterSettings> settings;
 
     public:
         bool update(size_t rev, std::shared_ptr<FileWriterSettings> new_settings) noexcept
@@ -266,30 +262,33 @@ struct Context
 
         void sync(const vg_config_media_t &media_capi) noexcept
         {
-            try
+            for (;;)
             {
-                for (;;)
+                auto [rev, old] = get();
+                if (!old)
                 {
-                    auto [rev, old] = get();
-                    if (!old)
-                        return;
-                    auto new_settings = FileWriterSettings::create(old->format, old->interval, old->file_name_prefix,
-                        old->video_clip_length,
-                        WaterMarks::from(old->format,
-                            CaptureTypeFrom(old->format) == CaptureType::Video ? old->video_clip_length.count() : 1,
-                            &media_capi));
-                    if (!new_settings)
-                    {
-                        std::this_thread::yield();
-                        continue;
-                    }
-                    if (update(rev, std::move(new_settings)))
-                        return;
+                    const auto t = CaptureTypeFrom(kRecordWriterDefaultFormat);
+                    if (t == CaptureType::Unknown)
+                        return; // Invalid default format, cannot sync
+                    if (old = FileWriterSettings::create(t, kRecordWriterDefaultFormat, kRecordWriterDefaultIntervalMs,
+                            kRecordWriterPrefixDefault, kVideoClipLengthDefault,
+                            WaterMarks::from(kRecordWriterDefaultFormat,
+                                t == CaptureType::Video ? kVideoClipLengthDefault.count() : 1, &media_capi));
+                        !old)
+                        return; // Failed to create default settings, cannot sync
                 }
-            }
-            catch (...)
-            {
-                return; // Should not happen
+
+                auto new_settings = FileWriterSettings::create(old->type, old->format, old->interval,
+                    old->file_name_prefix, old->video_clip_length,
+                    WaterMarks::from(old->format, old->type == CaptureType::Video ? old->video_clip_length.count() : 1,
+                        &media_capi));
+                if (!new_settings)
+                {
+                    std::this_thread::yield();
+                    continue;
+                }
+                if (update(rev, std::move(new_settings)))
+                    return;
             }
         }
 
@@ -462,7 +461,10 @@ struct Context
     } shared_inference_result;
 
     // Constructor
-    Context(const vg_config_t &cfg) : c_api(cfg) { }
+    Context(const vg_config_t &cfg) : c_api(cfg)
+    {
+        shared_writer_settings.sync(c_api.media);
+    }
 
     // Destructor
     ~Context() = default;

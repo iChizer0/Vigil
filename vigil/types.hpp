@@ -864,16 +864,16 @@ struct CacheFileInfo final
     ~CacheFileInfo() = default;
 };
 
-enum class CaptureType { Video, Image };
+enum class CaptureType { Video, Image, Unknown };
 
-inline CaptureType CaptureTypeFrom(const std::string &fmt)
+inline CaptureType CaptureTypeFrom(const std::string &fmt) noexcept
 {
     if (fmt == "MP4")
         return CaptureType::Video;
     else if (fmt == "JPG" || fmt == "RAW")
         return CaptureType::Image;
     else
-        throw Exception("Unsupported file writer format: " + fmt);
+        return CaptureType::Unknown;
 }
 
 struct WaterMarks
@@ -884,7 +884,7 @@ struct WaterMarks
 
     typedef int64_t (*media_max_bytes_estimate)(const char *format, size_t batch, void *user_data);
 
-    static inline WaterMarks from(const std::string &format, size_t batch, const vg_config_media_t *media_capi) noexcept
+    static inline constexpr WaterMarks from(const std::string &format, size_t batch, const vg_config_media_t *media_capi) noexcept
     {
         size_t i = 0;
         for (; i < kFormatMaxBytesMap.size(); ++i)
@@ -948,17 +948,16 @@ struct FileWriterSettings
                && watermarks == other.watermarks;
     }
 
-    static std::shared_ptr<FileWriterSettings> create(const std::string &fmt, std::chrono::milliseconds itv,
-        std::string_view fnp, std::chrono::seconds vcl, WaterMarks wm)
+    static std::shared_ptr<FileWriterSettings> create(CaptureType type, const std::string &fmt,
+        std::chrono::milliseconds itv, std::string_view fnp, std::chrono::seconds vcl, WaterMarks wm) noexcept
     {
-        const auto type = CaptureTypeFrom(fmt);
         return std::shared_ptr<FileWriterSettings>(new (std::nothrow) FileWriterSettings(type, fmt, itv, fnp, vcl, wm));
     }
 
 private:
     FileWriterSettings(CaptureType tp, const std::string &fmt, std::chrono::milliseconds itv, std::string_view fnp,
-        std::chrono::seconds vcl, WaterMarks wms) noexcept
-        : type(tp), format(fmt), interval(itv), file_name_prefix(fnp), video_clip_length(vcl), watermarks(wms)
+        std::chrono::seconds vcl, WaterMarks wm) noexcept
+        : type(tp), format(fmt), interval(itv), file_name_prefix(fnp), video_clip_length(vcl), watermarks(wm)
     {
     }
 };
