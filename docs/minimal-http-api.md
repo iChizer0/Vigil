@@ -292,7 +292,7 @@ Get the current status of all storage slots.
         },
         // ... More storage slots, dynamically updated
     ],
-    "sDataDirName": "DCIM" // String, name of the record data directory under each storage mount point
+    "sDataDirPath": "DCIM" // String, path of the record data directory under each storage mount point
 }
 ```
 

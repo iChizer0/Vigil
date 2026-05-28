@@ -82,12 +82,13 @@ class Slot final
 {
 public:
     Slot(Context &ctx, std::filesystem::path dev_path, std::filesystem::path mount_path, bool removable, bool internal,
-        std::string_view data_dir_name)
+        std::filesystem::path data_dir_path)
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
-          _internal(internal), _data_dir_name(data_dir_name), _info_mutex(), _label(), _uuid(), _type(), _mutex(),
-          _op_mutex(), _stop_token(false), _manager_thread(nullptr), _writer_thread(nullptr), _state(SlotState::Error),
-          _dirty(false), _stats(), _quota_limit_bytes(-1), _quota_rotate(true), _index_manager(nullptr),
-          _writer_task_count(0), _rotating(false), _write_stats(), _relay(ctx, _mount_path / _data_dir_name)
+          _internal(internal), _data_dir_path(std::move(data_dir_path)), _info_mutex(), _label(), _uuid(), _type(),
+          _mutex(), _op_mutex(), _stop_token(false), _manager_thread(nullptr), _writer_thread(nullptr),
+          _state(SlotState::Error), _dirty(false), _stats(), _quota_limit_bytes(-1), _quota_rotate(true),
+          _index_manager(nullptr), _writer_task_count(0), _rotating(false), _write_stats(),
+          _relay(ctx, _mount_path / _data_dir_path)
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Creating storage slot for device path ", _dev_path, " at mount path ",
             _mount_path, ", removable: ", _removable ? "true" : "false");
@@ -333,10 +334,10 @@ public:
 
     vg_sta_e removeFileOrDirectory(const std::filesystem::path &relative_path)
     {
-        if (auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
+        if (const auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
             return EPERM;
 
-        if (auto p = getRecordRootPath(); IsPathUnderRoot(p, relative_path))
+        if (const auto p = getRecordRootPath(); IsPathUnderRoot(p, relative_path))
         {
             if (!RemoveWithThumbnailCheck(p / relative_path))
             {
@@ -478,7 +479,7 @@ public:
 
     inline std::filesystem::path getRecordRootPath() const noexcept
     {
-        return _mount_path / _data_dir_name;
+        return _mount_path / _data_dir_path;
     }
 
     vg_sta_e formatFileSystem() noexcept
@@ -1615,7 +1616,7 @@ private:
     const std::filesystem::path _mount_path;
     const bool _removable;
     const bool _internal;
-    const std::string_view _data_dir_name;
+    const std::filesystem::path _data_dir_path;
 
     // Mutable info properties
     mutable std::shared_mutex _info_mutex;

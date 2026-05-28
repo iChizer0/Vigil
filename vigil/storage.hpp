@@ -44,21 +44,26 @@ class Storage
 {
 public:
     Storage(const StorageConfig &cfg, Context &ctx)
-        : _ctx(ctx), _data_dir_name(kDataDirDefaultName), _config_mutex(), _config(cfg), _stop_token(false),
+        : _ctx(ctx), _data_dir_path(kDataDirDefaultPath), _config_mutex(), _config(cfg), _stop_token(false),
           _manager_thread(nullptr), _manager_action_mutex(), _slots_mutex(), _slots(), _netlink_fd(-1),
           _initial_scan_done(false)
     {
         // Check data directory name validity (non-empty, not slash or dot)
-        if (_ctx.c_api.storage.data_directory_name)
+        if (_ctx.c_api.storage.data_directory_path)
         {
-            const auto size = std::strlen(_ctx.c_api.storage.data_directory_name);
-            const auto has_slash_or_dot = std::any_of(_ctx.c_api.storage.data_directory_name,
-                _ctx.c_api.storage.data_directory_name + size, [](char c) { return c == '/' || c == '.'; });
-            if (size > 0 && !has_slash_or_dot)
-                _data_dir_name = _ctx.c_api.storage.data_directory_name;
-            else
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Invalid data directory name ",
-                    _ctx.c_api.storage.data_directory_name, ", using default name ", kDataDirDefaultName);
+            try
+            {
+                auto data_dir_path = std::filesystem::path(_ctx.c_api.storage.data_directory_path);
+                if (data_dir_path.empty() || data_dir_path.is_absolute())
+                    throw std::invalid_argument("Data directory path cannot be empty, or absolute");
+                _data_dir_path = std::move(data_dir_path);
+            }
+            catch (const std::exception &e)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Invalid data directory path ",
+                    _ctx.c_api.storage.data_directory_path, ": ", e.what(), ", using default path ",
+                    kDataDirDefaultPath);
+            }
         }
 
         // Clean relay directory
@@ -92,7 +97,7 @@ public:
 
     StorageStatus getStatus() const
     {
-        auto status = StorageStatus(_data_dir_name);
+        auto status = StorageStatus(_data_dir_path);
         const auto current_cfg = getConfig();
         std::unordered_map<std::string, std::shared_ptr<Slot>> slots;
         {
@@ -107,7 +112,6 @@ public:
             sta.selected = isSelectedSlot(slot, current_cfg);
             status.slots_status.emplace_back(std::move(sta));
         }
-        status.data_dir_name = _data_dir_name;
         return status;
     }
 
@@ -477,7 +481,7 @@ private:
         for (const auto &[dev_path, info]: dev_2_slot_info_vec)
         {
             auto slot = std::make_shared<Slot>(_ctx, dev_path, info.mount_point, info.removable, info.internal,
-                _data_dir_name);
+                _data_dir_path);
             {
                 const std::unique_lock lock(_slots_mutex);
                 if (!_slots.contains(dev_path)) [[likely]]
@@ -536,13 +540,13 @@ private:
     }
 
 private:
-    static inline constexpr const std::string_view kDataDirDefaultName = "DCIM";
+    static inline constexpr const std::string_view kDataDirDefaultPath = "DCIM";
     static inline constexpr const std::chrono::milliseconds kManagerLoopInterval = std::chrono::milliseconds(100);
 
 private:
     Context &_ctx;
 
-    std::string_view _data_dir_name;
+    std::filesystem::path _data_dir_path;
 
     mutable std::shared_mutex _config_mutex;
     StorageConfig _config;

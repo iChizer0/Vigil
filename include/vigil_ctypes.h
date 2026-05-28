@@ -207,7 +207,7 @@ typedef struct vg_config_storage_t
                                                     from storage management. */
     const char *internal_device_path; /**< Device path to the internal storage device. e.g. /dev/mmcblk0p1 */
     const char *internal_mount_point; /**< Filesystem path to the internal storage mount point. */
-    const char *data_directory_name;  /**< Filesystem name to the data storage root. e.g. DCIM, don't start with '/' */
+    const char *data_directory_path;  /**< Filesystem path to the data storage root. e.g. DCIM, don't start with '/' */
     const char *relay_directory_path; /**< Filesystem path to the nginx relay directory for Vigil relay data. */
 } vg_config_storage_t;
 

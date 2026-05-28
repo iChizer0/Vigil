@@ -129,9 +129,9 @@ struct SlotStatus
 struct StorageStatus
 {
     std::vector<SlotStatus> slots_status;
-    std::string_view data_dir_name;
+    std::filesystem::path data_dir_path;
 
-    StorageStatus(std::string_view ddn) : slots_status(), data_dir_name(ddn) { }
+    StorageStatus(std::filesystem::path ddp) : slots_status(), data_dir_path(std::move(ddp)) { }
 
     ~StorageStatus() = default;
 
@@ -145,7 +145,7 @@ struct StorageStatus
             slots_dict.push_back(slot_j);
         }
         j["lSlots"] = slots_dict;
-        j["sDataDirName"] = data_dir_name;
+        j["sDataDirPath"] = data_dir_path;
     }
 };
 
