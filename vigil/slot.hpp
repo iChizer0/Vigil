@@ -133,7 +133,7 @@ public:
     inline bool isReadyToWrite() const noexcept
     {
         return !_stop_token.load(std::memory_order_acquire)
-               && _state.load(std::memory_order_acquire) == SlotState::Ready;
+               && (_state.load(std::memory_order_acquire) == SlotState::Ready);
     }
 
     inline bool isWriting() const noexcept
@@ -483,7 +483,7 @@ public:
 
     vg_sta_e formatFileSystem() noexcept
     {
-        if (_internal)
+        if (isInternal())
             return EPERM;
         const std::unique_lock lock(_mutex);
         if (const auto state = _state.load(std::memory_order_acquire);
@@ -665,45 +665,37 @@ private:
         return probeDeviceOnline() && probeCorrectlyMounted() && probeCorrectlyConfigured();
     }
 
-    void doRotateStaledFilesAndSync() const noexcept
+    void doSyncStateReadyOrSaturated(const WaterMarks *watermarks, const IndexManager::IndexResult *index_result,
+        const SlotStats &stats, SlotState current) noexcept
     {
-        // Check if we need to free up space
-        if (!_quota_rotate.load(std::memory_order_acquire))
-        {
-            _rotating.store(false, std::memory_order_release);
-            return;
-        }
+        _state.compare_exchange_strong(current, probeStateReadyOrSaturated(watermarks, index_result, stats),
+            std::memory_order_acq_rel, std::memory_order_acquire);
+    }
 
-        // Get index manager
-        auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
-        if (!idx_mgr)
+    void doRotateStaledFilesAndSync(const WaterMarks *watermarks, const IndexManager::IndexResult *index_result,
+        const SlotStats &stats, const std::shared_ptr<IndexManager> &idx_mgr) const noexcept
+    {
+        if (!watermarks || !idx_mgr || !_quota_rotate.load(std::memory_order_acquire))
         {
             _rotating.store(false, std::memory_order_release);
             return;
         }
 
         const auto limit = _quota_limit_bytes.load(std::memory_order_acquire);
-        const auto [_, s] = _ctx.shared_writer_settings.get();
-        if (!s)
-        {
-            _rotating.store(false, std::memory_order_release);
-            return;
-        }
 
         // Check if quota limit is exceeded
         if (limit >= 0)
         {
-            if (auto index_result = idx_mgr->size(); !index_result.valid)
-                return;
-            else if (index_result.size + s->watermarks.high_remain_bytes > limit)
+            if (!index_result || !index_result->valid)
+                return; // Index required but not ready, skip rotation (will check again in next cycle)
+            else if (index_result->size + watermarks->high_remain_bytes > limit)
                 goto l_free_up_space;
         }
 
         // Check if free space is sufficient
-        if (doStats();
-            _stats.load(std::memory_order_acquire).free_bytes
-            < (isInternal() ? static_cast<FileSize>(s->watermarks.high_remain_bytes + GetInternalPreservedLimit())
-                            : s->watermarks.high_remain_bytes))
+        if (stats.free_bytes < (isInternal()
+                                    ? static_cast<FileSize>(watermarks->high_remain_bytes + GetInternalPreservedLimit())
+                                    : watermarks->high_remain_bytes))
             goto l_free_up_space;
 
         _rotating.store(false, std::memory_order_release);
@@ -717,14 +709,15 @@ private:
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Storage slot for device path ", _dev_path,
             " is low on free space, quota limit: ", limit, " bytes, estimated write bytes in next ",
             kManagerEstimatedWriteBytesPeriod.count(), " minutes: ", estimated_write_bytes_in_period,
-            " bytes, will free up ", s->watermarks.recycle_bytes, " bytes");
+            " bytes, will free up ", watermarks->recycle_bytes, " bytes");
 
-        const auto freed = idx_mgr->tryReleaseSpace(s->watermarks.recycle_bytes);
+        const auto freed = idx_mgr->tryReleaseSpace(watermarks->recycle_bytes);
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Freed up ", freed, " bytes on storage slot for device path", _dev_path);
     }
 
     void managerThreadTask() noexcept
     {
+        auto state = _state.load(std::memory_order_acquire);
         while (!_stop_token.load(std::memory_order_acquire))
         {
             const auto start = std::chrono::steady_clock::now();
@@ -747,7 +740,8 @@ private:
         l_check_state_loop:
             if (_stop_token.load(std::memory_order_acquire))
                 return;
-            switch (_state.load(std::memory_order_acquire))
+            state = _state.load(std::memory_order_acquire);
+            switch (state)
             {
                 case SlotState::Error: {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Storage slot for device path ", _dev_path,
@@ -781,7 +775,7 @@ private:
                     goto l_check_state_loop_delayed;
 
                 case SlotState::Configured:
-                    ensureStateReady();
+                    ensureStateReadyOrSaturated();
                     goto l_check_state_loop;
 
                 case SlotState::Indexing:
@@ -789,8 +783,17 @@ private:
                     goto l_check_state_loop_delayed;
 
                 case SlotState::Ready:
-                    // All good, rotate staled files and sync stats
-                    doRotateStaledFilesAndSync();
+                case SlotState::Saturated: {
+                    const auto [_, s] = _ctx.shared_writer_settings.get();
+                    const auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
+                    const auto idx_res = idx_mgr ? idx_mgr->size() : IndexManager::IndexResult { false, 0 };
+                    doStats();
+                    const auto stats = _stats.load(std::memory_order_acquire);
+                    doSyncStateReadyOrSaturated(s ? &s->watermarks : nullptr, idx_mgr ? &idx_res : nullptr, stats,
+                        state);
+                    doRotateStaledFilesAndSync(s ? &s->watermarks : nullptr, idx_mgr ? &idx_res : nullptr, stats,
+                        idx_mgr);
+                }
                     goto l_wait_and_continue;
 
                 default:
@@ -841,7 +844,7 @@ private:
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
                     "FileWriterSettings is null in storage slot writer thread for device path ", _dev_path,
                     ", cannot start new writer task");
-                goto l_continue_evt;
+                goto l_continue;
             }
 
             {
@@ -849,17 +852,18 @@ private:
 
                 // Check if slot status is ready to write
                 if (!isReadyToWrite())
-                    goto l_continue_evt;
+                    goto l_continue;
 
                 // Check if quota limit is exceeded
-                if (auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit >= 0)
+                if (const auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit >= 0)
                 {
-                    if (auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire); !idx_mgr)
-                        goto l_continue_evt;
-                    else if (auto index_result = idx_mgr->size(); !index_result.valid)
-                        goto l_continue_evt;
+                    if (const auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
+                        !idx_mgr)
+                        goto l_continue;
+                    else if (const auto index_result = idx_mgr->size(); !index_result.valid)
+                        goto l_continue;
                     else if (index_result.size + watermarks.critical_remain_bytes > limit)
-                        goto l_continue_log;
+                        goto l_continue_saturated;
                 }
 
                 // Check if free space is sufficient
@@ -867,18 +871,20 @@ private:
                                <= (isInternal() ? static_cast<FileSize>(
                                                       watermarks.critical_remain_bytes + GetInternalPreservedLimit())
                                                 : watermarks.critical_remain_bytes))
-                    goto l_continue_log;
+                    goto l_continue_saturated;
+
+                // Mark quota as not saturated before starting write, so that new writes can be accepted during the
+                // write process
 
                 // Check if media is paused
                 if (_ctx.media_paused.load(std::memory_order_acquire))
-                    goto l_continue_evt;
+                    goto l_continue;
 
                 // Check for new write event
                 if (event = _ctx.shared_rule_event.getCurrent(); !event)
-                    goto l_continue_evt;
+                    goto l_continue;
 
                 // Start new writer task
-
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting new writer task, dev path ", _dev_path);
                 try
                 {
@@ -914,14 +920,14 @@ private:
                 continue;
             }
 
-        l_continue_log:
+        l_continue_saturated:
             if (_quota_rotate.load())
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Writer thread for ", _dev_path,
                     " reached critical watermark, skipping new writer task start");
             }
 
-        l_continue_evt:
+        l_continue:
             if (event)
                 _ctx.shared_rule_event.reset(WriteEvent::Status::Canceled); // Clear processed event
             if (auto elapsed = std::chrono::steady_clock::now() - start; elapsed < kWriterProbeInterval)
@@ -1028,7 +1034,7 @@ private:
 
     bool doFormat() const noexcept
     {
-        if (_internal)
+        if (isInternal())
             return false;
         const std::unique_lock lock(_op_mutex);
         try
@@ -1518,7 +1524,35 @@ private:
         return false;
     }
 
-    bool ensureStateReady() noexcept
+    SlotState probeStateReadyOrSaturated(const WaterMarks *watermarks, const IndexManager::IndexResult *index_result,
+        const SlotStats &stats) noexcept
+    {
+        if (!watermarks)
+            return SlotState::Error;
+        if (index_result)
+        {
+            if (const auto limit = _quota_limit_bytes.load(std::memory_order_acquire);
+                limit >= 0 && (index_result->size + watermarks->critical_remain_bytes > limit))
+                return SlotState::Saturated;
+        }
+        if (stats.free_bytes
+            <= (isInternal() ? static_cast<FileSize>(watermarks->critical_remain_bytes + GetInternalPreservedLimit())
+                             : watermarks->critical_remain_bytes))
+            return SlotState::Saturated;
+        return SlotState::Ready;
+    }
+
+    SlotState probeStateReadyOrSaturatedInit() noexcept
+    {
+        const auto [_, s] = _ctx.shared_writer_settings.get();
+        const auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
+        const auto idx_res = idx_mgr ? idx_mgr->size() : IndexManager::IndexResult { false, 0 };
+        doStats();
+        const auto stats = _stats.load(std::memory_order_acquire);
+        return probeStateReadyOrSaturated(s ? &s->watermarks : nullptr, idx_mgr ? &idx_res : nullptr, stats);
+    }
+
+    bool ensureStateReadyOrSaturated() noexcept
     {
         auto state = _state.load(std::memory_order_acquire);
         if (state != SlotState::Configured || state == SlotState::Indexing)
@@ -1531,7 +1565,7 @@ private:
             goto l_index_error;
         if (!doSyncIndex())
             goto l_index_error;
-        return _state.compare_exchange_strong(state, SlotState::Ready, std::memory_order_acq_rel,
+        return _state.compare_exchange_strong(state, probeStateReadyOrSaturatedInit(), std::memory_order_acq_rel,
             std::memory_order_acquire);
 
     l_index_error:

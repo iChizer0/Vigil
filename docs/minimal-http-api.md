@@ -280,8 +280,8 @@ Get the current status of all storage slots.
             "bSyncing": false, // Boolean, whether this slot is currently performing sync tasks (e.g., flushing write cache)
             "bWriting": false, // Boolean, whether this slot currently has activate writing tasks (e.g., recording videos, writing images)
             "bRotating": false, // Boolean, whether this slot is currently performing quota rotation
-            "eState": 8, // Integer, states enum of current slot, values (1: ERROR, 2: NOT_FORMATTED_OR_FORMAT_UNSUPPORTED, 3: FORMATTING, 4: NOT_MOUNTED, 5: MOUNTED, 6: CONFIGURED, 7: INDEXING, 8: READY)
-            "sState": "READY", // String, human-readable state ("ERROR", "NOT_FORMATTED_OR_FORMAT_UNSUPPORTED", "FORMATTING", "NOT_MOUNTED", "MOUNTED", "CONFIGURED", "INDEXING", "READY")
+            "eState": 8, // Integer, states enum of current slot, values (1: ERROR, 2: NOT_FORMATTED_OR_FORMAT_UNSUPPORTED, 3: FORMATTING, 4: NOT_MOUNTED, 5: MOUNTED, 6: CONFIGURED, 7: INDEXING, 8: READY, 9: SATURATED)
+            "sState": "READY", // String, human-readable state ("ERROR", "NOT_FORMATTED_OR_FORMAT_UNSUPPORTED", "FORMATTING", "NOT_MOUNTED", "MOUNTED", "CONFIGURED", "INDEXING", "READY", "SATURATED")
             "iStatsSizeBytes": 1000000000, // Integer, total size of the partition, not accurate if eState < MOUNTED
             "iStatsFreeBytes": 500000000, // Integer, free space of the partition, not accurate if eState < MOUNTED
             "iQuotaMinimumRecommendBytes": 200000000, // Integer, minimum recommended quota limit, may not work well if quota limit is set below this value
@@ -309,6 +309,8 @@ Notes:
 - The storage system ensures that only one storage slot is enabled at a time, enabling a new slot will disable the previously enabled slot.
 - Modifying the large a mount of files directly under the record data directory of an enabled storage slot may interfere with the normal operation of the storage system, it is recommended to use the Storage Control API for file removal.
 - The storage system may take some time to transition between states, clients should monitor the `eState` field to determine when the storage slot is ready for use.
+- The `bDirty` flag indicates that the filesystem is marked dirty and may require a check (fsck) before it can be used again. This can happen if the storage device was removed without proper unmounting, or if there were write errors. A dirty filesystem may not be automatically mounted until it is repaired.
+- The saturation state indicates that the available free space is critically low, and the system is stopping new recordings to prevent running out of space.
 
 ### Storage Control
 

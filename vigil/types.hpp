@@ -588,6 +588,7 @@ enum class SlotState : int {
     Configured = 6,
     Indexing = 7,
     Ready = 8,
+    Saturated = 9,
 };
 
 inline std::string_view SlotStateString(SlotState state) noexcept
@@ -610,6 +611,8 @@ inline std::string_view SlotStateString(SlotState state) noexcept
             return "INDEXING";
         case SlotState::Ready:
             return "READY";
+        case SlotState::Saturated:
+            return "SATURATED";
         default:
             return "UNKNOWN";
     }
