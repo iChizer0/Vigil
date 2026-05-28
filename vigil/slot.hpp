@@ -1071,6 +1071,8 @@ private:
             goto l_format_error;
         if (!doUpdatePartionInfo())
             goto l_format_error;
+        if (!doFsck(true))
+            goto l_format_error;
         return _state.compare_exchange_strong(state, SlotState::NotMounted, std::memory_order_acq_rel,
             std::memory_order_acquire);
 

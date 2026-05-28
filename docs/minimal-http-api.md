@@ -309,7 +309,7 @@ Notes:
 - The storage system ensures that only one storage slot is enabled at a time, enabling a new slot will disable the previously enabled slot.
 - Modifying the large a mount of files directly under the record data directory of an enabled storage slot may interfere with the normal operation of the storage system, it is recommended to use the Storage Control API for file removal.
 - The storage system may take some time to transition between states, clients should monitor the `eState` field to determine when the storage slot is ready for use.
-- The `bDirty` flag indicates that the filesystem is marked dirty and may require a check (fsck) before it can be used again. This can happen if the storage device was removed without proper unmounting, or if there were write errors. A dirty filesystem may not be automatically mounted until it is repaired.
+- The `bDirty` flag indicates that the filesystem is marked dirty and may require a check (fsck) before it can be used again. This can happen if the storage device was removed without proper unmounting, or if there were write errors. A dirty filesystem may not be automatically mounted until it is repaired (if not enabled).
 - The saturation state indicates that the available free space is critically low, and the system is stopping new recordings to prevent running out of space.
 
 ### Storage Control
