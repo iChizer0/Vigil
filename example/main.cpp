@@ -170,7 +170,7 @@ int main()
     // Storage
     config.storage.internal_device_path = "/dev/null";
     config.storage.internal_mount_point = "/tmp";
-    config.storage.data_directory_name = "data";
+    config.storage.data_directory_path = "data";
     config.storage.relay_directory_path = "relay";
     config.storage.on_mount_cb = on_mount_cb;
     config.storage.on_unmount_cb = on_unmount_cb;
