@@ -1,5 +1,4 @@
 #pragma once
-#include <limits>
 #ifndef VIGIL_ENDPOINTS_HPP
 #define VIGIL_ENDPOINTS_HPP
 
@@ -13,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -510,11 +510,27 @@ public:
                 res_j["dAvailableTTYs"] = ttys_obj;
             }
             {
-                const bool media_paused = _ctx->media_paused.load(std::memory_order_relaxed);
-                res_j["bMediaPaused"] = media_paused;
-            }
-            {
                 res_j["bVideoClipLengthSeconds"] = kVideoClipLengthDefault.count();
+                res_j["bMediaPaused"] = _ctx->media_paused.load(std::memory_order_relaxed);
+                res_j["bRecordEnabled"] = _ctx->record_rule_enabled.load(std::memory_order_relaxed);
+                {
+                    auto get_target_slot_status = [this]() -> std::optional<SlotStatus> {
+                        const std::shared_lock scl(_ctx->slot_check_mutex);
+                        if (_ctx->slot_check.first)
+                            return static_cast<const Slot *>(_ctx->slot_check.first)->getStatus();
+                        return std::nullopt;
+                    };
+                    if (const auto sta = get_target_slot_status(); sta.has_value())
+                    {
+                        auto obj = nlohmann::json::object();
+                        sta->to(obj, *_ctx);
+                        res_j["dRecordSlot"] = obj;
+                    }
+                    else
+                    {
+                        res_j["dRecordSlot"] = nullptr;
+                    }
+                }
             }
         }
         catch (const std::exception &e)

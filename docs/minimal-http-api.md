@@ -66,8 +66,12 @@ Get the information about the rule system.
         },
         // ... More TTY devices
     },
+    "bVideoClipLengthSeconds": 60, // Integer, target video clip length in seconds (estimated, may inaccurate because the GOP length varies)
     "bMediaPaused": false, // Boolean, whether media capture is currently paused (e.g., due to configuration update in underlying encoder system)
-    "bVideoClipLengthSeconds": 60 // Integer, target video clip length in seconds (estimated, may inaccurate because the GOP length varies)
+    "bRecordEnabled": true, // Boolean, whether the record rule is currently enabled, the schedule rule is also required to be enabled for recording to be triggered
+    "dRecordSlot": {
+        // ... Refer to the storage slot object in Storage Status API response for the schema of this field, null if no available slot is ready for recording
+    }
 }
 ```
 

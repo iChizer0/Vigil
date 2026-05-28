@@ -131,10 +131,20 @@ public:
         return _manager_thread && _writer_thread;
     }
 
+    inline bool isDirty() const noexcept
+    {
+        return _dirty.load(std::memory_order_acquire);
+    }
+
     inline bool isReadyToWrite() const noexcept
     {
         return !_stop_token.load(std::memory_order_acquire)
                && (_state.load(std::memory_order_acquire) == SlotState::Ready);
+    }
+
+    inline bool isSaturated() const noexcept
+    {
+        return _state.load(std::memory_order_acquire) == SlotState::Saturated;
     }
 
     inline bool isWriting() const noexcept
