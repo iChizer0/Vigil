@@ -885,9 +885,8 @@ struct WaterMarks
     FileSize high_remain_bytes;
     FileSize recycle_bytes;
 
-    typedef int64_t (*media_max_bytes_estimate)(const char *format, size_t batch, void *user_data);
-
-    static inline constexpr WaterMarks from(const std::string &format, size_t batch, const vg_config_media_t *media_capi) noexcept
+    static inline constexpr WaterMarks from(const std::string &format, size_t batch,
+        const vg_config_media_t *media_capi) noexcept
     {
         size_t i = 0;
         for (; i < kFormatMaxBytesMap.size(); ++i)
@@ -898,9 +897,10 @@ struct WaterMarks
         FileSize limit = kFormatMaxBytesMap[i].second;
         batch = std::max(batch, static_cast<size_t>(1));
         limit *= batch;
-        if (media_capi && media_capi->max_bytes_estimate)
+        if (media_capi && media_capi->max_bytes_estimate_cb)
         {
-            if (const auto res = media_capi->max_bytes_estimate(format.c_str(), batch, media_capi->user_data); res > 0)
+            if (const auto res = media_capi->max_bytes_estimate_cb(format.c_str(), batch, media_capi->user_data);
+                res > 0)
                 limit = static_cast<FileSize>(res);
         }
         return WaterMarks {

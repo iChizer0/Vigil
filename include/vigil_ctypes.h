@@ -53,7 +53,7 @@ typedef struct vg_audio_frame_t
 typedef struct vg_config_media_t
 {
     void *user_data; /**< User data pointer passed to all media callbacks. */
-    int64_t (*max_bytes_estimate)(const char *format, size_t batch,
+    int64_t (*max_bytes_estimate_cb)(const char *format, size_t batch,
         void *
             user_data); /**< Optional callback to estimate the maximum bytes for a given media format and batch size. */
     vg_sta_e (*video_file_create_cb)(int *fd, const char *filepath, const char *format,
