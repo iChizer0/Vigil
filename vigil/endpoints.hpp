@@ -520,9 +520,10 @@ public:
                             return static_cast<const Slot *>(_ctx->slot_check.first)->getStatus();
                         return std::nullopt;
                     };
-                    if (const auto sta = get_target_slot_status(); sta.has_value())
+                    if (auto sta = get_target_slot_status(); sta.has_value())
                     {
                         auto obj = nlohmann::json::object();
+                        sta->selected = true;
                         sta->to(obj, *_ctx);
                         res_j["dRecordSlot"] = obj;
                     }
