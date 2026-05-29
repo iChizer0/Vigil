@@ -1209,6 +1209,9 @@ private:
 
     bool doFsck(bool try_fix_on_dirty) const noexcept
     {
+        if (isInternal())
+            return true; // Assume internal storage is always clean
+
         std::string fs_type;
         {
             const std::shared_lock lock(_info_mutex);
@@ -1225,7 +1228,7 @@ private:
         {
             _dirty.store(true, std::memory_order_release);
             VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Filesystem on device ", _dev_path, " is marked dirty");
-            if (try_fix_on_dirty && !_internal)
+            if (try_fix_on_dirty)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Attempting to fix dirty filesystem on device ", _dev_path);
                 try
