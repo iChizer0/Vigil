@@ -284,8 +284,8 @@ Get the current status of all storage slots.
             "bSyncing": false, // Boolean, whether this slot is currently performing sync tasks (e.g., flushing write cache)
             "bWriting": false, // Boolean, whether this slot currently has activate writing tasks (e.g., recording videos, writing images)
             "bRotating": false, // Boolean, whether this slot is currently performing quota rotation
-            "eState": 8, // Integer, states enum of current slot, values (1: ERROR, 2: NOT_FORMATTED_OR_FORMAT_UNSUPPORTED, 3: FORMATTING, 4: NOT_MOUNTED, 5: MOUNTED, 6: CONFIGURED, 7: INDEXING, 8: READY, 9: SATURATED)
-            "sState": "READY", // String, human-readable state ("ERROR", "NOT_FORMATTED_OR_FORMAT_UNSUPPORTED", "FORMATTING", "NOT_MOUNTED", "MOUNTED", "CONFIGURED", "INDEXING", "READY", "SATURATED")
+            "eState": 8, // Integer, states enum of current slot, values (-1: ERROR, 1: NOT_FORMATTED_OR_FORMAT_UNSUPPORTED, 2: FORMATTING, 3: NOT_MOUNTED, 4: FILESYSTEM_CHECKING, 5: MOUNTED, 6: CONFIGURED, 7: INDEXING, 8: READY, 9: SATURATED)
+            "sState": "READY", // String, human-readable state ("ERROR", "NOT_FORMATTED_OR_FORMAT_UNSUPPORTED", "FORMATTING", "NOT_MOUNTED", "FILESYSTEM_CHECKING", "MOUNTED", "CONFIGURED", "INDEXING", "READY", "SATURATED")
             "iStatsSizeBytes": 1000000000, // Integer, total size of the partition, not accurate if eState < MOUNTED
             "iStatsFreeBytes": 500000000, // Integer, free space of the partition, not accurate if eState < MOUNTED
             "iQuotaMinimumRecommendBytes": 200000000, // Integer, minimum recommended quota limit, may not work well if quota limit is set below this value

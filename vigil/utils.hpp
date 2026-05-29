@@ -2,6 +2,7 @@
 #ifndef VIGIL_UTILS_HPP
 #define VIGIL_UTILS_HPP
 
+#include <atomic>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -13,7 +14,9 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 namespace vigil::utils {
@@ -38,7 +41,7 @@ public:
 
     ~Execute() = default;
 
-    [[nodiscard]] int operator()() const
+    [[nodiscard]] int operator()(const std::atomic<int> *signal = nullptr) const
     {
         pid_t pid = ::fork();
         if (pid == -1)
@@ -49,9 +52,7 @@ public:
         {
             int dev_null = ::open("/dev/null", O_WRONLY);
             if (dev_null == -1)
-            {
                 ::_exit(1);
-            }
             ::dup2(dev_null, STDOUT_FILENO);
             ::dup2(dev_null, STDERR_FILENO);
             if (dev_null > STDERR_FILENO)
@@ -64,22 +65,50 @@ public:
         else
         {
             int status;
-            while (::waitpid(pid, &status, 0) == -1)
+            if (signal == nullptr)
             {
-                if (errno != EINTR)
+                while (::waitpid(pid, &status, 0) == -1)
                 {
-                    return -1;
+                    if (errno != EINTR)
+                        return -1;
+                }
+            }
+            else
+            {
+                while (true)
+                {
+                    pid_t wait_result = ::waitpid(pid, &status, WNOHANG);
+                    if (wait_result == pid)
+                        break;
+                    if (wait_result == -1)
+                    {
+                        if (errno == EINTR)
+                            continue;
+                        return -1;
+                    }
+
+                    int sig = 0;
+                    int cur_sig = signal->load(std::memory_order_acquire);
+                    if (cur_sig != sig)
+                    {
+                        sig = cur_sig;
+                        if (cur_sig > 0)
+                        {
+                            ::sigset_t set;
+                            if (::sigemptyset(&set) == 0 && ::sigaddset(&set, cur_sig) == 0)
+                                static_cast<void>(::kill(pid, cur_sig));
+                        }
+                    }
+
+                    const ::timespec interval { 0, 10L * 1000L * 1000L };
+                    static_cast<void>(::nanosleep(&interval, nullptr));
                 }
             }
 
             if (WIFEXITED(status))
-            {
                 return WEXITSTATUS(status);
-            }
             else
-            {
                 return -1;
-            }
         }
     }
 

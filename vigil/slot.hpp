@@ -5,12 +5,14 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -94,7 +96,7 @@ public:
             _mount_path, ", removable: ", _removable ? "true" : "false");
         if (ensureStateResetToInitial())
         {
-            ensureStateMounted(true);
+            ensureStateMounted(false);
             ensureStateResetToInitial(); // Reset to initial state after mounting
         }
     }
@@ -217,12 +219,7 @@ public:
         if (_manager_thread && _writer_thread)
             return 0;
 
-        if (ensureStateResetToInitial())
-        {
-            ensureStateMounted();
-            ensureStateConfigured();
-            ensureStateResetToInitial(); // Reset to initial state after mounting
-        }
+        ensureStateResetToInitial();
 
         // Reset write stats and cache
         resetWriteStatsUnsafe();
@@ -728,17 +725,20 @@ private:
 
     void managerThreadTask() noexcept
     {
+        size_t cumulative_error_count = 0;
         auto state = _state.load(std::memory_order_acquire);
-        while (!_stop_token.load(std::memory_order_acquire))
+        while (!_stop_token.load(std::memory_order_acquire) && cumulative_error_count < kManagerRecoveryMaxAttempts)
         {
             const auto start = std::chrono::steady_clock::now();
             // Check and recover state if needed
             if (!probeStateHealth())
             {
+                // Known limitation, don't attempt to fsck when dirty mounted
                 if (!ensureStateResetToInitial())
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to reset storage slot for device path ", _dev_path,
                         " to initial state, will retry");
+                    ++cumulative_error_count;
                     goto l_wait_and_continue;
                 }
             }
@@ -756,7 +756,8 @@ private:
             {
                 case SlotState::Error: {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Storage slot for device path ", _dev_path,
-                        " is in error state, will retry");
+                        " is in error state, will retry, count: ", cumulative_error_count);
+                    ++cumulative_error_count;
                     // Error state requires a longer delay before retrying
                     const auto s = std::chrono::steady_clock::now();
                     do
@@ -778,12 +779,16 @@ private:
                     goto l_check_state_loop_delayed;
 
                 case SlotState::NotMounted:
-                    ensureStateMounted();
+                    ensureStateMounted(true);
                     goto l_check_state_loop;
 
-                case SlotState::Mounted:
-                    // Wait for external configuration request
+                case SlotState::FilesystemChecking:
+                    // Wait for fsck to complete
                     goto l_check_state_loop_delayed;
+
+                case SlotState::Mounted:
+                    ensureStateConfigured();
+                    goto l_check_state_loop;
 
                 case SlotState::Configured:
                     ensureStateReadyOrSaturated();
@@ -812,8 +817,15 @@ private:
             }
 
         l_wait_and_continue:
-            if (auto elapsed = std::chrono::steady_clock::now() - start; elapsed < kManagerProbeInterval)
+            if (const auto elapsed = std::chrono::steady_clock::now() - start; elapsed < kManagerProbeInterval)
                 std::this_thread::sleep_for(kManagerProbeInterval - elapsed);
+        }
+
+        if (cumulative_error_count >= kManagerRecoveryMaxAttempts)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Storage slot for device path ", _dev_path,
+                " has reached maximum recovery attempts, giving up and entering error state");
+            _state.store(SlotState::Error, std::memory_order_release);
         }
     }
 
@@ -1195,12 +1207,9 @@ private:
         return true;
     }
 
-    bool doFsck(bool stop_on_dirty) const noexcept
+    bool doFsck(bool try_fix_on_dirty) const noexcept
     {
-        if (isInternal())
-            return true;
-
-        std::string_view fs_type;
+        std::string fs_type;
         {
             const std::shared_lock lock(_info_mutex);
             if (_type.has_value())
@@ -1216,7 +1225,40 @@ private:
         {
             _dirty.store(true, std::memory_order_release);
             VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Filesystem on device ", _dev_path, " is marked dirty");
-            return !stop_on_dirty;
+            if (try_fix_on_dirty && !_internal)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Attempting to fix dirty filesystem on device ", _dev_path);
+                try
+                {
+                    std::atomic<int> sig = 0;
+                    auto fix_future = std::async(
+                        std::launch::async,
+                        [](const std::filesystem::path &dev_path, std::atomic<int> &sig) -> int {
+                            return Execute("fsck", { "-p", dev_path.string() })(&sig);
+                        },
+                        std::ref(_dev_path), std::ref(sig));
+                    // Wait for fsck to complete or stop signal
+                    while (fix_future.wait_for(kFsckFixProbeInterval) != std::future_status::ready)
+                    {
+                        if (_stop_token.load(std::memory_order_acquire))
+                            sig.store(SIGTERM, std::memory_order_release);
+                    }
+                    const auto ret = fix_future.get();
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Fsck fix for device ", _dev_path,
+                        " completed with return code: ", ret);
+                    if (ret == 0 /* no errors */ || ret == 1 /* errors corrected */)
+                    {
+                        _dirty.store(false, std::memory_order_release);
+                        return true;
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to start fsck fix thread for device ", _dev_path, ": ",
+                        e.what());
+                }
+            }
+            return false;
         }
         else
         {
@@ -1310,17 +1352,19 @@ private:
         return true;
     }
 
-    bool ensureStateMounted(bool stop_on_dirty = false) noexcept
+    bool ensureStateMounted(bool try_fix_on_dirty) noexcept
     {
-        // Only mount if not mounted
         auto state = _state.load(std::memory_order_acquire);
-        if (state != SlotState::NotMounted)
+        if (state != SlotState::NotMounted || state == SlotState::FilesystemChecking)
             return false;
-        if (!doFsck(stop_on_dirty))
+        if (!_state.compare_exchange_strong(state, SlotState::FilesystemChecking, std::memory_order_acq_rel,
+                std::memory_order_acquire))
+            return false;
+        state = SlotState::FilesystemChecking;
+        if (!doFsck(try_fix_on_dirty))
             goto l_mount_error;
         if (!doMount())
             goto l_mount_error;
-        // Update stats
         if (!doStats())
             goto l_mount_error;
         return _state.compare_exchange_strong(state, SlotState::Mounted, std::memory_order_acq_rel,
@@ -1500,8 +1544,7 @@ private:
 
     bool doCreateIndexManager() noexcept
     {
-        auto mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
-        if (!mgr)
+        if (auto mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire); !mgr)
         {
             try
             {
@@ -1611,7 +1654,9 @@ private:
         "fat",
         "vfat",
     };
+    static inline constexpr const std::chrono::milliseconds kFsckFixProbeInterval = std::chrono::milliseconds(100);
     static inline constexpr const std::chrono::milliseconds kManagerProbeInterval = std::chrono::milliseconds(500);
+    static inline constexpr const size_t kManagerRecoveryMaxAttempts = 5;
     static inline constexpr const std::chrono::seconds kManagerRecoverDelay = std::chrono::seconds(3);
     static inline constexpr const std::chrono::minutes kManagerEstimatedWriteBytesPeriod = std::chrono::minutes(30);
     static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);

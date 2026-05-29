@@ -580,10 +580,11 @@ private:
 using FileSize = int64_t;
 
 enum class SlotState : int {
-    Error = 1,
-    NotFormattedOrFormatUnsupported = 2,
-    Formatting = 3,
-    NotMounted = 4,
+    Error = -1,
+    NotFormattedOrFormatUnsupported = 1,
+    Formatting = 2,
+    NotMounted = 3,
+    FilesystemChecking = 4,
     Mounted = 5,
     Configured = 6,
     Indexing = 7,
@@ -603,6 +604,8 @@ inline std::string_view SlotStateString(SlotState state) noexcept
             return "FORMATTING";
         case SlotState::NotMounted:
             return "NOT_MOUNTED";
+        case SlotState::FilesystemChecking:
+            return "FILESYSTEM_CHECKING";
         case SlotState::Mounted:
             return "MOUNTED";
         case SlotState::Configured:
