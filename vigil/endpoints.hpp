@@ -108,6 +108,7 @@ public:
                     ", code: ", errno);
                 goto l_err_and_cleanup;
             }
+            file.flush();
         }
 
         std::filesystem::rename(tmp_path, _dir_path / _name, ec);

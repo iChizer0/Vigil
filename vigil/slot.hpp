@@ -1169,7 +1169,7 @@ private:
             _ctx.c_api.storage.on_unmount_cb(_dev_path.c_str(), _mount_path.c_str());
         // Sync the filesystem before unmounting (syncfs)
         {
-            const auto fd = ::open(_mount_path.c_str(), O_RDONLY);
+            const auto fd = ::open(_mount_path.c_str(), O_RDWR);
             if (fd < 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open mount path ", _mount_path,
@@ -1432,32 +1432,44 @@ private:
     bool writeQuotaLimitToFile(FileSize quota_limit) const noexcept
     {
         const auto quota_limit_path = getRecordQuotaLimitPath();
-        if (std::error_code ec;
-            !std::filesystem::is_regular_file(quota_limit_path, ec)) // If not regular file, remove it first
+        const auto tmp = quota_limit_path.string() + ".tmp";
         {
-            std::filesystem::remove_all(quota_limit_path, ec);
+            std::error_code ec;
+            std::filesystem::remove_all(tmp, ec); // Remove temp file if already exists
             if (ec)
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove non-regular file at ", quota_limit_path, ": ",
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove existing temp quota file at ", tmp, ": ",
                     ec.message());
                 return false;
             }
         }
-        std::ofstream quota_file(quota_limit_path, std::ios::trunc);
+        std::ofstream quota_file(tmp, std::ios::trunc);
         if (!quota_file.is_open())
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open quota limit file at ", quota_limit_path,
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open quota limit file at ", tmp,
                 " for writing: ", static_cast<int>(errno));
             return false;
         }
         quota_file << std::to_string(quota_limit) << std::endl;
         if (quota_file.fail())
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to write quota limit to file at ", quota_limit_path, ": ",
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to write quota limit to file at ", tmp, ": ",
                 static_cast<int>(errno));
             return false;
         }
+        quota_file.flush();
         quota_file.close();
+        {
+            std::error_code ec;
+            std::filesystem::rename(tmp, quota_limit_path, ec);
+            if (ec)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to rename quota limit file from ", tmp, " to ",
+                    quota_limit_path, ": ", ec.message());
+                std::filesystem::remove_all(tmp, ec);
+                return false;
+            }
+        }
         return true;
     }
 
