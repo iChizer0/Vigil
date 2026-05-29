@@ -745,7 +745,7 @@ private:
             goto l_check_state_loop;
 
         l_check_state_loop_delayed:
-            if (auto elapsed = std::chrono::steady_clock::now() - start; elapsed < kManagerProbeInterval)
+            if (const auto elapsed = std::chrono::steady_clock::now() - start; elapsed < kManagerProbeInterval)
                 std::this_thread::sleep_for(kManagerProbeInterval - elapsed);
 
         l_check_state_loop:
