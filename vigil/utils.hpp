@@ -213,19 +213,55 @@ private:
 
     Result checkExt() const noexcept
     {
+        static constexpr uint16_t kExtMagic = 0xEF53;
+        static constexpr uint16_t kExtStateClean = 0x0001;
+        static constexpr uint32_t kExtNeedsRecovery = 0x0004;
+        static constexpr uint32_t kExtDynamicRevision = 1;
+        static constexpr uint32_t kExtMaxLogBlockSize = 6; // 1024 << 6 == 64 KiB
+        static constexpr uint16_t kExtMinInodeSize = 128;
+
         uint8_t sb[0x64];
         if (!read(sb, sizeof(sb), 1024))
             return Result::ErrorIO;
 
-        if (u16le(sb + 0x38) != 0xEF53 /* ext magic number */)
+        if (u16le(sb + 0x38) != kExtMagic)
             return Result::ErrorMagic;
+
+        const auto inodes_count = u32le(sb + 0x00);
+        const auto blocks_count = u32le(sb + 0x04);
+        const auto free_blocks_count = u32le(sb + 0x0C);
+        const auto free_inodes_count = u32le(sb + 0x10);
+        const auto first_data_block = u32le(sb + 0x14);
+        const auto log_block_size = u32le(sb + 0x18);
+        const auto blocks_per_group = u32le(sb + 0x20);
+        const auto inodes_per_group = u32le(sb + 0x28);
+        const auto rev_level = u32le(sb + 0x4C);
+        if (inodes_count == 0 || blocks_count == 0 || blocks_per_group == 0 || inodes_per_group == 0
+            || free_blocks_count > blocks_count || free_inodes_count > inodes_count
+            || log_block_size > kExtMaxLogBlockSize || rev_level > kExtDynamicRevision)
+            return Result::ErrorInvalid;
+
+        const uint64_t block_size = 1024ULL << log_block_size;
+        if (first_data_block != (block_size == 1024 ? 1U : 0U) || blocks_count <= first_data_block)
+            return Result::ErrorInvalid;
+
+        const uint64_t block_groups
+            = ((static_cast<uint64_t>(blocks_count) - first_data_block) + blocks_per_group - 1U) / blocks_per_group;
+        if (block_groups == 0 || static_cast<uint64_t>(inodes_per_group) * block_groups < inodes_count
+            || inodes_per_group > block_size * 8U)
+            return Result::ErrorInvalid;
+
+        if (rev_level == kExtDynamicRevision)
+        {
+            const auto first_ino = u32le(sb + 0x54);
+            const auto inode_size = u16le(sb + 0x58);
+            if (first_ino == 0 || inode_size < kExtMinInodeSize || inode_size > block_size || !isPowerOfTwo(inode_size))
+                return Result::ErrorInvalid;
+        }
 
         const auto state = u16le(sb + 0x3A);
         const auto incompat_features = u32le(sb + 0x60);
-        return (state & 0x0001 /* valid fs */) == 0 || (state & 0x0002 /* error fs */) != 0
-                       || (incompat_features & 0x0004 /* needs recovery */) != 0
-                   ? Result::Dirty
-                   : Result::Clean;
+        return state != kExtStateClean || (incompat_features & kExtNeedsRecovery) != 0 ? Result::Dirty : Result::Clean;
     }
 
     Result checkFat() const noexcept
