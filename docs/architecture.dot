@@ -1,12 +1,14 @@
 digraph G {
   rankdir=TB;
   node [fontname="Helvetica", fontsize=10];
-  edge [fontsize=8];
+  edge [fontsize=8, arrowsize=0.7];
   compound=true;
   newrank=true;
+  outputorder=edgesfirst;
+  remincross=true;
   splines=ortho;
-  nodesep=0.5;
-  ranksep=0.9;
+  nodesep=0.25;
+  ranksep=0.55;
 
   // ============================================================
   // Rank Constraints for Vertical Layering
@@ -55,7 +57,7 @@ digraph G {
       rule_ep [label="Rule Config\nbRuleEnabled\ndWriterConfig", shape=box];
       schedule_ep [label="Schedule Config\nTimeRange per Weekday", shape=box];
       record_ep [label="Record Config\nsCurrentSelected\nRule Type Variants", shape=box];
-      rule_info_ep [label="Rule Info\nEvent Status\nGPIO/TTY Availability", shape=box];
+      rule_info_ep [label="Rule Info\nEvent Status\nGPIO/TTY Availability\nMedia Pause / Record Enabled\nSelected Record Slot", shape=box];
     }
 
     subgraph cluster_storage_endpoint {
@@ -63,8 +65,16 @@ digraph G {
       style="rounded,dashed";
       color=gray50;
       storage_cfg_ep [label="Storage Config\nTarget Slot Selection", shape=box];
-      storage_status_ep [label="Storage Status\nSlot States/Stats\nSyncing/Rotating Status", shape=box];
-      storage_ctrl_ep [label="Storage Control\nFormat/Eject/FreeUp\nRelay Enable/Disable\nRemove Files", shape=box];
+      storage_status_ep [label="Storage Status\nSlot States/Stats\nDirty/Syncing/Writing/Rotating\nQuota Details", shape=box];
+      storage_ctrl_ep [label="Storage Control\nSync + Async Tasks\nFormat/Eject/FreeUp\nRelay Enable/Disable\nRemove Files", shape=box];
+
+      subgraph cluster_storage_async_endpoint {
+        label="Storage Async Tasks";
+        style="rounded,dotted";
+        color=gray70;
+        storage_async_worker [label="AsyncTaskWorker\nQueue/Running/History\nStatus/Cancel", shape=box];
+        storage_async_task [label="StorageAsyncTask\nFormat/Eject/FreeUp/Remove\nProgress + Cancellation", shape=box];
+      }
     }
 
     subgraph cluster_capture_endpoint {
@@ -129,7 +139,7 @@ digraph G {
       label="Control Flags (Atomic)";
       style="rounded,dashed";
       color=gray60;
-      ctrl_rule_enabled [label="rule_enabled\nstd::atomic<bool>", shape=note];
+      ctrl_rule_enabled [label="record_rule_enabled\nstd::atomic<bool>", shape=note];
       ctrl_infer_subs [label="inference_subscribers\nstd::atomic<int>", shape=note];
       ctrl_media_paused [label="media_paused\nstd::atomic<bool>", shape=note];
       ctrl_writers_active [label="media_writers_active\nstd::atomic<size_t>", shape=note];
@@ -152,6 +162,7 @@ digraph G {
       shared_infer_result [label="SharedInferenceResult\nDetectionResultVec\nClassificationResultVec", shape=note];
       shared_rule_evt [label="SharedRuleEvent\nLast/Current WriteEvent\nEventOwner (type/id/ts)", shape=note];
       shared_writer_cfg [label="SharedWriterSettings\nRevision Counter\nshared_ptr<FileWriterSettings>\n(Immutable, Factory Created)\nWaterMarks", shape=note];
+      slot_check [label="Slot Check Callback\nSelected Slot Owner\nReady-To-Write Predicate", shape=note];
     }
   }
 
@@ -227,17 +238,18 @@ digraph G {
     style=rounded;
     color=darkgreen;
 
-    storage [label="Storage Manager\nNetlink Hotplug Monitor\nSlot Discovery/Selection", shape=box, style=filled, fillcolor=lightgreen];
+    storage [label="Storage Manager\nInitial Scan + Netlink Hotplug\nSlot Discovery/Selection\nConfig-Driven Enablement", shape=box, style=filled, fillcolor=lightgreen];
 
     subgraph cluster_slot {
       label="Slot (per Device)";
       style="rounded,dashed";
       color=gray60;
 
-      slot_state [label="Slot State Machine\nError→Initial→Formatted\n→Mounted→Configured→Ready", shape=box];
-      slot_ops [label="Slot Operations\nMount/Unmount/Format\nEnable/Disable\nSuspend/Resume Write", shape=box];
-      slot_quota [label="Quota Manager\nLimit Bytes\nRotate Policy\nMinimum Recommend Bytes", shape=box];
+      slot_state [label="Slot State Machine\nError/Unsupported/Formatting\nNotMounted→FilesystemChecking\n→Mounted→Configured→Indexing\n→Ready/Saturated", shape=box];
+      slot_ops [label="Slot Operations\nMount/Unmount/Format\nFSCK Before Mount\nEnable/Disable\nQuota/File Ops", shape=box];
+      slot_quota [label="Quota Manager\nLimit Bytes\nCritical/High/Recycling Watermarks\nRotate Policy\nPreserved Internal Free Space", shape=box];
       slot_rotating [label="Rotating Flag\nstd::atomic<bool>", shape=note];
+      slot_dirty [label="Dirty Flag\nstd::atomic<bool>\nbDirty API Status", shape=note];
 
       subgraph cluster_slot_components {
         label="Slot Components";
@@ -247,12 +259,14 @@ digraph G {
         indexer_threads [label="IndexManager Threads\nWatcher (fanotify poll)\nIndexer (lazy reindex)\nIncremental Event Handling", shape=box, style=filled, fillcolor=lightsalmon];
         entry_index [label="EntryIndex\nLock-Free Atomic Size\nRevision Tracking\nCAS-Based Updates", shape=note];
         write_stats [label="WriteStats\nHourly Bytes/Minute\nEstimated Write Rate", shape=box];
+        fsck_util [label="FSCK Utility\nExt/FAT Dirty Probe\nfsck -p Repair\nInterruptible Execute", shape=box];
+        slot_recovery [label="Manager Recovery\nCumulative Error Counter\nMax Attempts→Error\nBackoff Retry", shape=box];
         slot_writer [label="Slot::writerThreadTask\nCache→Target Move\nDirect Filesystem Ops", shape=box];
         relay [label="Relay\nUUID Symlink Export\nTimeout Auto-Disable (5m)\nNginx Integration", shape=box];
       }
     }
 
-    fs [label="Filesystem\n(ext4/vfat/exfat)", shape=cylinder];
+    fs [label="Filesystem\n(ext2/3/4, fat/vfat)", shape=cylinder];
   }
 
   // ============================================================
@@ -304,8 +318,17 @@ digraph G {
   schedule_ep -> rule_schedule [color=blue, xlabel="create/update"];
   record_ep -> rule_thread [color=blue, xlabel="swap rule"];
   record_ep -> rule_http [color=blue, xlabel="activate"];
+  record_ep -> slot_check [color=blue, xlabel="HTTP precheck"];
+  rule_info_ep -> shared_rule_evt [color=blue, xlabel="last/current event"];
+  rule_info_ep -> ctrl_rule_enabled [color=blue, xlabel="read"];
+  rule_info_ep -> ctrl_media_paused [color=blue, xlabel="read"];
+  rule_info_ep -> slot_check [color=blue, xlabel="record slot status"];
   storage_cfg_ep -> storage [color=blue, xlabel="setConfig"];
+  storage_status_ep -> storage [color=blue, xlabel="getStatus"];
   storage_ctrl_ep -> storage [color=blue];
+  storage_ctrl_ep -> storage_async_worker [color=blue, xlabel="submit/status/cancel"];
+  storage_async_worker -> storage_async_task [color=orange, style=dashed, xlabel="queue/run"];
+  storage_async_task -> storage [color=blue, xlabel="execute action"];
 
   // Rule thread owned by RuleEndpoint
   rule_ep -> rule_thread [color=blue, xlabel="owns"];
@@ -328,6 +351,7 @@ digraph G {
   ctx -> shared_time [color=blue, xlabel="tick()", weight=2];
   ctx -> ctrl_rule_enabled [color=blue, weight=2];
   ctx -> ctrl_infer_subs [color=blue];
+  ctx -> slot_check [color=blue];
   infer_q -> shared_infer_result [color=orange, style=dashed, xlabel="pop & move", weight=2];
   rule_thread -> ctx [color=blue, xlabel="tick()", weight=3];
   rule_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="tryUpdateRuleEvent()"];
@@ -410,18 +434,24 @@ digraph G {
 
   storage -> slot_state [color=blue, xlabel="lifecycle", weight=3];
   slot_state -> slot_ops [color=blue, weight=2];
+  slot_state -> slot_recovery [color=blue, xlabel="retry/give up"];
   slot_ops -> slot_quota [color=blue, xlabel="quota check"];
+  slot_ops -> fsck_util [color=blue, xlabel="dirty check/repair"];
+  slot_ops -> slot_check [color=blue, xlabel="attach/detach ready cb"];
   slot_quota -> indexer [color=blue, xlabel="size() query", weight=2];
   slot_quota -> slot_rotating [color=blue, xlabel="set flag"];
   indexer -> write_stats [color=blue, weight=2];
-  slot_quota -> fs [color=blue, xlabel="remove_all", constraint=false];
+  fsck_util -> slot_dirty [color=blue, xlabel="update"];
+  fsck_util -> fs [color=green, style=dashed, xlabel="superblock probe"];
+  fsck_util -> fs [color=blue, xlabel="fsck -p", constraint=false];
+  slot_quota -> fs [color=blue, xlabel="remove_all/recycle", constraint=false];
 
   // Slot owns writer thread
   slot_ops -> writer_thread [color=blue, xlabel="spawn", weight=2];
   slot_ops -> slot_writer [color=blue, weight=2];
 
   // Storage → Filesystem
-  slot_ops -> fs [color=blue, xlabel="mount/format", weight=2];
+  slot_ops -> fs [color=blue, xlabel="mount/format/unmount", weight=2];
   indexer -> fs [color=green, style=dashed, xlabel="fanotify watch"];
   indexer_threads -> fs [color=orange, style=dashed, xlabel="poll/stat"];
 
