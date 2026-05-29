@@ -53,8 +53,10 @@ public:
             int dev_null = ::open("/dev/null", O_WRONLY);
             if (dev_null == -1)
                 ::_exit(1);
+
             ::dup2(dev_null, STDOUT_FILENO);
             ::dup2(dev_null, STDERR_FILENO);
+
             if (dev_null > STDERR_FILENO)
                 ::close(dev_null);
 
@@ -75,6 +77,7 @@ public:
             }
             else
             {
+                int last_sig = 0;
                 while (true)
                 {
                     pid_t wait_result = ::waitpid(pid, &status, WNOHANG);
@@ -87,17 +90,12 @@ public:
                         return -1;
                     }
 
-                    int sig = 0;
                     int cur_sig = signal->load(std::memory_order_acquire);
-                    if (cur_sig != sig)
+                    if (cur_sig != last_sig)
                     {
-                        sig = cur_sig;
+                        last_sig = cur_sig;
                         if (cur_sig > 0)
-                        {
-                            ::sigset_t set;
-                            if (::sigemptyset(&set) == 0 && ::sigaddset(&set, cur_sig) == 0)
-                                static_cast<void>(::kill(pid, cur_sig));
-                        }
+                            ::kill(pid, cur_sig);
                     }
 
                     const ::timespec interval { 0, 10L * 1000L * 1000L };
