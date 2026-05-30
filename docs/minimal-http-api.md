@@ -280,7 +280,7 @@ Get the current status of all storage slots.
             "sType": "ext4", // String (optional), filesystem type, null if not available or not formatted yet, may not exist if eState < NOT_MOUNTED
             "bSelected": true, // Boolean, whether this slot is the target enabled slot according to current configuration
             "bEnabled": true, // Boolean, whether this slot is currently enabled
-            "bDirty": false, // Boolean, whether the filesystem on this slot is marked dirty and may need fsck (not auto mounted if not enabled)
+            "bDirty": false, // Boolean (optional), whether the filesystem on this slot is marked dirty and may need fsck (null is not checked or no able to determine)
             "bSyncing": false, // Boolean, whether this slot is currently performing sync tasks (e.g., flushing write cache)
             "bWriting": false, // Boolean, whether this slot currently has activate writing tasks (e.g., recording videos, writing images)
             "bRotating": false, // Boolean, whether this slot is currently performing quota rotation

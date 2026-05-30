@@ -88,8 +88,8 @@ public:
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
           _internal(internal), _data_dir_path(std::move(data_dir_path)), _info_mutex(), _label(), _uuid(), _type(),
           _mutex(), _op_mutex(), _stop_token(false), _manager_thread(nullptr), _writer_thread(nullptr),
-          _state(SlotState::Error), _dirty(false), _stats(), _quota_limit_bytes(-1), _quota_rotate(true),
-          _index_manager(nullptr), _writer_task_count(0), _rotating(false), _write_stats(),
+          _state(SlotState::Error), _fsck(FSCK::Result::ErrorUnknown), _stats(), _quota_limit_bytes(-1),
+          _quota_rotate(true), _index_manager(nullptr), _writer_task_count(0), _rotating(false), _write_stats(),
           _relay(ctx, _mount_path / _data_dir_path)
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Creating storage slot for device path ", _dev_path, " at mount path ",
@@ -135,7 +135,7 @@ public:
 
     inline bool isDirty() const noexcept
     {
-        return _dirty.load(std::memory_order_acquire);
+        return _fsck.load(std::memory_order_acquire);
     }
 
     inline bool isReadyToWrite() const noexcept
@@ -189,7 +189,17 @@ public:
             .type = std::move(format),
             .selected = false,
             .enabled = is_enabled,
-            .dirty = _dirty.load(std::memory_order_acquire),
+            .dirty = [this]() -> std::optional<bool> {
+                switch (_fsck.load(std::memory_order_acquire))
+                {
+                    case FSCK::Result::Clean:
+                        return false;
+                    case FSCK::Result::Dirty:
+                        return true;
+                    default:
+                        return std::nullopt;
+                }
+            }(),
             .syncing = idx_mgr ? idx_mgr->indexing() : false,
             .writing = isWriting(),
             .rotating = isRotating(),
@@ -1209,9 +1219,6 @@ private:
 
     bool doFsck(bool try_fix_on_dirty) const noexcept
     {
-        if (isInternal())
-            return true; // Assume internal storage is always clean
-
         std::string fs_type;
         {
             const std::shared_lock lock(_info_mutex);
@@ -1219,56 +1226,59 @@ private:
                 fs_type = *_type;
         }
 
-        if (const auto res = FSCK(_dev_path, fs_type).dirty(); res == FSCK::Result::Clean)
+        const auto res = FSCK(_dev_path, fs_type).dirty();
+        _fsck.store(res, std::memory_order_release);
+        switch (res)
         {
-            _dirty.store(false, std::memory_order_release);
-            return true;
+            case FSCK::Result::Clean:
+                return true;
+            case FSCK::Result::ErrorMounted:
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Device ", _dev_path,
+                    " is currently mounted somewhere else, assuming fsck passed");
+                return true;
+            case FSCK::Result::Dirty:
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Filesystem on device ", _dev_path, " is marked dirty");
+                break;
+            default:
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Unable to determine filesystem dirty flag for device ", _dev_path,
+                    ", type: ", fs_type, ", code: ", static_cast<int>(res));
+                return false;
         }
-        else if (res == FSCK::Result::Dirty)
+
+        if (try_fix_on_dirty)
         {
-            _dirty.store(true, std::memory_order_release);
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Filesystem on device ", _dev_path, " is marked dirty");
-            if (try_fix_on_dirty)
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Attempting to fix dirty filesystem on device ", _dev_path);
+            try
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Attempting to fix dirty filesystem on device ", _dev_path);
-                try
+                std::atomic<int> sig = 0;
+                auto fix_future = std::async(
+                    std::launch::async,
+                    [](const std::filesystem::path &dev_path, std::atomic<int> &sig) -> int {
+                        return Execute("fsck", { "-p", dev_path.string() })(&sig);
+                    },
+                    std::ref(_dev_path), std::ref(sig));
+                // Wait for fsck to complete or stop signal
+                while (fix_future.wait_for(kFsckFixProbeInterval) != std::future_status::ready)
                 {
-                    std::atomic<int> sig = 0;
-                    auto fix_future = std::async(
-                        std::launch::async,
-                        [](const std::filesystem::path &dev_path, std::atomic<int> &sig) -> int {
-                            return Execute("fsck", { "-p", dev_path.string() })(&sig);
-                        },
-                        std::ref(_dev_path), std::ref(sig));
-                    // Wait for fsck to complete or stop signal
-                    while (fix_future.wait_for(kFsckFixProbeInterval) != std::future_status::ready)
-                    {
-                        if (_stop_token.load(std::memory_order_acquire))
-                            sig.store(SIGTERM, std::memory_order_release);
-                    }
-                    const auto ret = fix_future.get();
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Fsck fix for device ", _dev_path,
-                        " completed with return code: ", ret);
-                    if (ret == 0 /* no errors */ || ret == 1 /* errors corrected */)
-                    {
-                        _dirty.store(false, std::memory_order_release);
-                        return true;
-                    }
+                    if (_stop_token.load(std::memory_order_acquire))
+                        sig.store(SIGTERM, std::memory_order_release);
                 }
-                catch (const std::exception &e)
+                const auto ret = fix_future.get();
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Fsck fix for device ", _dev_path,
+                    " completed with return code: ", ret);
+                if (ret == 0 /* no errors */ || ret == 1 /* errors corrected */)
                 {
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to start fsck fix thread for device ", _dev_path, ": ",
-                        e.what());
+                    _fsck.store(FSCK::Result::Clean, std::memory_order_release);
+                    return true;
                 }
             }
-            return false;
+            catch (const std::exception &e)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to start fsck fix thread for device ", _dev_path, ": ",
+                    e.what());
+            }
         }
-        else
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Unable to determine filesystem dirty flag for device ", _dev_path,
-                ", type: ", fs_type, ", code: ", static_cast<int>(res));
-            return false;
-        }
+        return false;
     }
 
     bool doMount() const noexcept
@@ -1717,7 +1727,7 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<SlotState> _state;
 
     // Filesystem check flag
-    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _dirty;
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<FSCK::Result> _fsck;
 
     // Partition and quota stats
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<SlotStats> _stats;

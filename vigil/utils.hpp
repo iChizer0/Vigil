@@ -14,7 +14,9 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <mntent.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -125,18 +127,20 @@ public:
         Unknown,
     };
 
-    enum Result {
+    enum Result : int {
         Clean = 0,
-        Dirty = 1,
-        ErrorIO = 2,
-        ErrorMagic = 3,
-        ErrorInvalid = 4,
-        ErrorUnsupported = 5,
+        Dirty,
+        ErrorIO,
+        ErrorMagic,
+        ErrorInvalid,
+        ErrorUnsupported,
+        ErrorMounted,
+        ErrorUnknown,
     };
 
-    FSCK(const std::filesystem::path &dev_path, std::string_view fs_type) noexcept : _fd(-1), _fs_type(Type::Unknown)
+    FSCK(const std::filesystem::path &dev_path, std::string_view fs_type) noexcept
+        : _dev_path(dev_path), _fd(-1), _fs_type(Type::Unknown)
     {
-        _fd = ::open(dev_path.c_str(), O_RDONLY | O_CLOEXEC);
         if (fs_type == "ext" || fs_type == "ext2" || fs_type == "ext3" || fs_type == "ext4")
             _fs_type = Type::Ext;
         else if (fs_type == "fat" || fs_type == "fat12" || fs_type == "fat16" || fs_type == "fat32"
@@ -153,10 +157,57 @@ public:
         }
     }
 
-    Result dirty() const noexcept
+    FSCK(const FSCK &) = delete;
+    FSCK &operator=(const FSCK &) = delete;
+    FSCK(FSCK &&other) = delete;
+    FSCK &operator=(FSCK &&other) = delete;
+
+    Result dirty() noexcept
     {
         if (_fd < 0)
-            return Result::ErrorIO;
+        {
+            _fd = ::open(_dev_path.c_str(), O_RDONLY | O_CLOEXEC);
+            if (_fd < 0)
+                return Result::ErrorIO;
+        }
+        {
+            // Resolve the target device to its underlying block device identity so
+            // that mount detection is robust against non-canonical names (symlinks
+            // such as /dev/disk/by-uuid/..., /dev/mapper/x vs /dev/dm-0, etc.). stat
+            // follows symlinks, so st_rdev identifies the same device regardless of
+            // the path spelling.
+            struct ::stat dev_st;
+            const bool dev_is_blk = ::stat(_dev_path.c_str(), &dev_st) == 0 && S_ISBLK(dev_st.st_mode);
+
+            ::FILE *mount_table = ::setmntent("/proc/mounts", "r");
+            if (mount_table == nullptr)
+                return Result::ErrorIO;
+            bool found = false;
+            while (struct ::mntent *mount_entry = ::getmntent(mount_table))
+            {
+                if (mount_entry->mnt_fsname == nullptr)
+                    continue;
+                if (mount_entry->mnt_fsname == _dev_path)
+                {
+                    found = true;
+                    break;
+                }
+                if (dev_is_blk)
+                {
+                    struct ::stat ent_st;
+                    if (::stat(mount_entry->mnt_fsname, &ent_st) == 0 && S_ISBLK(ent_st.st_mode)
+                        && ent_st.st_rdev == dev_st.st_rdev)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            ::endmntent(mount_table);
+            if (found) // If the device is currently mounted, we cannot reliably check
+                       // dirty status, return error to indicate this
+                return Result::ErrorMounted;
+        }
         switch (_fs_type)
         {
             case Type::Ext:
@@ -194,13 +245,26 @@ private:
         return true;
     }
 
-    static inline uint16_t u16le(const uint8_t *p) noexcept
+    template<size_t Offset, size_t Size>
+    static inline uint8_t u8(const uint8_t (&buffer)[Size]) noexcept
     {
+        static_assert(Offset < Size, "u8 offset exceeds buffer");
+        return buffer[Offset];
+    }
+
+    template<size_t Offset, size_t Size>
+    static inline uint16_t u16le(const uint8_t (&buffer)[Size]) noexcept
+    {
+        static_assert(Offset <= Size && sizeof(uint16_t) <= Size - Offset, "u16le offset exceeds buffer");
+        const uint8_t *p = buffer + Offset;
         return static_cast<uint16_t>(p[0] | (static_cast<unsigned>(p[1]) << 8));
     }
 
-    static inline uint32_t u32le(const uint8_t *p) noexcept
+    template<size_t Offset, size_t Size>
+    static inline uint32_t u32le(const uint8_t (&buffer)[Size]) noexcept
     {
+        static_assert(Offset <= Size && sizeof(uint32_t) <= Size - Offset, "u32le offset exceeds buffer");
+        const uint8_t *p = buffer + Offset;
         return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16)
                | (static_cast<uint32_t>(p[3]) << 24);
     }
@@ -213,95 +277,125 @@ private:
 
     Result checkExt() const noexcept
     {
-        uint8_t sb[0x64];
-        if (!read(sb, sizeof(sb), 1024))
+        // https://git.kernel.org/pub/scm/fs/ext2/e2fsprogs.git
+        uint8_t sb[0x160 /* superblock size */];
+        if (!read(sb, sizeof(sb), 1024 /* superblock offset */))
             return Result::ErrorIO;
 
-        if (u16le(sb + 0x38) != 0xEF53 /* ext magic */)
+        if (u16le<0x38>(sb) != 0xEF53 /* ext magic */)
             return Result::ErrorMagic;
 
-        const auto inodes_count = u32le(sb + 0x00);
-        uint64_t blocks_count = u32le(sb + 0x04);
-        uint64_t free_blocks_count = u32le(sb + 0x0C);
-        const auto free_inodes_count = u32le(sb + 0x10);
-        const auto first_data_block = u32le(sb + 0x14);
-        const auto log_block_size = u32le(sb + 0x18);
-        const auto blocks_per_group = u32le(sb + 0x20);
-        const auto inodes_per_group = u32le(sb + 0x28);
-        const auto rev_level = u32le(sb + 0x4C);
-        const auto incompat_features = u32le(sb + 0x60);
+        const auto inodes_count = u32le<0x00>(sb);
+        uint64_t blocks_count = u32le<0x04>(sb);
+        uint64_t free_blocks_count = u32le<0x0C>(sb);
+        const auto free_inodes_count = u32le<0x10>(sb);
+        const auto first_data_block = u32le<0x14>(sb);
+        const auto log_block_size = u32le<0x18>(sb);
+        const auto log_cluster_size = u32le<0x1C>(sb);
+        const auto blocks_per_group = u32le<0x20>(sb);
+        const auto clusters_per_group = u32le<0x24>(sb);
+        const auto inodes_per_group = u32le<0x28>(sb);
+        const auto rev_level = u32le<0x4C>(sb);
+        const auto incompat_features = u32le<0x60>(sb);
+        const auto ro_compat_features = u32le<0x64>(sb);
+        const bool has_64bit = (incompat_features & 0x0080 /* ext feature 64-bit */) != 0;
+        const bool has_bigalloc = (ro_compat_features & 0x0200 /* ext feature ro compat bigalloc */) != 0;
 
-        if ((incompat_features & 0x0080 /* ext feature incompat 64 bit */) != 0)
+        if (has_64bit)
         {
-            uint8_t sb64[0x0C];
-            if (!read(sb64, sizeof(sb64), 1024 + 0x150))
-                return Result::ErrorIO;
-            blocks_count |= static_cast<uint64_t>(u32le(sb64 + 0x00)) << 32;
-            free_blocks_count |= static_cast<uint64_t>(u32le(sb64 + 0x08)) << 32;
+            blocks_count |= static_cast<uint64_t>(u32le<0x150>(sb)) << 32;
+            free_blocks_count |= static_cast<uint64_t>(u32le<0x158>(sb)) << 32;
         }
 
-        if (inodes_count == 0 || blocks_count == 0 || blocks_per_group == 0 || inodes_per_group == 0
-            || free_blocks_count > blocks_count || free_inodes_count > inodes_count
-            || log_block_size > 6 /* max log block size */ || rev_level > 1 /* dynamic revision */)
+        if (inodes_count == 0 || blocks_count == 0 || blocks_per_group == 0 || clusters_per_group == 0
+            || inodes_per_group == 0 || free_blocks_count > blocks_count || free_inodes_count > inodes_count
+            || log_block_size > 6 /* max log block size */ || log_cluster_size > 29 /* max log cluster size */
+            || log_cluster_size < log_block_size || rev_level > 1 /* dynamic revision */)
+            return Result::ErrorInvalid;
+
+        if (!has_bigalloc && log_cluster_size != log_block_size)
             return Result::ErrorInvalid;
 
         const uint64_t block_size = 1024ULL << log_block_size;
         if (first_data_block != (block_size == 1024 ? 1U : 0U) || blocks_count <= first_data_block)
             return Result::ErrorInvalid;
 
-        const uint64_t block_groups = ((blocks_count - first_data_block - 1U) / blocks_per_group) + 1U;
-        const uint64_t inode_groups = ((static_cast<uint64_t>(inodes_count) - 1U) / inodes_per_group) + 1U;
-        if (block_groups == 0 || block_groups < inode_groups || blocks_per_group > block_size * 8U
-            || inodes_per_group > block_size * 8U)
-            return Result::ErrorInvalid;
-
+        uint64_t inode_size = 128;
         if (rev_level == 1 /* dynamic revision */)
         {
-            const auto first_ino = u32le(sb + 0x54);
-            const auto inode_size = u16le(sb + 0x58);
+            const auto first_ino = u32le<0x54>(sb);
+            inode_size = u16le<0x58>(sb);
             if (first_ino == 0 || inode_size < 128 /* min inode size */ || inode_size > block_size
                 || !isPowerOfTwo(inode_size))
                 return Result::ErrorInvalid;
         }
 
-        const auto state = u16le(sb + 0x3A);
+        const auto cluster_ratio_bits = log_cluster_size - log_block_size;
+        const uint64_t expected_blocks_per_group = static_cast<uint64_t>(clusters_per_group) << cluster_ratio_bits;
+        if (blocks_per_group != expected_blocks_per_group || blocks_per_group < 8
+            || clusters_per_group > block_size * 8U
+            || clusters_per_group > ((1U << 16U) - 8U) /* max clusters per group */)
+            return Result::ErrorInvalid;
+
+        if (has_64bit)
+        {
+            const auto desc_size = u16le<0xFE>(sb);
+            if (desc_size < 64 /* min 64-bit descriptor size */ || desc_size > 1024 /* max 64-bit descriptor size */
+                || !isPowerOfTwo(desc_size))
+                return Result::ErrorInvalid;
+        }
+
+        const uint64_t block_groups = ((blocks_count - first_data_block - 1U) / blocks_per_group) + 1U;
+        const uint64_t inodes_per_block = block_size / inode_size;
+        const uint64_t max_inodes_per_group = (1ULL << 16U) - inodes_per_block;
+        if (block_groups == 0 || inodes_per_group > block_size * 8U || inodes_per_group > max_inodes_per_group
+            || block_groups > std::numeric_limits<uint64_t>::max() / inodes_per_group
+            || static_cast<uint64_t>(inodes_per_group) * block_groups != inodes_count)
+            return Result::ErrorInvalid;
+
+        const auto state = u16le<0x3A>(sb);
         return (state & 0x0001 /* ext state valid */) == 0
-                       || (state & (0x0002 /* ext state error */ | 0x0004 /* ext state orphans */)) != 0
-                       || (incompat_features & 0x0004 /* ext feature incompat recover */) != 0
+                       || (state
+                              & (0x0002 /* ext state error */ | 0x0004 /* ext state orphans */
+                                  | 0x0020 /* ext state fast commit replay */))
+                              != 0
+                       || (incompat_features & 0x0004 /* ext feature recover */) != 0
+                       || (ro_compat_features & 0x10000 /* ext feature ro compat orphan present */) != 0
                    ? Result::Dirty
                    : Result::Clean;
     }
 
     Result checkFat() const noexcept
     {
+        // https://github.com/dosfstools/dosfstools.git
         uint8_t bs[512];
         if (!read(bs, sizeof(bs), 0))
             return Result::ErrorIO;
 
-        if (u16le(bs + 510) != 0xAA55 /* fat signature */)
+        if (u16le<510>(bs) != 0xAA55 /* fat signature */)
             return Result::ErrorMagic;
 
-        const uint16_t bytes_per_sec = u16le(bs + 11);
+        const uint16_t bytes_per_sec = u16le<11>(bs);
         if (bytes_per_sec < 512 || bytes_per_sec > 4096 || !isPowerOfTwo(bytes_per_sec))
             return Result::ErrorInvalid;
 
-        const uint8_t sec_per_cluster = bs[13];
+        const uint8_t sec_per_cluster = u8<13>(bs);
         if (sec_per_cluster > 128 || !isPowerOfTwo(sec_per_cluster))
             return Result::ErrorInvalid;
 
-        const uint16_t reserved_sec = u16le(bs + 14);
+        const uint16_t reserved_sec = u16le<14>(bs);
         if (reserved_sec == 0)
             return Result::ErrorInvalid;
 
-        const uint8_t num_fats = bs[16];
+        const uint8_t num_fats = u8<16>(bs);
         if (num_fats == 0)
             return Result::ErrorInvalid;
 
-        const uint16_t root_entries = u16le(bs + 17);
-        const uint16_t total_sec_16 = u16le(bs + 19);
-        const uint16_t fat_size_16 = u16le(bs + 22);
-        const uint32_t total_sec_32 = u32le(bs + 32);
-        const uint32_t fat_size_32 = u32le(bs + 36);
+        const uint16_t root_entries = u16le<17>(bs);
+        const uint16_t total_sec_16 = u16le<19>(bs);
+        const uint16_t fat_size_16 = u16le<22>(bs);
+        const uint32_t total_sec_32 = u32le<32>(bs);
+        const uint32_t fat_size_32 = u32le<36>(bs);
 
         const uint64_t total_sec = total_sec_16 != 0 ? total_sec_16 : total_sec_32;
         const uint64_t fat_size = fat_size_16 != 0 ? fat_size_16 : fat_size_32;
@@ -319,34 +413,36 @@ private:
         if (cluster_count == 0)
             return Result::ErrorInvalid;
 
-        enum StateOffset : size_t {
-            Fat12 = 0,
-            Fat16 = 0x25,
-            Fat32 = 0x41,
-        };
-        const StateOffset so = cluster_count < 4085 ? StateOffset::Fat12
-                                                    : (cluster_count < 65525 ? StateOffset::Fat16 : StateOffset::Fat32);
-        switch (so)
+        enum class FatType { Fat12, Fat16, Fat32 };
+        const FatType fat_type
+            = cluster_count < 4085 ? FatType::Fat12 : (cluster_count < 65525 ? FatType::Fat16 : FatType::Fat32);
+
+        size_t boot_flags_offset = 0;
+        switch (fat_type)
         {
-            case StateOffset::Fat32:
+            case FatType::Fat32:
                 if (root_entries != 0 || fat_size_16 != 0 || fat_size_32 == 0)
                     return Result::ErrorInvalid;
+                boot_flags_offset = 0x41;
                 break;
-            case StateOffset::Fat16:
+            case FatType::Fat16:
+            case FatType::Fat12:
                 if (root_entries == 0 || fat_size_16 == 0)
                     return Result::ErrorInvalid;
+                boot_flags_offset = 0x25;
                 break;
-            default:
-                return Result::ErrorUnsupported;
         }
 
-        if (bs[static_cast<size_t>(so)] & 0x01 /* boot sector dirty */)
+        if (bs[boot_flags_offset] & 0x01 /* boot sector dirty */)
             return Result::Dirty;
 
+        if (fat_type == FatType::Fat12)
+            return Result::Clean;
+
         uint64_t fat_index = 0;
-        if (so == StateOffset::Fat32)
+        if (fat_type == FatType::Fat32)
         {
-            if (const uint16_t ext_flags = u16le(bs + 40); (ext_flags & 0x0080) != 0)
+            if (const uint16_t ext_flags = u16le<40>(bs); (ext_flags & 0x0080) != 0)
             {
                 fat_index = ext_flags & 0x000F;
                 if (fat_index >= num_fats)
@@ -355,15 +451,15 @@ private:
         }
 
         const uint64_t fat_offset = (static_cast<uint64_t>(reserved_sec) + (fat_index * fat_size)) * bytes_per_sec;
-        const uint64_t entry_offset = so == StateOffset::Fat32 ? 4U : 2U;
+        const uint64_t entry_offset = fat_type == FatType::Fat32 ? 4U : 2U;
 
-        if (so == StateOffset::Fat32)
+        if (fat_type == FatType::Fat32)
         {
             uint8_t fat_entry[4];
             if (!read(fat_entry, sizeof(fat_entry), fat_offset + entry_offset))
                 return Result::ErrorIO;
 
-            const uint32_t value = u32le(fat_entry);
+            const uint32_t value = u32le<0>(fat_entry);
             return (value & 0x08000000 /* clean shutdown */) == 0 || (value & 0x04000000 /* no hard errors */) == 0
                        ? Result::Dirty
                        : Result::Clean;
@@ -374,7 +470,7 @@ private:
             if (!read(fat_entry, sizeof(fat_entry), fat_offset + entry_offset))
                 return Result::ErrorIO;
 
-            const uint16_t value = u16le(fat_entry);
+            const uint16_t value = u16le<0>(fat_entry);
             return (value & 0x8000 /* clean shutdown */) == 0 || (value & 0x4000 /* no hard errors */) == 0
                        ? Result::Dirty
                        : Result::Clean;
@@ -382,6 +478,7 @@ private:
     }
 
 private:
+    const std::filesystem::path _dev_path;
     int _fd;
     Type _fs_type;
 };

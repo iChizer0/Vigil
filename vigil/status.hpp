@@ -87,7 +87,7 @@ struct SlotStatus
     std::optional<std::string> type;
     bool selected;
     bool enabled;
-    bool dirty;
+    std::optional<bool> dirty;
     bool syncing;
     bool writing;
     bool rotating;
