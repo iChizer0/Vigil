@@ -737,7 +737,7 @@ private:
     {
         size_t cumulative_error_count = 0;
         auto state = _state.load(std::memory_order_acquire);
-        while (cumulative_error_count < kManagerRecoveryMaxAttempts && _failure.load(std::memory_order_acquire)
+        while (cumulative_error_count < kManagerRecoveryMaxAttempts && !_failure.load(std::memory_order_acquire)
                && !_stop_token.load(std::memory_order_acquire))
         {
             const auto start = std::chrono::steady_clock::now();
