@@ -87,10 +87,10 @@ public:
         std::filesystem::path data_dir_path)
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
           _internal(internal), _data_dir_path(std::move(data_dir_path)), _info_mutex(), _label(), _uuid(), _type(),
-          _mutex(), _op_mutex(), _stop_token(false), _manager_thread(nullptr), _writer_thread(nullptr),
-          _state(SlotState::Error), _fsck(FSCK::Result::ErrorUnknown), _stats(), _quota_limit_bytes(-1),
-          _quota_rotate(true), _index_manager(nullptr), _writer_task_count(0), _rotating(false), _write_stats(),
-          _relay(ctx, _mount_path / _data_dir_path)
+          _mutex(), _op_mutex(), _enabled(false), _failure(false), _stop_token(false), _manager_thread(nullptr),
+          _writer_thread(nullptr), _state(SlotState::Error), _fsck(FSCK::Result::ErrorUnknown), _stats(),
+          _quota_limit_bytes(-1), _quota_rotate(true), _index_manager(nullptr), _writer_task_count(0), _rotating(false),
+          _write_stats(), _relay(ctx, _mount_path / _data_dir_path)
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Creating storage slot for device path ", _dev_path, " at mount path ",
             _mount_path, ", removable: ", _removable ? "true" : "false");
@@ -129,8 +129,7 @@ public:
 
     inline bool isEnabled() const noexcept
     {
-        const std::shared_lock lock(_mutex);
-        return _manager_thread && _writer_thread;
+        return _enabled.load(std::memory_order_acquire);
     }
 
     inline bool isDirty() const noexcept
@@ -235,6 +234,7 @@ public:
         resetWriteStatsUnsafe();
         resetWriteCacheUnsafe();
 
+        _failure.store(false, std::memory_order_release);
         _stop_token.store(false, std::memory_order_release);
         try
         {
@@ -251,6 +251,7 @@ public:
                 _dev_path, ": ", e.what());
             return EFAULT;
         }
+        _enabled.store(true, std::memory_order_release);
 
         // Attach slot check callback (single slot only)
         {
@@ -259,11 +260,7 @@ public:
                 if (!p)
                     return false;
                 const Slot *sp = static_cast<const Slot *>(p);
-                if (!sp->_mutex.try_lock())
-                    return false; // Treat as not ready to write if cannot acquire lock
-                const auto ready = sp->isReadyToWrite();
-                sp->_mutex.unlock();
-                return ready;
+                return sp->isEnabled() && sp->isReadyToWrite();
             });
         }
 
@@ -275,10 +272,12 @@ public:
         const std::unique_lock lock(_mutex);
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Disabling storage slot for device path ", _dev_path);
 
+        _enabled.store(false, std::memory_order_release);
+        _stop_token.store(true, std::memory_order_release);
+
         // Disable relay
         disableNginxRelay();
 
-        _stop_token.store(true, std::memory_order_release);
         try
         {
             if (_writer_thread)
@@ -737,7 +736,8 @@ private:
     {
         size_t cumulative_error_count = 0;
         auto state = _state.load(std::memory_order_acquire);
-        while (!_stop_token.load(std::memory_order_acquire) && cumulative_error_count < kManagerRecoveryMaxAttempts)
+        while (cumulative_error_count < kManagerRecoveryMaxAttempts && _failure.load(std::memory_order_acquire)
+               && !_stop_token.load(std::memory_order_acquire))
         {
             const auto start = std::chrono::steady_clock::now();
             // Check and recover state if needed
@@ -831,23 +831,29 @@ private:
                 std::this_thread::sleep_for(kManagerProbeInterval - elapsed);
         }
 
-        if (cumulative_error_count >= kManagerRecoveryMaxAttempts)
+        if (cumulative_error_count >= kManagerRecoveryMaxAttempts || _failure.load(std::memory_order_acquire))
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Storage slot for device path ", _dev_path,
-                " has reached maximum recovery attempts, giving up and entering error state");
+                " has reached maximum recovery attempts or marked as failed, giving up and entering error state");
             _state.store(SlotState::Error, std::memory_order_release);
         }
     }
 
     void writerThreadTask() noexcept
     {
-        auto handle_write = [this](SlotAdaptedWriter<Slot> &writer) -> bool {
+        size_t consecutive_error_count = 0;
+
+        auto handle_write = [this, &consecutive_error_count](SlotAdaptedWriter<Slot> &writer) -> bool {
             const auto result = writer.operator()();
             const auto end = writer.endTime();
             if (result)
             {
                 if (result->status != WriteEvent::Status::Interrupted)
                 {
+                    if (result->status == WriteEvent::Status::Failed)
+                        ++consecutive_error_count;
+                    else
+                        consecutive_error_count = 0;
                     do
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -861,7 +867,14 @@ private:
                 }
                 _ctx.shared_rule_event.reset(result->status);
             }
-            return true; // Continue
+            if (consecutive_error_count >= kWriterConsecutiveFailureMax)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Writer thread for device path ", _dev_path,
+                    " has reached maximum consecutive error count, stopping writer thread");
+                _failure.store(true, std::memory_order_release);
+                return false;
+            }
+            return true;
         };
 
         _ctx.shared_rule_event.reset(WriteEvent::Status::Canceled); // Clear any existing rule event at start
@@ -1174,9 +1187,9 @@ private:
 
     bool doUnmount() const noexcept
     {
-        const std::unique_lock lock(_op_mutex);
         if (_ctx.c_api.storage.on_unmount_cb)
             _ctx.c_api.storage.on_unmount_cb(_dev_path.c_str(), _mount_path.c_str());
+        const std::unique_lock lock(_op_mutex);
         // Sync the filesystem before unmounting (syncfs)
         {
             const auto fd = ::open(_mount_path.c_str(), O_RDWR);
@@ -1283,58 +1296,60 @@ private:
 
     bool doMount() const noexcept
     {
-        const std::unique_lock lock(_op_mutex);
-        if (std::error_code ec; std::filesystem::exists(_mount_path, ec))
         {
-            ::umount2(_mount_path.c_str(), MNT_DETACH); // Detach if already mounted, ignore error
-            std::filesystem::remove_all(_mount_path, ec);
-            if (ec)
+            const std::unique_lock lock(_op_mutex);
+            if (std::error_code ec; std::filesystem::exists(_mount_path, ec))
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove existing mount path ", _mount_path,
-                    " before mounting: ", ec.message());
+                ::umount2(_mount_path.c_str(), MNT_DETACH); // Detach if already mounted, ignore error
+                std::filesystem::remove_all(_mount_path, ec);
+                if (ec)
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove existing mount path ", _mount_path,
+                        " before mounting: ", ec.message());
+                    return false;
+                }
+                if (std::filesystem::exists(_mount_path, ec))
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Mount path ", _mount_path,
+                        " already exists and cannot be removed before mounting: ", ec.message());
+                    return false;
+                }
+            }
+            if (!EnsureDirectoryExists(_mount_path, true, true, &_ctx))
+                return false;
+            bool is_native_fs = false;
+            {
+                const std::shared_lock lock(_info_mutex);
+                if (_type.has_value())
+                    is_native_fs = kNativeFileSystemTypes.contains(*_type);
+            }
+            try
+            {
+                std::vector<std::string> args;
+                if (!is_native_fs)
+                {
+                    args.push_back("-o");
+                    std::string options = "uid=" + std::to_string(kStorageDefaultUid)
+                                          + ",gid=" + std::to_string(kStorageDefaultGid) + ",umask=000";
+                    args.push_back(std::move(options));
+                }
+                args.push_back(_dev_path.string());
+                args.push_back(_mount_path.string());
+                if (auto ret = Execute("mount", std::move(args))(); ret != 0)
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to mount storage slot device ", _dev_path, " to ",
+                        _mount_path, ", code: ", ret);
+                    return false;
+                }
+                EnsureOwnerAndPermissions(_mount_path, kStorageDefaultUid, kStorageDefaultGid,
+                    fs::perms::owner_all | fs::perms::group_all | fs::perms::others_all);
+            }
+            catch (const std::exception &e)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Exception occurred while mounting storage slot device ",
+                    _dev_path, " to ", _mount_path, ": ", e.what());
                 return false;
             }
-            if (std::filesystem::exists(_mount_path, ec))
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Mount path ", _mount_path,
-                    " already exists and cannot be removed before mounting: ", ec.message());
-                return false;
-            }
-        }
-        if (!EnsureDirectoryExists(_mount_path, true, true, &_ctx))
-            return false;
-        bool is_native_fs = false;
-        {
-            const std::shared_lock lock(_info_mutex);
-            if (_type.has_value())
-                is_native_fs = kNativeFileSystemTypes.contains(*_type);
-        }
-        try
-        {
-            std::vector<std::string> args;
-            if (!is_native_fs)
-            {
-                args.push_back("-o");
-                std::string options = "uid=" + std::to_string(kStorageDefaultUid)
-                                      + ",gid=" + std::to_string(kStorageDefaultGid) + ",umask=000";
-                args.push_back(std::move(options));
-            }
-            args.push_back(_dev_path.string());
-            args.push_back(_mount_path.string());
-            if (auto ret = Execute("mount", std::move(args))(); ret != 0)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to mount storage slot device ", _dev_path, " to ",
-                    _mount_path, ", code: ", ret);
-                return false;
-            }
-            EnsureOwnerAndPermissions(_mount_path, kStorageDefaultUid, kStorageDefaultGid,
-                fs::perms::owner_all | fs::perms::group_all | fs::perms::others_all);
-        }
-        catch (const std::exception &e)
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Exception occurred while mounting storage slot device ", _dev_path,
-                " to ", _mount_path, ": ", e.what());
-            return false;
         }
         if (_ctx.c_api.storage.on_mount_cb)
             _ctx.c_api.storage.on_mount_cb(_dev_path.c_str(), _mount_path.c_str());
@@ -1686,6 +1701,7 @@ private:
     static inline constexpr const std::chrono::minutes kManagerEstimatedWriteBytesPeriod = std::chrono::minutes(30);
     static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);
     static inline constexpr const std::chrono::milliseconds kWriterRotatePullDelay = std::chrono::milliseconds(50);
+    static inline constexpr const size_t kWriterConsecutiveFailureMax = 5;
     static inline constexpr const std::chrono::milliseconds kIndexSyncInterval = std::chrono::milliseconds(100);
     static inline constexpr const std::string_view kRecordCacheDirName = ".cache";
     static inline constexpr const std::string_view kRecordQuotaLimitFileName = ".quota_limit";
@@ -1715,6 +1731,10 @@ private:
 
     // Mutex for device operations
     mutable std::shared_mutex _op_mutex;
+
+    // Public lifecycle flags
+    alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _enabled;
+    alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _failure;
 
     // Stop token for manager and writer threads
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _stop_token;
