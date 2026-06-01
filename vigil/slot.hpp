@@ -88,9 +88,10 @@ public:
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
           _internal(internal), _data_dir_path(std::move(data_dir_path)), _info_mutex(), _label(), _uuid(), _type(),
           _mutex(), _op_mutex(), _enabled(false), _failure(false), _stop_token(false), _manager_thread(nullptr),
-          _writer_thread(nullptr), _state(SlotState::Error), _fsck(FSCK::Result::ErrorUnknown), _stats(),
-          _quota_limit_bytes(-1), _quota_rotate(true), _index_manager(nullptr), _writer_task_count(0), _rotating(false),
-          _write_stats(), _relay(ctx, _mount_path / _data_dir_path)
+          _writer_thread(nullptr), _state(SlotState::NotFormattedOrFormatUnsupported),
+          _fsck(FSCK::Result::ErrorUnknown), _stats(), _quota_limit_bytes(-1), _quota_rotate(true),
+          _index_manager(nullptr), _writer_task_count(0), _rotating(false), _write_stats(),
+          _relay(ctx, _mount_path / _data_dir_path)
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Creating storage slot for device path ", _dev_path, " at mount path ",
             _mount_path, ", removable: ", _removable ? "true" : "false");
