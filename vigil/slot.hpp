@@ -178,7 +178,7 @@ public:
             uuid = _uuid;
             format = _type;
         }
-        const auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
+        const auto idx_mgr = _index_manager.load(std::memory_order_acquire);
         return SlotStatus {
             .dev_path = _dev_path,
             .mount_path = _mount_path,
@@ -308,7 +308,7 @@ public:
         }
 
         // Reset index manager
-        std::atomic_store_explicit(&_index_manager, std::shared_ptr<IndexManager>(nullptr), std::memory_order_release);
+        _index_manager.store(nullptr, std::memory_order_release);
 
         // Reset rotating status
         _rotating.store(false, std::memory_order_release);
@@ -488,7 +488,7 @@ public:
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to iterate record root path for freeing up space: ", e.what());
             ret = EIO;
         }
-        if (auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire); idx_mgr)
+        if (auto idx_mgr = _index_manager.load(std::memory_order_acquire); idx_mgr)
             idx_mgr->requestReindex(true);
 
         return ret;
@@ -813,7 +813,7 @@ private:
                 case SlotState::Saturated:
                     if (const auto [_, s] = _ctx.shared_writer_settings.get(); doStats() && s) [[likely]]
                     {
-                        const auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
+                        const auto idx_mgr = _index_manager.load(std::memory_order_acquire);
                         const auto idx_res = idx_mgr ? idx_mgr->size() : IndexManager::IndexResult { false, 0 };
                         const auto stats = _stats.load(std::memory_order_acquire);
                         doSyncStateReadyOrSaturated(s->watermarks, idx_mgr ? &idx_res : nullptr, stats, state);
@@ -902,8 +902,7 @@ private:
                 // Check if quota limit is exceeded
                 if (const auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit >= 0)
                 {
-                    if (const auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
-                        !idx_mgr)
+                    if (const auto idx_mgr = _index_manager.load(std::memory_order_acquire); !idx_mgr)
                         goto l_continue;
                     else if (const auto index_result = idx_mgr->size(); !index_result.valid)
                         goto l_continue;
@@ -1594,13 +1593,13 @@ private:
 
     bool doCreateIndexManager() noexcept
     {
-        if (auto mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire); !mgr)
+        if (auto mgr = _index_manager.load(std::memory_order_acquire); !mgr)
         {
             try
             {
                 auto new_mgr = std::make_shared<IndexManager>(std::ref(_ctx), _mount_path, getRecordRootPath());
-                return std::atomic_compare_exchange_strong_explicit(&_index_manager, &mgr, new_mgr,
-                    std::memory_order_acq_rel, std::memory_order_acquire);
+                return _index_manager.compare_exchange_strong(mgr, new_mgr, std::memory_order_acq_rel,
+                    std::memory_order_acquire);
             }
             catch (const std::exception &e)
             {
@@ -1614,7 +1613,7 @@ private:
 
     bool doSyncIndex() noexcept
     {
-        auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
+        auto idx_mgr = _index_manager.load(std::memory_order_acquire);
         if (!idx_mgr)
             return false;
         idx_mgr->requestReindex();
@@ -1650,7 +1649,7 @@ private:
             const auto [_, s] = _ctx.shared_writer_settings.get();
             if (!s) [[unlikely]]
                 break;
-            const auto idx_mgr = std::atomic_load_explicit(&_index_manager, std::memory_order_acquire);
+            const auto idx_mgr = _index_manager.load(std::memory_order_acquire);
             if (!idx_mgr) [[unlikely]]
                 break;
             const auto idx_res = idx_mgr->size();
@@ -1766,7 +1765,7 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _quota_rotate;
 
     // Index manager, e.g., 'YYYY-MM-DD' directories
-    alignas(kHardwareDestructiveInterferenceSize) mutable std::shared_ptr<IndexManager> _index_manager;
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<std::shared_ptr<IndexManager>> _index_manager;
 
     // Writer task count
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> _writer_task_count;
