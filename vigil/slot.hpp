@@ -1129,12 +1129,8 @@ private:
 
     bool probeCorrectlyMounted() const noexcept
     {
-        struct stat dev_sb
-        {
-        };
-        struct stat mnt_sb
-        {
-        };
+        struct stat dev_sb {};
+        struct stat mnt_sb {};
         bool mount_stats_valid = false;
         bool mount_path_missing = false;
 
@@ -1336,7 +1332,22 @@ private:
                 }
                 args.push_back(_dev_path.string());
                 args.push_back(_mount_path.string());
-                if (auto ret = Execute("mount", std::move(args))(); ret != 0)
+                // Run the mount subprocess interruptibly: a rapid disable() sets
+                // _stop_token, which must not block the manager-thread join on a
+                // slow or stale device (this would freeze the storage manager).
+                std::atomic<int> sig = 0;
+                auto mount_future = std::async(
+                    std::launch::async,
+                    [](std::vector<std::string> mount_args, std::atomic<int> &sig) -> int {
+                        return Execute("mount", std::move(mount_args))(&sig);
+                    },
+                    std::move(args), std::ref(sig));
+                while (mount_future.wait_for(kMountProbeInterval) != std::future_status::ready)
+                {
+                    if (_stop_token.load(std::memory_order_acquire))
+                        sig.store(SIGTERM, std::memory_order_release);
+                }
+                if (const auto ret = mount_future.get(); ret != 0)
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to mount storage slot device ", _dev_path, " to ",
                         _mount_path, ", code: ", ret);
@@ -1359,9 +1370,7 @@ private:
 
     bool doStats() const noexcept
     {
-        struct statvfs vfs
-        {
-        };
+        struct statvfs vfs {};
         const std::shared_lock lock(_op_mutex);
         if (::statvfs(_mount_path.c_str(), &vfs) != 0)
         {
@@ -1695,6 +1704,7 @@ private:
         "fat",
         "vfat",
     };
+    static inline constexpr const std::chrono::milliseconds kMountProbeInterval = std::chrono::milliseconds(100);
     static inline constexpr const std::chrono::milliseconds kFsckFixProbeInterval = std::chrono::milliseconds(100);
     static inline constexpr const std::chrono::milliseconds kManagerProbeInterval = std::chrono::milliseconds(500);
     static inline constexpr const size_t kManagerRecoveryMaxAttempts = 5;
