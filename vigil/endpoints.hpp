@@ -51,14 +51,17 @@ using namespace vigil::async_task;
 class ConfigStore final
 {
 public:
-    ConfigStore(Context &ctx, std::string_view name)
+    ConfigStore(Context &ctx, std::string_view name) noexcept
         : _ctx(ctx), _name(name), _dir_path(std::filesystem::path(ctx.c_api.basic.config_directory))
     {
         // Ensure directory exists
         std::error_code ec;
         std::filesystem::create_directories(_dir_path, ec);
         if (ec)
-            throw Exception("Failed to create config directory '" + _dir_path.string() + "': " + ec.message());
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create config directory at ", _dir_path, ": ",
+                ec.message());
+        }
     }
 
     ~ConfigStore() = default;

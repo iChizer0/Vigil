@@ -560,7 +560,7 @@ struct StorageConfig
 
     StorageConfig() noexcept : enabled(false), target_enabled_slot_dev_path(), target_enabled_slot_uuid() { }
 
-    StorageConfig(std::string &&dev_path, std::string &&uuid)
+    StorageConfig(std::string &&dev_path, std::string &&uuid) noexcept
         : enabled(false), target_enabled_slot_dev_path(std::move(dev_path)), target_enabled_slot_uuid(std::move(uuid))
     {
         enabled = !target_enabled_slot_dev_path.empty() || !target_enabled_slot_uuid.empty();
