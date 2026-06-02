@@ -87,8 +87,8 @@ public:
         std::filesystem::path data_dir_path)
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
           _internal(internal), _data_dir_path(std::move(data_dir_path)), _info_mutex(), _label(), _uuid(), _type(),
-          _mutex(), _op_mutex(), _enabled(false), _failure(false), _stop_token(false), _manager_thread(nullptr),
-          _writer_thread(nullptr), _state(SlotState::NotFormattedOrFormatUnsupported),
+          _mutex(), _op_mutex(), _enabled(false), _failure(false), _stop_token(false), _stop_count(0),
+          _manager_thread(nullptr), _writer_thread(nullptr), _state(SlotState::NotFormattedOrFormatUnsupported),
           _fsck(FSCK::Result::ErrorUnknown), _stats(), _quota_limit_bytes(-1), _quota_rotate(true),
           _index_manager(nullptr), _writer_task_count(0), _rotating(false), _write_stats(),
           _relay(ctx, _mount_path / _data_dir_path)
@@ -272,6 +272,12 @@ public:
     {
         const std::unique_lock lock(_mutex);
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Disabling storage slot for device path ", _dev_path);
+
+        {
+            _stop_count.fetch_add(1, std::memory_order_relaxed);
+            while (_state.load() == SlotState::Formatting)
+                std::this_thread::sleep_for(std::chrono::milliseconds(kMkfsFixProbeInterval));
+        }
 
         _enabled.store(false, std::memory_order_release);
         _stop_token.store(true, std::memory_order_release);
@@ -1085,9 +1091,22 @@ private:
         const std::unique_lock lock(_op_mutex);
         try
         {
-            int ret = Execute("umount", { _dev_path.string() })();
-            ret = Execute("mkfs.vfat", { "-F", "32", "-I", _dev_path.string() })();
-            if (ret != 0)
+            const auto stop_count = _stop_count.load(std::memory_order_acquire);
+            std::atomic<int> sig = 0;
+            auto format_future = std::async(
+                std::launch::async,
+                [](const std::filesystem::path &dev_path, std::atomic<int> &sig) -> int {
+                    int ret = Execute("umount", { dev_path.string() })(&sig);
+                    ret = Execute("mkfs.vfat", { "-F", "32", "-I", dev_path.string() })(&sig);
+                    return ret;
+                },
+                std::cref(_dev_path), std::ref(sig));
+            while (format_future.wait_for(kMkfsFixProbeInterval) != std::future_status::ready)
+            {
+                if (_stop_count.load(std::memory_order_acquire) != stop_count)
+                    sig.store(SIGTERM, std::memory_order_release);
+            }
+            if (const auto ret = format_future.get(); ret != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to format storage slot device ", _dev_path,
                     " with mkfs.vfat, return code: ", ret);
@@ -1272,7 +1291,7 @@ private:
                     [](const std::filesystem::path &dev_path, std::atomic<int> &sig) -> int {
                         return Execute("fsck", { "-p", dev_path.string() })(&sig);
                     },
-                    std::ref(_dev_path), std::ref(sig));
+                    std::cref(_dev_path), std::ref(sig));
                 // Wait for fsck to complete or stop signal
                 while (fix_future.wait_for(kFsckFixProbeInterval) != std::future_status::ready)
                 {
@@ -1714,6 +1733,7 @@ private:
     };
     static inline constexpr const std::chrono::milliseconds kMountProbeInterval = std::chrono::milliseconds(100);
     static inline constexpr const std::chrono::milliseconds kFsckFixProbeInterval = std::chrono::milliseconds(100);
+    static inline constexpr const std::chrono::milliseconds kMkfsFixProbeInterval = std::chrono::milliseconds(100);
     static inline constexpr const std::chrono::milliseconds kManagerProbeInterval = std::chrono::milliseconds(500);
     static inline constexpr const size_t kManagerRecoveryMaxAttempts = 5;
     static inline constexpr const std::chrono::seconds kManagerRecoverDelay = std::chrono::seconds(3);
@@ -1754,10 +1774,11 @@ private:
 
     // Public lifecycle flags
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _enabled;
-    alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _failure;
+    std::atomic<bool> _failure;
 
     // Stop token for manager and writer threads
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _stop_token;
+    mutable std::atomic<size_t> _stop_count;
 
     // Manager and writer threads
     std::unique_ptr<std::thread> _manager_thread;
@@ -1767,7 +1788,7 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<SlotState> _state;
 
     // Filesystem check flag
-    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<FSCK::Result> _fsck;
+    mutable std::atomic<FSCK::Result> _fsck;
 
     // Partition and quota stats
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<SlotStats> _stats;
