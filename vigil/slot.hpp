@@ -846,13 +846,16 @@ private:
 
         auto handle_write = [this, &consecutive_error_count](SlotAdaptedWriter<Slot> &writer) -> bool {
             const auto result = writer.operator()();
-            const auto end = writer.endTime();
+            auto end = writer.endTime();
             if (result)
             {
                 if (result->status != WriteEvent::Status::Interrupted)
                 {
                     if (result->status == WriteEvent::Status::Failed)
+                    {
+                        end += kWriterFailureCooldown;
                         ++consecutive_error_count;
+                    }
                     else
                         consecutive_error_count = 0;
                     do
@@ -1128,8 +1131,12 @@ private:
 
     bool probeCorrectlyMounted() const noexcept
     {
-        struct stat dev_sb {};
-        struct stat mnt_sb {};
+        struct stat dev_sb
+        {
+        };
+        struct stat mnt_sb
+        {
+        };
         bool mount_stats_valid = false;
         bool mount_path_missing = false;
 
@@ -1369,7 +1376,9 @@ private:
 
     bool doStats() const noexcept
     {
-        struct statvfs vfs {};
+        struct statvfs vfs
+        {
+        };
         const std::shared_lock lock(_op_mutex);
         if (::statvfs(_mount_path.c_str(), &vfs) != 0)
         {
@@ -1712,6 +1721,7 @@ private:
     static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);
     static inline constexpr const std::chrono::milliseconds kWriterRotatePullDelay = std::chrono::milliseconds(50);
     static inline constexpr const size_t kWriterConsecutiveFailureMax = 5;
+    static inline constexpr const std::chrono::seconds kWriterFailureCooldown = std::chrono::seconds(3);
     static inline constexpr const std::chrono::milliseconds kIndexSyncInterval = std::chrono::milliseconds(100);
     static inline constexpr const std::string_view kRecordCacheDirName = ".cache";
     static inline constexpr const std::string_view kRecordQuotaLimitFileName = ".quota_limit";
