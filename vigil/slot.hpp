@@ -1104,7 +1104,10 @@ private:
             while (format_future.wait_for(kMkfsFixProbeInterval) != std::future_status::ready)
             {
                 if (_stop_count.load(std::memory_order_acquire) != stop_count)
+                {
                     sig.store(SIGTERM, std::memory_order_release);
+                    break;
+                }
             }
             if (const auto ret = format_future.get(); ret != 0)
             {
@@ -1296,7 +1299,10 @@ private:
                 while (fix_future.wait_for(kFsckFixProbeInterval) != std::future_status::ready)
                 {
                     if (_stop_token.load(std::memory_order_acquire))
+                    {
                         sig.store(SIGTERM, std::memory_order_release);
+                        break;
+                    }
                 }
                 const auto ret = fix_future.get();
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Fsck fix for device ", _dev_path,
@@ -1370,7 +1376,10 @@ private:
                 while (mount_future.wait_for(kMountProbeInterval) != std::future_status::ready)
                 {
                     if (_stop_token.load(std::memory_order_acquire))
+                    {
                         sig.store(SIGTERM, std::memory_order_release);
+                        break;
+                    }
                 }
                 if (const auto ret = mount_future.get(); ret != 0)
                 {
