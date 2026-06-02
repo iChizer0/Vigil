@@ -282,8 +282,9 @@ public:
                 throw std::runtime_error(
                     "Failed to open mount point: " + _mount_point.string() + ", errno: " + std::to_string(errno));
 
-            if (_fanotify_fd = ::fanotify_init(
-                    FAN_CLOEXEC | FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME | FAN_UNLIMITED_QUEUE, O_RDONLY | O_LARGEFILE);
+            if (_fanotify_fd
+                = ::fanotify_init(FAN_CLOEXEC | FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME | FAN_UNLIMITED_QUEUE,
+                    O_RDONLY | O_LARGEFILE | O_CLOEXEC);
                 _fanotify_fd < 0)
                 throw std::runtime_error("Failed to initialize fanotify: " + std::to_string(errno));
 
@@ -1012,7 +1013,7 @@ private:
         }
 
         // Get the directory path from the file handle
-        const int fd = ::open_by_handle_at(_mount_fd, file_handle, O_RDONLY | O_DIRECTORY);
+        const int fd = ::open_by_handle_at(_mount_fd, file_handle, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (fd < 0)
             throw std::runtime_error("FID open_by_handle_at failed: " + std::to_string(errno));
 

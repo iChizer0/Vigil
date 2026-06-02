@@ -52,12 +52,14 @@ public:
         }
         else if (pid == 0)
         {
-            int dev_null = ::open("/dev/null", O_WRONLY);
+            int dev_null = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
             if (dev_null == -1)
                 ::_exit(1);
 
-            ::dup2(dev_null, STDOUT_FILENO);
-            ::dup2(dev_null, STDERR_FILENO);
+            if (::dup2(dev_null, STDOUT_FILENO) == -1)
+                ::_exit(1);
+            if (::dup2(dev_null, STDERR_FILENO) == -1)
+                ::_exit(1);
 
             if (dev_null > STDERR_FILENO)
                 ::close(dev_null);

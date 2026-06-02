@@ -1217,7 +1217,7 @@ private:
         const std::unique_lock lock(_op_mutex);
         // Sync the filesystem before unmounting (syncfs)
         {
-            const auto fd = ::open(_mount_path.c_str(), O_RDWR);
+            const auto fd = ::open(_mount_path.c_str(), O_RDWR | O_CLOEXEC);
             if (fd < 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open mount path ", _mount_path,
