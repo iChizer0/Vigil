@@ -87,7 +87,7 @@ public:
         std::filesystem::path data_dir_path)
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
           _internal(internal), _data_dir_path(std::move(data_dir_path)), _info_mutex(), _label(), _uuid(), _type(),
-          _mutex(), _op_mutex(), _enabled(false), _failure(false), _stop_token(false), _stop_count(0),
+          _mutex(), _op_mutex(), _enabled(false), _failure(false), _stop_token(false), _on_destruction(false),
           _manager_thread(nullptr), _writer_thread(nullptr), _state(SlotState::NotFormattedOrFormatUnsupported),
           _fsck(FSCK::Result::ErrorUnknown), _stats(), _quota_limit_bytes(-1), _quota_rotate(true),
           _index_manager(nullptr), _writer_task_count(0), _rotating(false), _write_stats(),
@@ -104,7 +104,13 @@ public:
 
     ~Slot() noexcept
     {
-        disable();
+        {
+            _on_destruction.store(true, std::memory_order_release);
+            while (_state.load() == SlotState::Formatting)
+                std::this_thread::sleep_for(std::chrono::milliseconds(kMkfsFixProbeInterval));
+        }
+        const std::unique_lock lock(_mutex);
+        disableInternal();
         ensureStateForceUnmounted();
     }
 
@@ -271,13 +277,13 @@ public:
     void disable() noexcept
     {
         const std::unique_lock lock(_mutex);
-        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Disabling storage slot for device path ", _dev_path);
+        disableInternal();
+    }
 
-        {
-            _stop_count.fetch_add(1, std::memory_order_relaxed);
-            while (_state.load() == SlotState::Formatting)
-                std::this_thread::sleep_for(std::chrono::milliseconds(kMkfsFixProbeInterval));
-        }
+private:
+    void disableInternal() noexcept
+    {
+        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Disabling storage slot for device path ", _dev_path);
 
         _enabled.store(false, std::memory_order_release);
         _stop_token.store(true, std::memory_order_release);
@@ -327,11 +333,12 @@ public:
         }
     }
 
+public:
     vg_sta_e setQuotaLimitBytes(FileSize bytes)
     {
+        const std::unique_lock lock(_mutex);
         if (bytes < -1 || bytes > _stats.load(std::memory_order_acquire).size_bytes)
             return EINVAL;
-        const std::unique_lock lock(_mutex);
         if (_state.load(std::memory_order_acquire) == SlotState::Mounted)
             ensureStateConfigured();
         if (_state.load(std::memory_order_acquire) < SlotState::Configured)
@@ -507,9 +514,11 @@ public:
 
     vg_sta_e formatFileSystem() noexcept
     {
+        const std::unique_lock lock(_mutex);
         if (isInternal())
             return EPERM;
-        const std::unique_lock lock(_mutex);
+        if (_on_destruction.load(std::memory_order_acquire))
+            return ECANCELED;
         if (const auto state = _state.load(std::memory_order_acquire);
             state != SlotState::NotFormattedOrFormatUnsupported && state != SlotState::NotMounted)
             return EPERM;
@@ -1091,7 +1100,6 @@ private:
         const std::unique_lock lock(_op_mutex);
         try
         {
-            const auto stop_count = _stop_count.load(std::memory_order_acquire);
             std::atomic<int> sig = 0;
             auto format_future = std::async(
                 std::launch::async,
@@ -1103,7 +1111,7 @@ private:
                 std::cref(_dev_path), std::ref(sig));
             while (format_future.wait_for(kMkfsFixProbeInterval) != std::future_status::ready)
             {
-                if (_stop_count.load(std::memory_order_acquire) != stop_count)
+                if (_on_destruction.load(std::memory_order_acquire))
                 {
                     sig.store(SIGTERM, std::memory_order_release);
                     break;
@@ -1787,7 +1795,7 @@ private:
 
     // Stop token for manager and writer threads
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _stop_token;
-    mutable std::atomic<size_t> _stop_count;
+    mutable std::atomic<bool> _on_destruction;
 
     // Manager and writer threads
     std::unique_ptr<std::thread> _manager_thread;
