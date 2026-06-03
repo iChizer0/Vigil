@@ -425,7 +425,7 @@ private:
 
     void openSocket(const Context &ctx) const noexcept
     {
-        _fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        _fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (_fd < 0)
         {
             VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create Unix socket for TTY '", _socket_path,

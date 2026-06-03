@@ -332,7 +332,7 @@ private:
     {
         if (_netlink_fd < 0)
         {
-            _netlink_fd = ::socket(AF_NETLINK, SOCK_RAW, NETLINK_KOBJECT_UEVENT);
+            _netlink_fd = ::socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_KOBJECT_UEVENT);
             if (_netlink_fd < 0)
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create netlink socket: ", static_cast<int>(errno));
             else
