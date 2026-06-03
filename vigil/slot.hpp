@@ -1220,9 +1220,9 @@ private:
 
     bool doUnmount() const noexcept
     {
+        const std::unique_lock lock(_op_mutex);
         if (_ctx.c_api.storage.on_unmount_cb)
             _ctx.c_api.storage.on_unmount_cb(_dev_path.c_str(), _mount_path.c_str());
-        const std::unique_lock lock(_op_mutex);
         // Sync the filesystem before unmounting (syncfs)
         {
             const auto fd = ::open(_mount_path.c_str(), O_RDWR | O_CLOEXEC);
