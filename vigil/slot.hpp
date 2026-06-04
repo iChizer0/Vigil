@@ -139,6 +139,11 @@ public:
         return _enabled.load(std::memory_order_acquire);
     }
 
+    inline bool isFormatting() const noexcept
+    {
+        return _state.load(std::memory_order_acquire) == SlotState::Formatting;
+    }
+
     inline bool isDirty() const noexcept
     {
         return _fsck.load(std::memory_order_acquire);
@@ -230,6 +235,9 @@ public:
     vg_sta_e enable() noexcept
     {
         const std::unique_lock lock(_mutex);
+        if (_state.load() == SlotState::Formatting)
+            return EBUSY;
+
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Enabling storage slot for device path ", _dev_path);
 
         if (_manager_thread && _writer_thread)
@@ -274,10 +282,13 @@ public:
         return 0;
     }
 
-    void disable() noexcept
+    vg_sta_e disable() noexcept
     {
         const std::unique_lock lock(_mutex);
+        if (_state.load() == SlotState::Formatting)
+            return EBUSY;
         disableInternal();
+        return 0;
     }
 
 private:
@@ -677,12 +688,12 @@ protected:
     // - MARK: Slot Private Methods
 
 private:
-    void resetWriteStatsUnsafe()
+    void resetWriteStatsUnsafe() noexcept
     {
         _write_stats.reset();
     }
 
-    void resetWriteCacheUnsafe()
+    void resetWriteCacheUnsafe() noexcept
     {
         if (_state.load(std::memory_order_acquire) < SlotState::Configured) // Requires the root folder to be ready
             return;                                                         // No cache to clear if not mounted
