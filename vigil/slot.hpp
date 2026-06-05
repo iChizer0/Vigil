@@ -578,25 +578,28 @@ protected:
             return;
         }
 
+        size_t size = 0;
         const auto target_dir_path = getRecordRootPath() / cache_file_info.first_level_dir_name;
         const auto target_file_path = target_dir_path / cache_file_info.path.filename();
-        const auto thumbnail_path = ThumbnailPathFrom(target_file_path);
 
-        if (cache_file_info.thumbnail && _ctx.c_api.media.thumbnail_generate_cb)
+        if (!EnsureDirectoryExists(target_dir_path, true, false, &_ctx))
+            goto l_fail_and_clean_up;
+
+        if (std::error_code ec; cache_file_info.thumbnail && _ctx.c_api.media.thumbnail_generate_cb)
         {
+            const auto thumbnail_path = ThumbnailPathFrom(target_file_path);
             const auto thumbnail_cache_path = getRecordCachePath() / thumbnail_path.filename();
             if (const auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
                     cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_cache_path.c_str(),
                     kStorageThumbnailFileType, kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
                 ret == 0) [[likely]]
             {
-                EnsureOwnerAndPermissions(thumbnail_cache_path, kStorageDefaultUid, kStorageDefaultGid,
-                    fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
-                        | fs::perms::others_read,
-                    &this->ctxRef());
-                std::error_code ec;
                 if (EnsureDirectoryExists(thumbnail_path.parent_path(), true, false, &_ctx)) [[likely]]
                 {
+                    EnsureOwnerAndPermissions(thumbnail_cache_path, kStorageDefaultUid, kStorageDefaultGid,
+                        fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
+                            | fs::perms::others_read,
+                        &this->ctxRef());
                     if (std::filesystem::rename(thumbnail_cache_path, thumbnail_path, ec); ec)
                     {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to move thumbnail from ", thumbnail_cache_path,
@@ -605,45 +608,46 @@ protected:
                 }
                 else
                 {
+                    std::filesystem::remove_all(thumbnail_cache_path, ec);
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to create thumbnail directory at ",
                         thumbnail_path.parent_path());
                 }
-                std::filesystem::remove_all(thumbnail_cache_path, ec);
             }
             else
             {
+                std::filesystem::remove_all(thumbnail_cache_path, ec);
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to generate thumbnail for cache file ",
                     cache_file_info.path, ", code: ", static_cast<int>(ret));
             }
         }
 
-        size_t size = 0;
-        std::error_code ec;
-        if (size = std::filesystem::file_size(cache_file_info.path, ec); ec)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to get file size for cache file ", cache_file_info.path, ": ",
-                ec.message());
-            goto l_fail_add_cache_file;
+            std::error_code ec;
+            if (size = std::filesystem::file_size(cache_file_info.path, ec); ec)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to get file size for cache file ", cache_file_info.path,
+                    ": ", ec.message());
+                goto l_fail_and_clean_up;
+            }
+            _write_stats.addNewWriteStat(size);
         }
-        _write_stats.addNewWriteStat(size);
-        if (!EnsureDirectoryExists(target_dir_path, true, false, &_ctx))
-            goto l_fail_add_cache_file;
 
         EnsureOwnerAndPermissions(cache_file_info.path, kStorageDefaultUid, kStorageDefaultGid,
             fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
                 | fs::perms::others_read,
             &this->ctxRef());
-
-        if (std::filesystem::rename(cache_file_info.path, target_file_path, ec); ec)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to move file from ", cache_file_info.path, " to ",
-                target_file_path, ": ", ec.message());
-            goto l_fail_add_cache_file;
+            std::error_code ec;
+            if (std::filesystem::rename(cache_file_info.path, target_file_path, ec); ec)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to move file from ", cache_file_info.path, " to ",
+                    target_file_path, ": ", ec.message());
+                goto l_fail_and_clean_up;
+            }
         }
 
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Created new record file at ", target_file_path, ", size: ", size,
             " bytes");
-
         if (_ctx.c_api.basic.on_file_event_cb)
         {
             const auto path_str = target_file_path.string();
@@ -664,8 +668,8 @@ protected:
         }
         return;
 
-    l_fail_add_cache_file:
-        std::filesystem::remove_all(thumbnail_path, ec);
+    l_fail_and_clean_up:
+        std::error_code ec;
         std::filesystem::remove_all(cache_file_info.path, ec);
         return;
     }
