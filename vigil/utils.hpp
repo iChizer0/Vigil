@@ -6,11 +6,12 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <limits>
+#include <new>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 #include <fcntl.h>
@@ -26,13 +27,34 @@ namespace vigil::utils {
 class Execute
 {
 public:
-    Execute(std::string program, std::vector<std::string> args) : _program(std::move(program)), _args(std::move(args))
+    Execute(const std::string &program, const std::vector<std::string> &args) noexcept
+        : _args(nullptr), _args_data(nullptr)
     {
-        _argv.reserve(_args.size() + 2);
-        _argv.push_back(const_cast<char *>(_program.c_str()));
-        for (const auto &arg: _args)
-            _argv.push_back(const_cast<char *>(arg.c_str()));
-        _argv.push_back(nullptr);
+        size_t argc = 1;
+        size_t args_size = program.size() + 1;
+        for (const auto &arg: args)
+        {
+            ++argc;
+            args_size += arg.size() + 1;
+        }
+        const ptrdiff_t args_offset = (argc + 1) * sizeof(char **);
+        _args_data = new (std::nothrow) char[args_offset + args_size];
+        if (!_args_data)
+            return;
+
+        int i = 0;
+        char *p = static_cast<char *>(_args_data) + args_offset;
+        reinterpret_cast<char **>(_args_data)[i++] = p;
+        std::memcpy(p, program.c_str(), program.size() + 1);
+        p += program.size() + 1;
+        for (const auto &arg: args)
+        {
+            reinterpret_cast<char **>(_args_data)[i++] = p;
+            std::memcpy(p, arg.c_str(), arg.size() + 1);
+            p += arg.size() + 1;
+        }
+        reinterpret_cast<char **>(_args_data)[i] = nullptr;
+        _args = reinterpret_cast<char **>(_args_data);
     }
 
     Execute(const Execute &) = delete;
@@ -41,16 +63,23 @@ public:
     Execute(Execute &&) = delete;
     Execute &operator=(Execute &&) = delete;
 
-    ~Execute() = default;
+    ~Execute() noexcept
+    {
+        _args = nullptr;
+        delete[] static_cast<char *>(_args_data);
+        _args_data = nullptr;
+    }
 
     [[nodiscard]] int operator()(const std::atomic<int> *signal = nullptr) const
     {
+        if (!_args)
+            return -EFAULT;
+
         pid_t pid = ::fork();
         if (pid == -1)
-        {
             return -1;
-        }
-        else if (pid == 0)
+
+        if (pid == 0)
         {
             int dev_null = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
             if (dev_null == -1)
@@ -64,13 +93,13 @@ public:
             if (dev_null > STDERR_FILENO)
                 ::close(dev_null);
 
-            ::execvp(_argv[0], _argv.data());
+            ::execvp(_args[0], _args);
 
             ::_exit(127);
         }
         else
         {
-            int status;
+            int status = 0;
             if (signal == nullptr)
             {
                 while (::waitpid(pid, &status, 0) == -1)
@@ -91,7 +120,7 @@ public:
                     {
                         if (errno == EINTR)
                             continue;
-                        return -1;
+                        break;
                     }
 
                     int cur_sig = signal->load(std::memory_order_acquire);
@@ -109,15 +138,15 @@ public:
 
             if (WIFEXITED(status))
                 return WEXITSTATUS(status);
-            else
-                return -1;
+            if (WIFSIGNALED(status))
+                return -WTERMSIG(status);
+            return -1;
         }
     }
 
 private:
-    std::string _program;
-    std::vector<std::string> _args;
-    mutable std::vector<char *> _argv;
+    char **_args;
+    void *_args_data;
 };
 
 class FSCK

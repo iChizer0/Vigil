@@ -615,7 +615,6 @@ protected:
             }
             else
             {
-                std::filesystem::remove_all(thumbnail_cache_path, ec);
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to generate thumbnail for cache file ",
                     cache_file_info.path, ", code: ", static_cast<int>(ret));
             }
@@ -1118,12 +1117,12 @@ private:
             std::atomic<int> sig = 0;
             auto format_future = std::async(
                 std::launch::async,
-                [](const std::filesystem::path &dev_path, std::atomic<int> &sig) -> int {
+                [](const std::filesystem::path &dev_path, const std::atomic<int> &sig) -> int {
                     int ret = Execute("umount", { dev_path.string() })(&sig);
                     ret = Execute("mkfs.vfat", { "-F", "32", "-I", dev_path.string() })(&sig);
                     return ret;
                 },
-                std::cref(_dev_path), std::ref(sig));
+                std::cref(_dev_path), std::cref(sig));
             while (format_future.wait_for(kMkfsFixProbeInterval) != std::future_status::ready)
             {
                 if (_on_destruction.load(std::memory_order_acquire))
@@ -1314,10 +1313,10 @@ private:
                 std::atomic<int> sig = 0;
                 auto fix_future = std::async(
                     std::launch::async,
-                    [](const std::filesystem::path &dev_path, std::atomic<int> &sig) -> int {
+                    [](const std::filesystem::path &dev_path, const std::atomic<int> &sig) -> int {
                         return Execute("fsck", { "-p", dev_path.string() })(&sig);
                     },
-                    std::cref(_dev_path), std::ref(sig));
+                    std::cref(_dev_path), std::cref(sig));
                 // Wait for fsck to complete or stop signal
                 while (fix_future.wait_for(kFsckFixProbeInterval) != std::future_status::ready)
                 {
@@ -1392,10 +1391,10 @@ private:
                 std::atomic<int> sig = 0;
                 auto mount_future = std::async(
                     std::launch::async,
-                    [](std::vector<std::string> mount_args, std::atomic<int> &sig) -> int {
-                        return Execute("mount", std::move(mount_args))(&sig);
+                    [](const std::vector<std::string> &mount_args, const std::atomic<int> &sig) -> int {
+                        return Execute("mount", mount_args)(&sig);
                     },
-                    std::move(args), std::ref(sig));
+                    std::cref(args), std::cref(sig));
                 while (mount_future.wait_for(kMountProbeInterval) != std::future_status::ready)
                 {
                     if (_stop_token.load(std::memory_order_acquire))
@@ -1772,7 +1771,7 @@ private:
     static inline constexpr const std::chrono::minutes kManagerEstimatedWriteBytesPeriod = std::chrono::minutes(30);
     static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);
     static inline constexpr const std::chrono::milliseconds kWriterRotatePullDelay = std::chrono::milliseconds(50);
-    static inline constexpr const size_t kWriterConsecutiveFailureMax = 5;
+    static inline constexpr const size_t kWriterConsecutiveFailureMax = 10;
     static inline constexpr const std::chrono::seconds kWriterFailureCooldown = std::chrono::seconds(3);
     static inline constexpr const std::chrono::milliseconds kIndexSyncInterval = std::chrono::milliseconds(100);
     static inline constexpr const std::string_view kRecordCacheDirName = ".cache";
