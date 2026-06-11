@@ -17,10 +17,15 @@
 #include <fcntl.h>
 #include <mntent.h>
 #include <signal.h>
+#include <spawn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+extern "C" {
+extern char **environ;
+}
 
 namespace vigil::utils {
 
@@ -75,76 +80,61 @@ public:
         if (!_args || !_args[0])
             return -EFAULT;
 
-        pid_t pid = ::fork();
-        if (pid == -1)
-            return -1;
+        ::pid_t pid;
+        ::posix_spawn_file_actions_t file_actions;
+        int status;
 
-        if (pid == 0)
+        ::posix_spawn_file_actions_init(&file_actions);
+        ::posix_spawn_file_actions_addopen(&file_actions, STDIN_FILENO, "/dev/null", O_RDWR | O_CLOEXEC, 0);
+        ::posix_spawn_file_actions_adddup2(&file_actions, STDIN_FILENO, STDOUT_FILENO);
+        ::posix_spawn_file_actions_adddup2(&file_actions, STDIN_FILENO, STDERR_FILENO);
+        status = ::posix_spawnp(&pid, _args[0], &file_actions, nullptr, _args, environ);
+        ::posix_spawn_file_actions_destroy(&file_actions);
+        if (status != 0)
+            return -status;
+
+        if (signal == nullptr)
         {
-            int dev_null = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (dev_null == -1)
-                ::_exit(1);
-
-            if (::dup2(dev_null, STDIN_FILENO) == -1)
-                ::_exit(1);
-            if (::dup2(dev_null, STDOUT_FILENO) == -1)
-                ::_exit(1);
-            if (::dup2(dev_null, STDERR_FILENO) == -1)
-                ::_exit(1);
-
-            if (dev_null > STDERR_FILENO)
-                ::close(dev_null);
-
-            ::execvp(_args[0], _args);
-
-            ::_exit(127);
+            while (::waitpid(pid, &status, 0) == -1)
+            {
+                if (errno != EINTR)
+                    return -1;
+            }
         }
         else
         {
-            int status = 0;
-            if (signal == nullptr)
+            int last_sig = 0;
+            while (true)
             {
-                while (::waitpid(pid, &status, 0) == -1)
+                pid_t wait_result = ::waitpid(pid, &status, WNOHANG);
+                if (wait_result == pid)
+                    break;
+                if (wait_result == -1)
                 {
-                    if (errno != EINTR)
-                        return -1;
+                    if (errno == EINTR)
+                        continue;
+                    break;
                 }
-            }
-            else
-            {
-                int last_sig = 0;
-                while (true)
+
+                int cur_sig = signal->load(std::memory_order_acquire);
+                if (cur_sig != last_sig)
                 {
-                    pid_t wait_result = ::waitpid(pid, &status, WNOHANG);
-                    if (wait_result == pid)
-                        break;
-                    if (wait_result == -1)
-                    {
-                        if (errno == EINTR)
-                            continue;
-                        break;
-                    }
-
-                    int cur_sig = signal->load(std::memory_order_acquire);
-                    if (cur_sig != last_sig)
-                    {
-                        last_sig = cur_sig;
-                        if (cur_sig > 0)
-                            ::kill(pid, cur_sig);
-                    }
-
-                    const ::timespec interval { 0, 10L * 1000L * 1000L };
-                    static_cast<void>(::nanosleep(&interval, nullptr));
+                    last_sig = cur_sig;
+                    if (cur_sig > 0)
+                        ::kill(pid, cur_sig);
                 }
-            }
 
-            if (WIFEXITED(status))
-                return WEXITSTATUS(status);
-            if (WIFSIGNALED(status))
-                return -WTERMSIG(status);
-            if (WIFSTOPPED(status))
-                return -WSTOPSIG(status);
+                const ::timespec interval { 0, 10L * 1000L * 1000L };
+                static_cast<void>(::nanosleep(&interval, nullptr));
+            }
         }
+
+        if (WIFEXITED(status))
+            return WEXITSTATUS(status);
+        if (WIFSIGNALED(status))
+            return -WTERMSIG(status);
+        if (WIFSTOPPED(status))
+            return -WSTOPSIG(status);
 
         return -1;
     }
