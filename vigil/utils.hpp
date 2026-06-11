@@ -42,7 +42,7 @@ public:
         if (!_args_data)
             return;
 
-        int i = 0;
+        size_t i = 0;
         char *p = static_cast<char *>(_args_data) + args_offset;
         reinterpret_cast<char **>(_args_data)[i++] = p;
         std::memcpy(p, program.c_str(), program.size() + 1);
@@ -72,7 +72,7 @@ public:
 
     [[nodiscard]] int operator()(const std::atomic<int> *signal = nullptr) const
     {
-        if (!_args)
+        if (!_args || !_args[0])
             return -EFAULT;
 
         pid_t pid = ::fork();
@@ -85,6 +85,8 @@ public:
             if (dev_null == -1)
                 ::_exit(1);
 
+            if (::dup2(dev_null, STDIN_FILENO) == -1)
+                ::_exit(1);
             if (::dup2(dev_null, STDOUT_FILENO) == -1)
                 ::_exit(1);
             if (::dup2(dev_null, STDERR_FILENO) == -1)
@@ -140,8 +142,11 @@ public:
                 return WEXITSTATUS(status);
             if (WIFSIGNALED(status))
                 return -WTERMSIG(status);
-            return -1;
+            if (WIFSTOPPED(status))
+                return -WSTOPSIG(status);
         }
+
+        return -1;
     }
 
 private:
