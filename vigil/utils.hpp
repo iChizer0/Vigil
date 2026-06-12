@@ -84,12 +84,21 @@ public:
         ::posix_spawn_file_actions_t file_actions;
         int status;
 
-        ::posix_spawn_file_actions_init(&file_actions);
-        ::posix_spawn_file_actions_addclosefrom_np(&file_actions, 3);
-        ::posix_spawn_file_actions_addopen(&file_actions, STDIN_FILENO, "/dev/null", O_RDWR | O_CLOEXEC, 0);
-        ::posix_spawn_file_actions_adddup2(&file_actions, STDIN_FILENO, STDOUT_FILENO);
-        ::posix_spawn_file_actions_adddup2(&file_actions, STDIN_FILENO, STDERR_FILENO);
-        status = ::posix_spawnp(&pid, _args[0], &file_actions, nullptr, _args, environ);
+        if ((status = ::posix_spawn_file_actions_init(&file_actions)) != 0) [[unlikely]]
+            return -status;
+
+        if ((::posix_spawn_file_actions_addclosefrom_np(&file_actions, 3)) != 0) [[unlikely]]
+            goto l_check_status;
+
+        if ((status
+                = ::posix_spawn_file_actions_addopen(&file_actions, STDIN_FILENO, "/dev/null", O_RDWR | O_CLOEXEC, 0))
+                == 0
+            && (status = ::posix_spawn_file_actions_adddup2(&file_actions, STDIN_FILENO, STDOUT_FILENO)) == 0
+            && (status = ::posix_spawn_file_actions_adddup2(&file_actions, STDIN_FILENO, STDERR_FILENO)) == 0)
+            [[likely]]
+            status = ::posix_spawnp(&pid, _args[0], &file_actions, nullptr, _args, environ);
+
+    l_check_status:
         ::posix_spawn_file_actions_destroy(&file_actions);
         if (status != 0)
             return -status;
