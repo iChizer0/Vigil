@@ -85,6 +85,7 @@ public:
         int status;
 
         ::posix_spawn_file_actions_init(&file_actions);
+        ::posix_spawn_file_actions_addclosefrom_np(&file_actions, 3);
         ::posix_spawn_file_actions_addopen(&file_actions, STDIN_FILENO, "/dev/null", O_RDWR | O_CLOEXEC, 0);
         ::posix_spawn_file_actions_adddup2(&file_actions, STDIN_FILENO, STDOUT_FILENO);
         ::posix_spawn_file_actions_adddup2(&file_actions, STDIN_FILENO, STDERR_FILENO);
