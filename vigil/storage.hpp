@@ -45,7 +45,7 @@ class Storage
 public:
     Storage(const StorageConfig &cfg, Context &ctx)
         : _ctx(ctx), _data_dir_path(kDataDirDefaultPath), _config_mutex(), _config(cfg), _stop_token(false),
-          _manager_thread(nullptr), _manager_action_mutex(), _slots_mutex(), _slots(), _netlink_fd(-1),
+          _manager_thread(nullptr), _ejection_in_progress(false), _slots_mutex(), _slots(), _netlink_fd(-1),
           _initial_scan_done(false)
     {
         // Check data directory name validity (non-empty, not slash or dot)
@@ -118,10 +118,10 @@ public:
     vg_sta_e ejectSlot(const std::string &slot_dev_path)
     {
         std::shared_ptr<Slot> slot;
-        const std::unique_lock lock(_manager_action_mutex);
+        const FlagGuard ejection(_ejection_in_progress);
         {
             const std::shared_lock lock2(_slots_mutex);
-            if (auto it = _slots.find(slot_dev_path); it != _slots.end())
+            if (const auto it = _slots.find(slot_dev_path); it != _slots.end())
                 slot = it->second;
         }
         if (!slot || slot->isInternal())
@@ -144,7 +144,7 @@ public:
         std::shared_ptr<Slot> slot;
         {
             const std::shared_lock lock(_slots_mutex);
-            if (auto it = _slots.find(slot_dev_path); it != _slots.end())
+            if (const auto it = _slots.find(slot_dev_path); it != _slots.end())
                 slot = it->second;
         }
         return slot ? slot->formatFileSystem() : EPERM;
@@ -157,7 +157,7 @@ public:
         std::shared_ptr<Slot> slot;
         {
             const std::shared_lock lock(_slots_mutex);
-            if (auto it = _slots.find(slot_dev_path); it != _slots.end())
+            if (const auto it = _slots.find(slot_dev_path); it != _slots.end())
                 slot = it->second;
         }
         if (!slot)
@@ -183,7 +183,7 @@ public:
         std::shared_ptr<Slot> slot;
         {
             const std::shared_lock lock(_slots_mutex);
-            if (auto it = _slots.find(slot_dev_path); it != _slots.end())
+            if (const auto it = _slots.find(slot_dev_path); it != _slots.end())
                 slot = it->second;
         }
         if (!slot)
@@ -219,7 +219,7 @@ public:
         std::shared_ptr<Slot> slot;
         {
             const std::shared_lock lock(_slots_mutex);
-            if (auto it = _slots.find(slot_dev_path); it != _slots.end())
+            if (const auto it = _slots.find(slot_dev_path); it != _slots.end())
                 slot = it->second;
         }
         if (!slot)
@@ -241,7 +241,7 @@ public:
         std::shared_ptr<Slot> slot;
         {
             const std::shared_lock lock(_slots_mutex);
-            if (auto it = _slots.find(slot_dev_path); it != _slots.end())
+            if (const auto it = _slots.find(slot_dev_path); it != _slots.end())
                 slot = it->second;
         }
         if (!slot)
@@ -517,7 +517,17 @@ private:
         const auto current_cfg = getConfig();
         std::vector<std::shared_ptr<Slot>> enabled_slots_without_target;
         std::shared_ptr<Slot> target_slot;
-        const std::unique_lock lock(_manager_action_mutex); // Ensure no ejection during this operation
+#ifdef VG_RETURN_ON_EJECTION
+#error "VG_RETURN_ON_EJECTION is already defined"
+#endif
+#define VG_RETURN_ON_EJECTION()                                                                                        \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if (_ejection_in_progress.load(std::memory_order_acquire))                                                     \
+            return 0;                                                                                                  \
+    }                                                                                                                  \
+    while (0)
+        VG_RETURN_ON_EJECTION();
         {
             const std::shared_lock lock2(_slots_mutex);
             for (const auto &[_, s]: _slots)
@@ -539,8 +549,10 @@ private:
         }
         if (!target_slot)
             return 0;
-        else if (!target_slot->isEnabled())
+        VG_RETURN_ON_EJECTION();
+        if (!target_slot->isEnabled())
         {
+            VG_RETURN_ON_EJECTION();
             if (const auto ret = target_slot->enable(); ret != 0)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to enable storage slot with device path ",
@@ -565,7 +577,7 @@ private:
 
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _stop_token;
     std::unique_ptr<std::thread> _manager_thread;
-    mutable std::mutex _manager_action_mutex;
+    alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _ejection_in_progress;
 
     mutable std::shared_mutex _slots_mutex;
     std::unordered_map<std::string, std::shared_ptr<Slot>> _slots;

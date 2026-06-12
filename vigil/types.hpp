@@ -1086,6 +1086,22 @@ private:
     std::string _id;
 };
 
+struct FlagGuard
+{
+    FlagGuard(std::atomic<bool> &f) noexcept : _f(f)
+    {
+        _f.store(true, std::memory_order_release);
+    }
+
+    ~FlagGuard() noexcept
+    {
+        _f.store(false, std::memory_order_release);
+    }
+
+private:
+    std::atomic<bool> &_f;
+};
+
 } // namespace vigil::types
 
 #endif

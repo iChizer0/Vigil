@@ -528,8 +528,10 @@ public:
         const std::unique_lock lock(_mutex);
         if (isInternal())
             return EPERM;
-        if (_on_destruction.load(std::memory_order_acquire))
+        if (_stop_token.load(std::memory_order_acquire) || _on_destruction.load(std::memory_order_acquire))
             return ECANCELED;
+        if (_failure.load(std::memory_order_acquire))
+            return EIO;
         if (const auto state = _state.load(std::memory_order_acquire);
             state != SlotState::NotFormattedOrFormatUnsupported && state != SlotState::NotMounted)
             return EPERM;
