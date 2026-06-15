@@ -288,6 +288,7 @@ public:
         if (_state.load() == SlotState::Formatting)
             return EBUSY;
         disableInternal();
+        doFsync();
         return 0;
     }
 
@@ -1234,26 +1235,33 @@ private:
         return true;
     }
 
+    bool doFsync() const noexcept
+    {
+        const auto fd = ::open(_mount_path.c_str(), O_RDWR | O_CLOEXEC);
+        if (fd < 0)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open mount path ", _mount_path,
+                " for syncing: ", static_cast<int>(errno));
+            return false;
+        }
+        else if (::syncfs(fd) != 0)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to sync filesystem at mount path ", _mount_path, ": ",
+                static_cast<int>(errno));
+            ::close(fd);
+            return false;
+        }
+        ::close(fd);
+        return true;
+    }
+
     bool doUnmount() const noexcept
     {
         const std::unique_lock lock(_op_mutex);
         if (_ctx.c_api.storage.on_unmount_cb)
             _ctx.c_api.storage.on_unmount_cb(_dev_path.c_str(), _mount_path.c_str());
         // Sync the filesystem before unmounting (syncfs)
-        {
-            const auto fd = ::open(_mount_path.c_str(), O_RDWR | O_CLOEXEC);
-            if (fd < 0)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open mount path ", _mount_path,
-                    " for syncing before unmounting: ", static_cast<int>(errno));
-            }
-            else if (::syncfs(fd) != 0)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to sync filesystem at mount path ", _mount_path,
-                    " before unmounting: ", static_cast<int>(errno));
-            }
-            ::close(fd);
-        }
+        doFsync();
         // Unmount the device
         {
             const bool umount_force = ::umount2(_mount_path.c_str(), MNT_FORCE) == 0;
