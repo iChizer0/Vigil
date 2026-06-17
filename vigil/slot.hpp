@@ -779,9 +779,9 @@ private:
                 // Known limitation, don't attempt to fsck when dirty mounted
                 if (!ensureStateResetToInitial())
                 {
+                    ++cumulative_error_count;
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to reset storage slot for device path ", _dev_path,
                         " to initial state, will retry");
-                    ++cumulative_error_count;
                     goto l_wait_and_continue;
                 }
             }
@@ -798,9 +798,9 @@ private:
             switch (state)
             {
                 case SlotState::Error: {
+                    ++cumulative_error_count;
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Storage slot for device path ", _dev_path,
                         " is in error state, will retry, count: ", cumulative_error_count);
-                    ++cumulative_error_count;
                     // Error state requires a longer delay before retrying
                     const auto s = std::chrono::steady_clock::now();
                     do
