@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <optional>
 #include <string>
@@ -21,6 +22,61 @@
 namespace vigil::configs {
 
 using namespace vigil::types;
+
+struct SoundEventRuleConfig
+{
+    std::string id;
+    std::string model_id;
+    std::chrono::milliseconds consecutive_window;
+    Range<float> confidence_filter;
+    std::unordered_set<std::string> class_filter;
+
+    SoundEventRuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
+    {
+        j.at("sID").get_to(id);
+        j.at("sModelID").get_to(model_id);
+        {
+            int64_t consecutive_window_ms;
+            j.at("iConsecutiveWindowMs").get_to(consecutive_window_ms);
+            if (consecutive_window_ms < 0)
+                throw Exception("Invalid consecutive window " + std::to_string(consecutive_window_ms)
+                                + "ms while parsing sound event rule");
+            consecutive_window = std::chrono::milliseconds(consecutive_window_ms);
+        }
+        {
+            auto &conf_rg = j.at("lConfidenceFilter");
+            const auto lb = conf_rg.at(0).get<float>();
+            const auto ub = conf_rg.at(1).get<float>();
+            if (lb > ub || lb < 0.0f || ub > 1.0f)
+                throw Exception("Invalid confidence filter range [" + std::to_string(lb) + ", " + std::to_string(ub)
+                                + "] while parsing sound event rule");
+            confidence_filter = Range<float>(lb, ub);
+        }
+        {
+            auto &cls_set = j.at("lClassFilter");
+            if (!cls_set.is_array())
+                throw Exception("Class filter must be an array while parsing sound event rule");
+            class_filter.reserve(cls_set.size());
+            for (const auto &cls_j: cls_set)
+                class_filter.emplace(cls_j.get<std::string>());
+        }
+    }
+
+    void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
+    {
+        j["sID"] = id;
+        j["sModelID"] = model_id;
+        j["iConsecutiveWindowMs"] = static_cast<int64_t>(consecutive_window.count());
+        j["lConfidenceFilter"] = { confidence_filter.lb(), confidence_filter.ub() };
+        j["lClassFilter"] = nlohmann::json(class_filter);
+    }
+
+    bool operator==(const SoundEventRuleConfig &other) const noexcept
+    {
+        return id == other.id && model_id == other.model_id && consecutive_window == other.consecutive_window
+               && confidence_filter == other.confidence_filter && class_filter == other.class_filter;
+    }
+};
 
 struct InferenceRuleConfig
 {

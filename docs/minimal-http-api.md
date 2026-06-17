@@ -1,7 +1,7 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2026-04-20
+Revised: 2026-06-17
 Version: 1.6.0
 
 ## Rule API
@@ -116,7 +116,7 @@ The payload depends on the `sCurrentSelected` field.
 
 ```json
 {
-    "sCurrentSelected": "INFERENCE_SET", // String, one of: "INFERENCE_SET", "TIMER", "GPIO", "TTY", "HTTP", "ALWAYS_ON"
+    "sCurrentSelected": "INFERENCE_SET", // String, one of: "SED", "INFERENCE_SET", "TIMER", "GPIO", "TTY", "HTTP", "ALWAYS_ON"
     "lInferenceSet": [
         {
             "sID": "person_detection", // String, rule ID (uniqueness not enforced but recommended)
@@ -136,6 +136,23 @@ The payload depends on the `sCurrentSelected` field.
     ],
     "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
     "message": "" // String, optional, present only on failure
+}
+```
+
+#### Sound Event Rule
+
+```json
+{
+    "sCurrentSelected": "SED",
+    "dSED": {
+        "sID": "doorbell", // String, rule ID (uniqueness not enforced but recommended)
+        "sModelID": "00000000-0000-0000-0000-000000000000", // String, acoustics head/model ID to match against inference head_id; empty string accepts any model
+        "iConsecutiveWindowMs": 1000, // Integer, required consecutive active duration in milliseconds before activation, must be >= 0
+        "lConfidenceFilter": [0.5, 1.0], // Array of number [min, max], confidence range to filter, configurable range between 0.0 and 1.0
+        "lClassFilter": ["doorbell", "baby_cry"] // Array of strings, class labels to filter; empty array accepts any label
+    },
+    "code": 0,
+    "message": ""
 }
 ```
 

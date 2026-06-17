@@ -373,6 +373,8 @@ public:
                     swapTypedRecordRule<HTTPRule>(HTTPRuleConfig(), on_change);
                 else if (rule_type == VG_RULE_TYPE_ALWAYS_ON)
                     swapTypedRecordRule<AlwaysOnRule>(AlwaysOnRuleConfig(), on_change);
+                else if (rule_type == VG_RULE_TYPE_SED)
+                    swapTypedRecordRule<SoundEventRule>(SoundEventRuleConfig(j.at("dSED"), *_ctx), on_change);
                 else
                     throw Exception("Invalid rule type while updating record rule config '" + rule_type_str + "'");
             }
@@ -427,6 +429,12 @@ public:
                         auto obj = nlohmann::json::object();
                         cfg.to(obj, *_ctx);
                         res_j["dTTY"] = obj;
+                    }
+                    else if constexpr (std::is_same_v<ConfigType, SoundEventRuleConfig>)
+                    {
+                        auto obj = nlohmann::json::object();
+                        cfg.to(obj, *_ctx);
+                        res_j["dSED"] = obj;
                     }
                 },
                 _record_rule_config_variant);
@@ -708,6 +716,8 @@ private:
                     return std::make_unique<HTTPRule>(cfg, *_ctx);
                 else if constexpr (std::is_same_v<ConfigType, AlwaysOnRuleConfig>)
                     return std::make_unique<AlwaysOnRule>(cfg, *_ctx);
+                else if constexpr (std::is_same_v<ConfigType, SoundEventRuleConfig>)
+                    return std::make_unique<SoundEventRule>(cfg, *_ctx);
                 else
                     return nullptr;
             },
@@ -726,8 +736,8 @@ private:
 
     mutable std::shared_mutex _record_rule_mutex;
     nlohmann::json _record_rule_config;
-    std::variant<std::monostate, InferenceRuleSetConfig, TimerRuleConfig, GPIORuleConfig, TTYRuleConfig, HTTPRuleConfig,
-        AlwaysOnRuleConfig>
+    std::variant<std::monostate, InferenceRuleSetConfig, SoundEventRuleConfig, TimerRuleConfig, GPIORuleConfig,
+        TTYRuleConfig, HTTPRuleConfig, AlwaysOnRuleConfig>
         _record_rule_config_variant;
     std::unique_ptr<BaseRule> _record_rule;
 

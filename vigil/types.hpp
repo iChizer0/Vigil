@@ -26,6 +26,8 @@
 #include <variant>
 #include <vector>
 
+#include <unistd.h>
+
 #include "constants.hpp"
 #include "vigil_ctypes.h"
 
@@ -1100,6 +1102,58 @@ struct FlagGuard
 
 private:
     std::atomic<bool> &_f;
+};
+
+class AutoCloseFD final: public NonCopyable<AutoCloseFD>
+{
+public:
+    AutoCloseFD() noexcept : _fd(-1) { }
+
+    explicit AutoCloseFD(int fd) noexcept : _fd(fd) { }
+
+    AutoCloseFD(AutoCloseFD &&other) noexcept : _fd(other._fd)
+    {
+        other._fd = -1;
+    }
+
+    AutoCloseFD &operator=(AutoCloseFD &&other) noexcept
+    {
+        if (this != &other)
+        {
+            if (_fd >= 0)
+                ::close(_fd);
+            _fd = other._fd;
+            other._fd = -1;
+        }
+        return *this;
+    }
+
+    inline operator int() const noexcept
+    {
+        return _fd;
+    }
+
+    inline operator bool() const noexcept
+    {
+        return _fd >= 0;
+    }
+
+    inline int get() const noexcept
+    {
+        return _fd;
+    }
+
+    ~AutoCloseFD() noexcept
+    {
+        if (_fd >= 0)
+        {
+            ::close(_fd);
+            _fd = -1;
+        }
+    }
+
+private:
+    int _fd;
 };
 
 } // namespace vigil::types
