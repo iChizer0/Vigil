@@ -130,11 +130,11 @@ class SoundEventRule final: public BaseRule
 {
 public:
     SoundEventRule(const SoundEventRuleConfig &cfg, const Context &ctx)
-        : BaseRule(VG_RULE_TYPE_SED, 0), _id(cfg.id), _model_id(cfg.model_id),
-          _consecutive_window(cfg.consecutive_window), _conf_rg(cfg.confidence_filter),
-          _cls_set(cfg.class_filter.begin(), cfg.class_filter.end()), _last_active(false), _stop_token(false)
+        : BaseRule(VG_RULE_TYPE_SED, 0), _id(cfg.id), _consecutive_window(cfg.consecutive_window),
+          _conf_rg(cfg.confidence_filter), _cls_set(cfg.class_filter.begin(), cfg.class_filter.end()),
+          _last_active(false), _stop_token(false)
     {
-        VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Initialized sound event rule: '", _id, "' with model_id: '", _model_id,
+        VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Initialized sound event rule: '", _id,
             "', consecutive_window: ", _consecutive_window.count(), "ms, confidence_filter: [", _conf_rg.lb(), ", ",
             _conf_rg.ub(), "], class_filter size: ", _cls_set.size());
 
@@ -451,7 +451,7 @@ private:
                 return DecodeStatus::Malformed;
 
             const auto &inference = envelope.inference();
-            if (!_model_id.empty() && (!inference.has_head_id() || inference.head_id() != _model_id))
+            if (!_id.empty() && (!inference.has_head_id() || inference.head_id() != _id))
                 return DecodeStatus::Inactive;
 
             for (const auto &top_k: inference.top_k())
@@ -479,7 +479,6 @@ private:
 
 private:
     std::string _id;
-    std::string _model_id;
     std::chrono::milliseconds _consecutive_window;
     Range<float> _conf_rg;
     std::unordered_set<std::string> _cls_set;

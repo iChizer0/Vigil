@@ -26,7 +26,6 @@ using namespace vigil::types;
 struct SoundEventRuleConfig
 {
     std::string id;
-    std::string model_id;
     std::chrono::milliseconds consecutive_window;
     Range<float> confidence_filter;
     std::unordered_set<std::string> class_filter;
@@ -34,7 +33,6 @@ struct SoundEventRuleConfig
     SoundEventRuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
         j.at("sID").get_to(id);
-        j.at("sModelID").get_to(model_id);
         {
             int64_t consecutive_window_ms;
             j.at("iConsecutiveWindowMs").get_to(consecutive_window_ms);
@@ -65,7 +63,6 @@ struct SoundEventRuleConfig
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
         j["sID"] = id;
-        j["sModelID"] = model_id;
         j["iConsecutiveWindowMs"] = static_cast<int64_t>(consecutive_window.count());
         j["lConfidenceFilter"] = { confidence_filter.lb(), confidence_filter.ub() };
         j["lClassFilter"] = nlohmann::json(class_filter);
@@ -73,7 +70,7 @@ struct SoundEventRuleConfig
 
     bool operator==(const SoundEventRuleConfig &other) const noexcept
     {
-        return id == other.id && model_id == other.model_id && consecutive_window == other.consecutive_window
+        return id == other.id && consecutive_window == other.consecutive_window
                && confidence_filter == other.confidence_filter && class_filter == other.class_filter;
     }
 };
