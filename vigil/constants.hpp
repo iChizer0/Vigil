@@ -36,7 +36,7 @@ static inline constexpr const size_t kSlotMediaMuxerBufferPeriod = 10;
 static inline constexpr const size_t kCaptureMediaMuxerBufferPeriod = 10;
 static inline constexpr const size_t kCaptureWaterMarkBatch = kVideoClipLengthDefault.count();
 
-static inline constexpr const char *kRuleSoundEventUDSPath = "/dev/shm/acousticsd-result.sock";
+static inline constexpr const char *kRuleSoundEventUDSPath = "/dev/shm/acousticslabd-result.sock";
 
 static inline constexpr const int kStorageDefaultUid = 1000;
 static inline constexpr const int kStorageDefaultGid = 1000;
