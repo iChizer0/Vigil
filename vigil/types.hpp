@@ -907,9 +907,11 @@ struct WaterMarks
                 limit = static_cast<FileSize>(res);
         }
         return WaterMarks {
-            .critical_remain_bytes = static_cast<FileSize>(kStorageCriticalWaterMarkFactor * limit),
-            .high_remain_bytes = static_cast<FileSize>(kStorageHighWaterMarkFactor * limit),
-            .recycle_bytes = static_cast<FileSize>(kStorageRecycleFactor * limit),
+            .critical_remain_bytes
+            = static_cast<FileSize>(kStorageCriticalWaterMarkFactor * limit + kStorageMinFileSystemFreeBytes),
+            .high_remain_bytes
+            = static_cast<FileSize>(kStorageHighWaterMarkFactor * limit + kStorageMinFileSystemFreeBytes),
+            .recycle_bytes = static_cast<FileSize>(kStorageRecycleFactor * limit + kStorageMinFileSystemFreeBytes),
         };
     }
 
