@@ -85,7 +85,8 @@ typedef enum vg_rule_type_e {
     VG_RULE_TYPE_TTY = 5,
     VG_RULE_TYPE_SCHEDULE = 6,
     VG_RULE_TYPE_HTTP = 7,
-    VG_RULE_TYPE_ALWAYS_ON = 8
+    VG_RULE_TYPE_ALWAYS_ON = 8,
+    VG_RULE_TYPE_SED = 9
 } vg_rule_type_e;
 
 typedef struct vg_rule_evt_t

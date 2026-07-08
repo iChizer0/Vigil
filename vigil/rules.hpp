@@ -3,19 +3,27 @@
 #define VIGIL_RULES_HPP
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <thread>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -23,6 +31,7 @@
 #include "configs.hpp"
 #include "constants.hpp"
 #include "context.hpp"
+#include "envelope.pb.h"
 #include "log.hpp"
 #include "types.hpp"
 
@@ -59,6 +68,8 @@ public:
                 return "HTTP";
             case VG_RULE_TYPE_ALWAYS_ON:
                 return "ALWAYS_ON";
+            case VG_RULE_TYPE_SED:
+                return "SED";
             default:
                 return "UNKNOWN";
         }
@@ -82,6 +93,8 @@ public:
             return VG_RULE_TYPE_HTTP;
         else if (type_str == "ALWAYS_ON")
             return VG_RULE_TYPE_ALWAYS_ON;
+        else if (type_str == "SED")
+            return VG_RULE_TYPE_SED;
         else
             return VG_RULE_TYPE_UNKNOWN;
     }
@@ -111,6 +124,368 @@ public:
 private:
     vg_rule_type_e _type;
     const int _precedence;
+};
+
+class SoundEventRule final: public BaseRule
+{
+public:
+    SoundEventRule(const SoundEventRuleConfig &cfg, const Context &ctx)
+        : BaseRule(VG_RULE_TYPE_SED, 0), _id(cfg.id), _consecutive_window(cfg.consecutive_window),
+          _conf_rg(cfg.confidence_filter), _cls_set(cfg.class_filter.begin(), cfg.class_filter.end()),
+          _last_active(false), _stop_token(false)
+    {
+        VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Initialized sound event rule: '", _id,
+            "', consecutive_window: ", _consecutive_window.count(), "ms, confidence_filter: [", _conf_rg.lb(), ", ",
+            _conf_rg.ub(), "], class_filter size: ", _cls_set.size());
+
+        try
+        {
+            _poll_thread = std::thread(&SoundEventRule::pollThreadTask, this, std::cref(ctx));
+        }
+        catch (const std::exception &e)
+        {
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to start sound event UDS polling thread: ", e.what());
+        }
+    }
+
+    ~SoundEventRule() noexcept
+    {
+        _stop_token.store(true, std::memory_order_release);
+        try
+        {
+            if (_poll_thread.joinable())
+                _poll_thread.join();
+        }
+        catch (...)
+        {
+        }
+    }
+
+    std::string id() const noexcept override
+    {
+        return _id;
+    }
+
+    bool operator()(const Context &ctx [[maybe_unused]]) const noexcept override
+    {
+        return _last_active.exchange(false, std::memory_order_acq_rel);
+    }
+
+private:
+    enum class DecodeStatus { Inactive, Active, Malformed };
+    enum class WaitStatus { Ready, Timeout, Stopped, Error };
+
+    static inline constexpr size_t kSoundEventMaxFrameBytes = 64 * 1024;
+    static inline constexpr std::chrono::milliseconds kSoundEventPollInterval { 100 };
+    static inline constexpr std::chrono::milliseconds kSoundEventConnectTimeout { 1000 };
+    static inline constexpr std::chrono::milliseconds kSoundEventFrameReadTimeout { 5000 };
+    static inline constexpr std::chrono::milliseconds kSoundEventInitialReconnectBackoff { 100 };
+    static inline constexpr std::chrono::milliseconds kSoundEventMaxReconnectBackoff { 5000 };
+
+    void pollThreadTask(const Context &ctx) const noexcept
+    {
+        try
+        {
+            auto backoff = kSoundEventInitialReconnectBackoff;
+            while (!_stop_token.load(std::memory_order_acquire))
+            {
+                const auto fd = openSocket(ctx);
+                if (!fd) [[unlikely]]
+                {
+                    sleepOrStop(backoff);
+                    backoff = std::min(backoff * 2, kSoundEventMaxReconnectBackoff);
+                    continue;
+                }
+                VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Connected to sound event UDS at '", kRuleSoundEventUDSPath,
+                    "' with fd ", fd.get());
+                backoff = kSoundEventInitialReconnectBackoff;
+                processConnection(ctx, fd);
+                if (!_stop_token.load(std::memory_order_acquire))
+                {
+                    sleepOrStop(backoff);
+                    backoff = std::min(backoff * 2, kSoundEventMaxReconnectBackoff);
+                }
+            }
+        }
+        catch (const std::exception &e)
+        {
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Sound event UDS polling thread terminated: ", e.what());
+        }
+        catch (...)
+        {
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Sound event UDS polling thread terminated with unknown error");
+        }
+    }
+
+    AutoCloseFD openSocket(const Context &ctx) const noexcept
+    {
+        auto fd = AutoCloseFD(::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
+        if (!fd) [[unlikely]]
+        {
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create UDS for sound event rule: ", errno);
+            return fd;
+        }
+
+        ::sockaddr_un addr {};
+        addr.sun_family = AF_UNIX;
+        if (std::strlen(kRuleSoundEventUDSPath) >= sizeof(addr.sun_path)) [[unlikely]]
+        {
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Sound event UDS path too long: '", kRuleSoundEventUDSPath, "'");
+            return {};
+        }
+        std::strncpy(addr.sun_path, kRuleSoundEventUDSPath, sizeof(addr.sun_path) - 1);
+
+        if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) [[likely]]
+            return fd;
+
+        {
+            const auto err = errno;
+            if (err != EINPROGRESS && err != EAGAIN && err != EWOULDBLOCK)
+            {
+                if (err == ENOENT || err == ECONNREFUSED)
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Sound event UDS at '", kRuleSoundEventUDSPath,
+                        "' is not ready: ", err);
+                else
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Failed to connect sound event UDS at '", kRuleSoundEventUDSPath,
+                        "': ", err);
+                return {};
+            }
+
+            if (waitForFd(fd, POLLOUT, kSoundEventConnectTimeout, ctx) != WaitStatus::Ready)
+            {
+                if (!_stop_token.load(std::memory_order_acquire))
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Timed out connecting sound event UDS at '",
+                        kRuleSoundEventUDSPath, "'");
+                return {};
+            }
+        }
+
+        {
+            int so_error = 0;
+            ::socklen_t so_error_len = sizeof(so_error);
+            if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &so_error_len) < 0 || so_error != 0)
+            {
+                const auto final_err = so_error != 0 ? so_error : errno;
+                if (final_err == ENOENT || final_err == ECONNREFUSED)
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Sound event UDS at '", kRuleSoundEventUDSPath,
+                        "' is not ready: ", strerror(final_err));
+                else
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Failed to connect sound event UDS at '", kRuleSoundEventUDSPath,
+                        "': ", strerror(final_err));
+                return {};
+            }
+        }
+
+        return fd;
+    }
+
+    void processConnection(const Context &ctx, const AutoCloseFD &fd) const
+    {
+        std::array<uint8_t, 4> len_buf {};
+        std::vector<uint8_t> frame;
+        std::optional<std::chrono::steady_clock::time_point> active_since;
+
+        while (!_stop_token.load(std::memory_order_acquire))
+        {
+            if (!readExact(fd, len_buf.data(), len_buf.size(), ctx, kSoundEventFrameReadTimeout, false,
+                    "sound event frame prefix"))
+                break;
+
+            const auto frame_len = readLe32(len_buf.data());
+            if (frame_len == 0 || frame_len > kSoundEventMaxFrameBytes)
+            {
+                VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Invalid sound event UDS frame length ", frame_len, " from '",
+                    kRuleSoundEventUDSPath, "', closing connection");
+                break;
+            }
+
+            frame.resize(frame_len);
+            if (!readExact(fd, frame.data(), frame.size(), ctx, kSoundEventFrameReadTimeout, true,
+                    "sound event frame payload"))
+                break;
+
+            const auto status = filterEnvelope(frame.data(), frame.size());
+            if (status == DecodeStatus::Malformed)
+            {
+                VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Malformed sound event protobuf frame from '",
+                    kRuleSoundEventUDSPath, "', closing connection");
+                break;
+            }
+
+            if (finalActive(status == DecodeStatus::Active, active_since, std::chrono::steady_clock::now()))
+                _last_active.store(true, std::memory_order_release);
+        }
+    }
+
+    bool finalActive(bool active, std::optional<std::chrono::steady_clock::time_point> &active_since,
+        std::chrono::steady_clock::time_point now) const noexcept
+    {
+        if (!active)
+        {
+            active_since.reset();
+            return false;
+        }
+        if (!active_since)
+            active_since = now;
+        return now - *active_since >= _consecutive_window;
+    }
+
+    bool readExact(const AutoCloseFD &fd, uint8_t *dst, size_t len, const Context &ctx,
+        std::chrono::milliseconds timeout, bool start_timeout_immediately, std::string_view what) const noexcept
+    {
+        size_t offset = 0;
+        std::optional<std::chrono::steady_clock::time_point> deadline;
+
+        if (start_timeout_immediately)
+            deadline = std::chrono::steady_clock::now() + timeout;
+
+        while (offset < len && !_stop_token.load(std::memory_order_acquire))
+        {
+            const ssize_t n = ::recv(fd.get(), dst + offset, len - offset, 0);
+            if (n > 0)
+            {
+                offset += static_cast<size_t>(n);
+                if (!deadline && offset > 0)
+                    deadline = std::chrono::steady_clock::now() + timeout;
+                continue;
+            }
+            else if (n == 0)
+            {
+                if (!_stop_token.load(std::memory_order_acquire))
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Sound event UDS at '", kRuleSoundEventUDSPath,
+                        "' closed by peer while reading ", what);
+                return false;
+            }
+            if (const auto err = errno; err == EINTR)
+                continue;
+            else if (err != EAGAIN && err != EWOULDBLOCK)
+            {
+                if (!_stop_token.load(std::memory_order_acquire))
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to read ", what, " from sound event UDS at '",
+                        kRuleSoundEventUDSPath, "': ", err);
+                return false;
+            }
+
+            auto wait_time = kSoundEventPollInterval;
+            if (deadline)
+            {
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= *deadline)
+                {
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Timed out reading ", what, " from sound event UDS at '",
+                        kRuleSoundEventUDSPath, "'");
+                    return false;
+                }
+                wait_time = std::min(wait_time, std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - now));
+                if (wait_time.count() <= 0)
+                    wait_time = std::chrono::milliseconds(1);
+            }
+
+            if (const auto wait_status = waitForFd(fd, POLLIN, wait_time, ctx); wait_status == WaitStatus::Timeout)
+                continue;
+            else if (wait_status != WaitStatus::Ready)
+                return false;
+        }
+
+        return offset == len;
+    }
+
+    WaitStatus waitForFd(const AutoCloseFD &fd, short events, std::chrono::milliseconds timeout,
+        const Context &ctx) const noexcept
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!_stop_token.load(std::memory_order_acquire))
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+                return WaitStatus::Timeout;
+
+            auto wait_time = std::min(kSoundEventPollInterval,
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now));
+            if (wait_time.count() <= 0)
+                wait_time = std::chrono::milliseconds(1);
+
+            ::pollfd pfd { .fd = fd.get(), .events = events, .revents = 0 };
+            const int ret = ::poll(&pfd, 1,
+                static_cast<int>(std::min<int64_t>(wait_time.count(), std::numeric_limits<int>::max())));
+            if (ret > 0)
+            {
+                if (pfd.revents & POLLNVAL)
+                {
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Invalid sound event UDS fd ", fd.get());
+                    return WaitStatus::Error;
+                }
+                if (pfd.revents & (events | POLLERR | POLLHUP))
+                    return WaitStatus::Ready;
+                continue;
+            }
+            else if (ret == 0)
+                continue;
+            if (errno == EINTR)
+                continue;
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Poll failed for sound event UDS at '", kRuleSoundEventUDSPath,
+                "': ", errno);
+            return WaitStatus::Error;
+        }
+        return WaitStatus::Stopped;
+    }
+
+    bool sleepOrStop(std::chrono::milliseconds duration) const noexcept
+    {
+        while (duration.count() > 0 && !_stop_token.load(std::memory_order_acquire))
+        {
+            const auto step = std::min(duration, kSoundEventPollInterval);
+            std::this_thread::sleep_for(step);
+            duration -= step;
+        }
+        return _stop_token.load(std::memory_order_acquire);
+    }
+
+    DecodeStatus filterEnvelope(const uint8_t *data, size_t size) const noexcept
+    {
+        try
+        {
+            acoustics::Envelope envelope;
+            if (size > static_cast<size_t>(std::numeric_limits<int>::max())
+                || !envelope.ParseFromArray(data, static_cast<int>(size)) || !envelope.has_inference())
+                return DecodeStatus::Malformed;
+
+            const auto &inference = envelope.inference();
+            if (!_id.empty() && (!inference.has_head_id() || inference.head_id() != _id))
+                return DecodeStatus::Inactive;
+
+            for (const auto &top_k: inference.top_k())
+            {
+                if (!std::isfinite(top_k.prob()) || !(_conf_rg & top_k.prob()))
+                    continue;
+                if (!_cls_set.empty() && !_cls_set.contains(top_k.label()))
+                    continue;
+
+                return DecodeStatus::Active;
+            }
+            return DecodeStatus::Inactive;
+        }
+        catch (...)
+        {
+            return DecodeStatus::Malformed;
+        }
+    }
+
+    static inline uint32_t readLe32(const uint8_t *ptr) noexcept
+    {
+        return static_cast<uint32_t>(ptr[0]) | (static_cast<uint32_t>(ptr[1]) << 8)
+               | (static_cast<uint32_t>(ptr[2]) << 16) | (static_cast<uint32_t>(ptr[3]) << 24);
+    }
+
+private:
+    std::string _id;
+    std::chrono::milliseconds _consecutive_window;
+    Range<float> _conf_rg;
+    std::unordered_set<std::string> _cls_set;
+
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _last_active;
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _stop_token;
+    mutable std::thread _poll_thread;
 };
 
 class InferenceRule final: public BaseRule
