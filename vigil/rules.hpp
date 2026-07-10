@@ -138,14 +138,7 @@ public:
             "', consecutive_window: ", _consecutive_window.count(), "ms, confidence_filter: [", _conf_rg.lb(), ", ",
             _conf_rg.ub(), "], class_filter size: ", _cls_set.size());
 
-        try
-        {
-            _poll_thread = std::thread(&SoundEventRule::pollThreadTask, this, std::cref(ctx));
-        }
-        catch (const std::exception &e)
-        {
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to start sound event UDS polling thread: ", e.what());
-        }
+        _poll_thread = std::thread(&SoundEventRule::pollThreadTask, this, std::cref(ctx));
     }
 
     ~SoundEventRule() noexcept
@@ -172,7 +165,7 @@ public:
     }
 
 private:
-    enum class DecodeStatus { Inactive, Active, Malformed };
+    enum class DecodeStatus { Ignored, Inactive, Active, Malformed };
     enum class WaitStatus { Ready, Timeout, Stopped, Error };
 
     static inline constexpr size_t kSoundEventMaxFrameBytes = 64 * 1024;
@@ -184,36 +177,36 @@ private:
 
     void pollThreadTask(const Context &ctx) const noexcept
     {
-        try
+        auto backoff = kSoundEventInitialReconnectBackoff;
+        while (!_stop_token.load(std::memory_order_acquire))
         {
-            auto backoff = kSoundEventInitialReconnectBackoff;
-            while (!_stop_token.load(std::memory_order_acquire))
+            bool connection_healthy = false;
+            try
             {
                 const auto fd = openSocket(ctx);
-                if (!fd) [[unlikely]]
+                if (fd) [[likely]]
                 {
-                    sleepOrStop(backoff);
-                    backoff = std::min(backoff * 2, kSoundEventMaxReconnectBackoff);
-                    continue;
-                }
-                VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Connected to sound event UDS at '", kRuleSoundEventUDSPath,
-                    "' with fd ", fd.get());
-                backoff = kSoundEventInitialReconnectBackoff;
-                processConnection(ctx, fd);
-                if (!_stop_token.load(std::memory_order_acquire))
-                {
-                    sleepOrStop(backoff);
-                    backoff = std::min(backoff * 2, kSoundEventMaxReconnectBackoff);
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Connected to sound event UDS at '", kRuleSoundEventUDSPath,
+                        "' with fd ", fd.get());
+                    processConnection(ctx, fd, connection_healthy);
                 }
             }
-        }
-        catch (const std::exception &e)
-        {
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Sound event UDS polling thread terminated: ", e.what());
-        }
-        catch (...)
-        {
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Sound event UDS polling thread terminated with unknown error");
+            catch (const std::exception &e)
+            {
+                VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Sound event UDS connection failed: ", e.what());
+            }
+            catch (...)
+            {
+                VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Sound event UDS connection failed with unknown error");
+            }
+
+            if (_stop_token.load(std::memory_order_acquire))
+                break;
+
+            if (connection_healthy)
+                backoff = kSoundEventInitialReconnectBackoff;
+            sleepOrStop(backoff);
+            backoff = std::min(backoff * 2, kSoundEventMaxReconnectBackoff);
         }
     }
 
@@ -279,7 +272,7 @@ private:
         return fd;
     }
 
-    void processConnection(const Context &ctx, const AutoCloseFD &fd) const
+    void processConnection(const Context &ctx, const AutoCloseFD &fd, bool &connection_healthy) const
     {
         std::array<uint8_t, 4> len_buf {};
         std::vector<uint8_t> frame;
@@ -311,6 +304,10 @@ private:
                     kRuleSoundEventUDSPath, "', closing connection");
                 break;
             }
+
+            connection_healthy = true;
+            if (status == DecodeStatus::Ignored)
+                continue;
 
             if (finalActive(status == DecodeStatus::Active, active_since, std::chrono::steady_clock::now()))
                 _last_active.store(true, std::memory_order_release);
@@ -447,8 +444,10 @@ private:
         {
             acoustics::Envelope envelope;
             if (size > static_cast<size_t>(std::numeric_limits<int>::max())
-                || !envelope.ParseFromArray(data, static_cast<int>(size)) || !envelope.has_inference())
+                || !envelope.ParseFromArray(data, static_cast<int>(size)))
                 return DecodeStatus::Malformed;
+            if (!envelope.has_inference())
+                return DecodeStatus::Ignored;
 
             const auto &inference = envelope.inference();
             if (!_id.empty() && (!inference.has_head_id() || inference.head_id() != _id))

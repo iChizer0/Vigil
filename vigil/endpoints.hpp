@@ -20,6 +20,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -51,7 +52,7 @@ using namespace vigil::async_task;
 class ConfigStore final
 {
 public:
-    ConfigStore(Context &ctx, std::string_view name) noexcept
+    ConfigStore(Context &ctx, std::string_view name)
         : _ctx(ctx), _name(name), _dir_path(std::filesystem::path(ctx.c_api.basic.config_directory))
     {
         // Ensure directory exists
@@ -68,22 +69,39 @@ public:
 
     vg_sta_e loadFromFile(nlohmann::json &j) const noexcept
     {
-        std::error_code ec;
-        const auto file_path = _dir_path / _name;
-        if (!std::filesystem::is_regular_file(file_path, ec))
-            return ENOENT;
-
-        std::ifstream file(file_path);
-        if (!file.is_open())
-            return EIO;
         try
         {
-            file >> j;
+            const std::unique_lock lock(_mutex);
+            std::error_code ec;
+            const auto file_path = _dir_path / _name;
+            if (!std::filesystem::is_regular_file(file_path, ec))
+                return ec ? EIO : ENOENT;
+
+            std::ifstream file(file_path);
+            if (!file.is_open())
+                return EIO;
+            try
+            {
+                file >> j;
+            }
+            catch (const std::bad_alloc &)
+            {
+                throw;
+            }
+            catch (const std::exception &e)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to load JSON from file ", file_path, ": ", e.what());
+                return EINVAL;
+            }
+        }
+        catch (const std::bad_alloc &)
+        {
+            return ENOMEM;
         }
         catch (const std::exception &e)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to load JSON from file ", file_path, ": ", e.what());
-            return EINVAL;
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to load config file '", _name, "': ", e.what());
+            return EIO;
         }
 
         return 0;
@@ -91,42 +109,76 @@ public:
 
     vg_sta_e saveToFile(const nlohmann::json &j) noexcept
     {
-        std::error_code ec;
-        const auto tmp_path = _dir_path / (std::string(".") + std::string(_name));
+        std::filesystem::path tmp_path;
+        const auto cleanup = [&tmp_path]() noexcept {
+            if (!tmp_path.empty())
+            {
+                std::error_code ec;
+                std::filesystem::remove(tmp_path, ec);
+            }
+        };
 
-        const std::unique_lock lock(_mutex);
-        {
-            std::ofstream file(tmp_path, std::ios::trunc);
+        const auto write_file = [this, &j](const std::filesystem::path &path) -> bool {
+            std::ofstream file(path, std::ios::trunc);
             if (!file.is_open())
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open temporary file ", tmp_path,
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open temporary file ", path,
                     " for writing, code: ", errno);
+                return false;
+            }
+
+            file << std::setw(4) << j;
+            file.flush();
+            if (file.fail())
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "I/O error occurred while writing temporary file ", path,
+                    ", code: ", errno);
+                return false;
+            }
+
+            file.close();
+            if (file.fail())
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "I/O error occurred while closing temporary file ", path,
+                    ", code: ", errno);
+                return false;
+            }
+            return true;
+        };
+
+        try
+        {
+            tmp_path = _dir_path / (std::string(".") + std::string(_name));
+            const std::unique_lock lock(_mutex);
+            if (!write_file(tmp_path))
+            {
+                cleanup();
                 return EIO;
             }
 
-            file << j.dump(4);
-            if (file.fail())
+            std::error_code ec;
+            const auto file_path = _dir_path / _name;
+            std::filesystem::rename(tmp_path, file_path, ec);
+            if (ec)
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "I/O error occurred while writing to temporary file ", tmp_path,
-                    ", code: ", errno);
-                goto l_err_and_cleanup;
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to rename temporary file ", tmp_path, " to ", file_path,
+                    ": ", ec.message());
+                cleanup();
+                return EIO;
             }
-            file.flush();
+            return 0;
         }
-
-        std::filesystem::rename(tmp_path, _dir_path / _name, ec);
-        if (ec)
+        catch (const std::bad_alloc &)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to rename temporary file ", tmp_path, " to ",
-                (_dir_path / _name), ": ", ec.message());
-            goto l_err_and_cleanup;
+            cleanup();
+            return ENOMEM;
         }
-
-        return 0;
-
-    l_err_and_cleanup:
-        std::filesystem::remove(tmp_path, ec);
-        return EIO;
+        catch (const std::exception &e)
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to store config file '", _name, "': ", e.what());
+            cleanup();
+            return EIO;
+        }
     }
 
     template<typename T>
@@ -184,6 +236,8 @@ private:
 class RuleEndpoint final
 {
 private:
+    static_assert(std::is_nothrow_move_assignable_v<nlohmann::json>);
+
     static inline constexpr const std::string_view kRecordConfigName = "record_config.json";
     static inline constexpr const std::string_view kScheduleRuleConfigName = "schedule_rule_config.json";
     static inline constexpr const std::string_view kRecordRuleConfigName = "record_rule_config.json";
@@ -209,7 +263,8 @@ public:
         {
             _record_rule_config_store = std::make_unique<ConfigStore>(*_ctx, kRecordRuleConfigName);
             _record_rule_config = nlohmann::json::object();
-            swapTypedRecordRule<AlwaysOnRule>(AlwaysOnRuleConfig(), []() noexcept { return true; });
+            if (!swapTypedRecordRule<AlwaysOnRule>(AlwaysOnRuleConfig(), []() noexcept { return true; }))
+                throw Exception("Failed to initialize default record rule");
             if (nlohmann::json j; _record_rule_config_store->loadFromFile(j) == 0)
                 updateRecordRuleConfig(j, false);
         }
@@ -242,6 +297,7 @@ public:
 
         try
         {
+            const std::unique_lock lock(_record_config_mutex);
             const auto record_config = RecordConfig(j, *_ctx);
 
             if (store) // Store first
@@ -351,35 +407,59 @@ public:
 
         try
         {
+            auto new_record_rule_config = j;
             const auto rule_type_str = j.at("sCurrentSelected").get<std::string>();
             const std::unique_lock lock(_record_rule_mutex);
             if (rule_type_str.empty())
             {
+                if (!on_change())
+                    throw Exception("Failed to store record rule configuration");
                 _record_rule.reset();
                 _record_rule_config_variant = std::monostate {};
             }
             else
             {
                 if (auto rule_type = BaseRule::TypeFromString(rule_type_str); rule_type == VG_RULE_TYPE_INFERENCE_SET)
-                    swapTypedRecordRule<InferenceRuleSet>(InferenceRuleSetConfig(j.at("lInferenceSet"), *_ctx),
-                        on_change);
+                {
+                    if (!swapTypedRecordRule<InferenceRuleSet>(InferenceRuleSetConfig(j.at("lInferenceSet"), *_ctx),
+                            on_change))
+                        throw Exception("Failed to update inference set rule configuration");
+                }
                 else if (rule_type == VG_RULE_TYPE_TIMER)
-                    swapTypedRecordRule<TimerRule>(TimerRuleConfig(j.at("dTimer"), *_ctx), on_change);
+                {
+                    if (!swapTypedRecordRule<TimerRule>(TimerRuleConfig(j.at("dTimer"), *_ctx), on_change))
+                        throw Exception("Failed to update timer rule configuration");
+                }
                 else if (rule_type == VG_RULE_TYPE_GPIO)
-                    swapTypedRecordRule<GPIORule>(GPIORuleConfig(j.at("dGPIO"), *_ctx), on_change);
+                {
+                    if (!swapTypedRecordRule<GPIORule>(GPIORuleConfig(j.at("dGPIO"), *_ctx), on_change))
+                        throw Exception("Failed to update GPIO rule configuration");
+                }
                 else if (rule_type == VG_RULE_TYPE_TTY)
-                    swapTypedRecordRule<TTYRule>(TTYRuleConfig(j.at("dTTY"), *_ctx), on_change);
+                {
+                    if (!swapTypedRecordRule<TTYRule>(TTYRuleConfig(j.at("dTTY"), *_ctx), on_change))
+                        throw Exception("Failed to update TTY rule configuration");
+                }
                 else if (rule_type == VG_RULE_TYPE_HTTP)
-                    swapTypedRecordRule<HTTPRule>(HTTPRuleConfig(), on_change);
+                {
+                    if (!swapTypedRecordRule<HTTPRule>(HTTPRuleConfig(), on_change))
+                        throw Exception("Failed to update HTTP rule configuration");
+                }
                 else if (rule_type == VG_RULE_TYPE_ALWAYS_ON)
-                    swapTypedRecordRule<AlwaysOnRule>(AlwaysOnRuleConfig(), on_change);
+                {
+                    if (!swapTypedRecordRule<AlwaysOnRule>(AlwaysOnRuleConfig(), on_change))
+                        throw Exception("Failed to update always-on rule configuration");
+                }
                 else if (rule_type == VG_RULE_TYPE_SED)
-                    swapTypedRecordRule<SoundEventRule>(SoundEventRuleConfig(j.at("dSED"), *_ctx), on_change);
+                {
+                    if (!swapTypedRecordRule<SoundEventRule>(SoundEventRuleConfig(j.at("dSED"), *_ctx), on_change))
+                        throw Exception("Failed to update sound event rule configuration");
+                }
                 else
                     throw Exception("Invalid rule type while updating record rule config '" + rule_type_str + "'");
             }
 
-            _record_rule_config = j;
+            _record_rule_config = std::move(new_record_rule_config);
         }
         catch (const std::exception &e)
         {
@@ -663,40 +743,50 @@ private:
 
 private:
     template<typename T, typename C, typename F>
-    void swapTypedRecordRule(const C &new_config, const F &on_change) noexcept
+    bool swapTypedRecordRule(const C &new_config, const F &on_change) noexcept
     {
-        bool roollback_needed = false;
+        using ConfigType = std::decay_t<C>;
+        static_assert(std::is_nothrow_move_constructible_v<ConfigType>);
+
+        bool rollback_needed = false;
         try
         {
-            if (auto p_record_rule_config = std::get_if<std::decay_t<C>>(&_record_rule_config_variant);
-                !p_record_rule_config || *p_record_rule_config != new_config)
+            if (auto p_record_rule_config = std::get_if<ConfigType>(&_record_rule_config_variant);
+                p_record_rule_config && *p_record_rule_config == new_config)
             {
-                _record_rule.reset();
-                _record_rule = std::make_unique<T>(new_config, *_ctx);
-
                 if (!on_change())
                     throw Exception("Hook on_change failed during record rule config update, aborting change");
-
-                _record_rule_config_variant = new_config;
+                return true;
             }
+
+            auto committed_config = new_config;
+            rollback_needed = true;
+            _record_rule.reset();
+            _record_rule = std::make_unique<T>(new_config, *_ctx);
+
+            if (!on_change())
+                throw Exception("Hook on_change failed during record rule config update, aborting change");
+
+            _record_rule_config_variant.template emplace<ConfigType>(std::move(committed_config));
+            return true;
         }
-        catch (std::exception &e)
+        catch (const std::exception &e)
         {
             VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Failed to create record rule from config: ", e.what());
-            roollback_needed = true;
         }
-        if (!roollback_needed)
-            return;
+        if (!rollback_needed)
+            return false;
         try
         {
             rollbackRecordRule();
         }
-        catch (std::exception &e)
+        catch (const std::exception &e)
         {
             VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Failed to rollback record rule after creation failure: ", e.what());
             _record_rule.reset();
             _record_rule_config_variant = std::monostate {};
         }
+        return false;
     }
 
     void rollbackRecordRule()
@@ -730,6 +820,7 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _rule_stop_token;
     std::unique_ptr<std::thread> _rule_thread;
 
+    mutable std::mutex _record_config_mutex;
     mutable std::shared_mutex _schedule_rule_mutex;
     std::unique_ptr<ScheduleRuleConfig> _schedule_rule_config;
     std::unique_ptr<BaseRule> _schedule_rule;

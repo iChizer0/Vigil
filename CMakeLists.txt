@@ -301,6 +301,15 @@ protobuf_generate_cpp(ACOUSTICSD_PROTO_SRCS ACOUSTICSD_PROTO_HDRS
 	${ACOUSTICSD_PROTO_DIR}/envelope.proto
 )
 
+add_custom_command(
+	OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/envelope.pb.cc"
+		"${CMAKE_CURRENT_BINARY_DIR}/envelope.pb.h"
+	APPEND
+	DEPENDS
+		"${ACOUSTICSD_PROTO_DIR}/audio_stream.proto"
+		"${ACOUSTICSD_PROTO_DIR}/inference_stream.proto"
+)
+
 add_library(vigil)
 add_library(vigil::vigil ALIAS vigil)
 
@@ -336,7 +345,7 @@ endif()
 
 target_link_directories(vigil PUBLIC ${VG_LDPATH})
 
-target_compile_features(vigil PRIVATE cxx_std_20)
+target_compile_features(vigil PUBLIC cxx_std_20)
 
 if(VIGIL_ENABLE_WARNINGS)
 	target_compile_options(vigil PRIVATE ${VIGIL_WARNING_FLAGS})
@@ -362,7 +371,6 @@ if(VIGIL_BUILD_EXAMPLES)
 	if(VIGIL_ENABLE_WARNINGS)
 		target_compile_options(vigil_example PRIVATE ${VIGIL_WARNING_FLAGS})
 	endif()
-	target_compile_options(vigil_example PRIVATE -std=c++20)
 
 	add_executable(vigil_index_manager_test example/index_manager_test.cpp)
 	target_link_libraries(vigil_index_manager_test PRIVATE vigil::vigil)
@@ -370,7 +378,6 @@ if(VIGIL_BUILD_EXAMPLES)
 	if(VIGIL_ENABLE_WARNINGS)
 		target_compile_options(vigil_index_manager_test PRIVATE ${VIGIL_WARNING_FLAGS})
 	endif()
-	target_compile_options(vigil_index_manager_test PRIVATE -std=c++20)
 
 	add_executable(vigil_mask_test example/mask_test.cpp)
 	target_link_libraries(vigil_mask_test PRIVATE nlohmann_json::nlohmann_json)

@@ -4,6 +4,7 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -45,7 +46,7 @@ struct SoundEventRuleConfig
             auto &conf_rg = j.at("lConfidenceFilter");
             const auto lb = conf_rg.at(0).get<float>();
             const auto ub = conf_rg.at(1).get<float>();
-            if (lb > ub || lb < 0.0f || ub > 1.0f)
+            if (!std::isfinite(lb) || !std::isfinite(ub) || lb > ub || lb < 0.0f || ub > 1.0f)
                 throw Exception("Invalid confidence filter range [" + std::to_string(lb) + ", " + std::to_string(ub)
                                 + "] while parsing sound event rule");
             confidence_filter = Range<float>(lb, ub);
@@ -91,7 +92,7 @@ struct InferenceRuleConfig
             auto &conf_rg = j.at("lConfidenceFilter");
             const auto lb = conf_rg.at(0).get<float>();
             const auto ub = conf_rg.at(1).get<float>();
-            if (lb > ub || lb < 0.0f || ub > 1.0f)
+            if (!std::isfinite(lb) || !std::isfinite(ub) || lb > ub || lb < 0.0f || ub > 1.0f)
                 throw Exception("Invalid confidence filter range [" + std::to_string(lb) + ", " + std::to_string(ub)
                                 + "] while parsing inference rule");
             confidence_filter = Range<float>(lb, ub);
@@ -394,7 +395,7 @@ struct HTTPRuleConfig
 
     ~HTTPRuleConfig() = default;
 
-    bool operator==(HTTPRuleConfig &) const noexcept
+    bool operator==(const HTTPRuleConfig &) const noexcept
     {
         return true;
     }
