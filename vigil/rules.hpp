@@ -457,7 +457,7 @@ private:
             {
                 if (!std::isfinite(top_k.prob()) || !(_conf_rg & top_k.prob()))
                     continue;
-                if (!_cls_set.empty() && !_cls_set.contains(top_k.label()))
+                if (!_cls_set.contains(top_k.label()))
                     continue;
 
                 return DecodeStatus::Active;
