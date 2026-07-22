@@ -21,6 +21,11 @@ message InferencePoint {
   // CHANGED: keypoint coordinates int32 -> float to match Point_result (float) in rc_infer.h
   float x = 1;
   float y = 2;
+  // CHANGED: added score and keypoint_id to mirror Point_result in rc_infer.h.
+  // score is the keypoint confidence (not object confidence); keypoint_id refers
+  // to the caller-owned keypoint schema and is unique within an instance.
+  float score = 3;
+  int32 keypoint_id = 4;
 }
 
 // Detection results (corresponds to rc_result_detection)
@@ -75,15 +80,33 @@ message InferenceTrackingResult {
 }
 
 // Keypoints results (corresponds to rc_result_keypoints)
-message InferenceKeypointEntry {
-  InferencePoint point = 1;
-  float score = 2;
-  int32 class_id = 3;
-  string class_name = 4;
+// CHANGED: rc_result_keypoints now groups points per detected object instance
+// (rc_keypoint_instance) instead of a flat point list. An instance carries the
+// object box/score/class plus its keypoints; each point's keypoint_id refers to
+// the caller-owned keypoint schema (point names/skeleton edges stay there).
+message InferenceKeypointInstance {
+  // Object-level fields (class + box). Some keypoint models emit no object box,
+  // only keypoints: when the source rc_result_keypoints.has_box == 0 the whole
+  // object_info oneof is left unset, so these four fields are omitted on the
+  // wire as a group. Consumers must treat a missing object_info as "no box"
+  // and skip box/label drawing.
+  oneof object_info {
+    InferenceObjectInfo object = 1;
+  }
+  repeated InferencePoint points = 5;
+}
+
+// Groups the object-level (non-keypoint) fields of a keypoint instance so the
+// whole group can be presence-tracked as one unit (see object_info oneof above).
+message InferenceObjectInfo {
+  int32 class_id = 1;     // Index in the model's object-class schema.
+  string class_name = 2;  // Human-readable class name.
+  float score = 3;        // Object confidence, not keypoint confidence.
+  InferenceBox box = 4;
 }
 
 message InferenceKeypointsResult {
-  repeated InferenceKeypointEntry entries = 1;
+  repeated InferenceKeypointInstance instances = 1;
 }
 
 // Top-level message corresponding to rc_result

@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <cassert>
 #include <cerrno>
 #include <cmath>
@@ -12,7 +11,6 @@
 #include <utility>
 
 #include "inference.pb.h"
-#include "json.hpp"
 #include "vigil.hpp"
 #include "vigil_capi.h"
 #include "vigil_ctypes.h"
@@ -195,32 +193,63 @@ vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len)
         vigil::InferenceResult result;
         result.first = proto_result.timestamp_ms();
 
+        auto scale = [](float val, size_t max_dim) -> vigil::DetectionResult::value_type {
+            using value_type = vigil::DetectionResult::value_type;
+            if (!std::isfinite(val))
+                return 0;
+
+            const auto scaled = std::round(val * static_cast<float>(max_dim));
+            if (scaled <= static_cast<float>(std::numeric_limits<value_type>::min()))
+                return std::numeric_limits<value_type>::min();
+            if (scaled >= static_cast<float>(std::numeric_limits<value_type>::max()))
+                return std::numeric_limits<value_type>::max();
+            return static_cast<value_type>(scaled);
+        };
+
+        auto append_detection = [&scale](vigil::DetectionResultVec &detections, const auto &entry) {
+            vigil::DetectionResult det;
+            det.class_name = entry.class_name();
+            det.confidence = entry.score();
+
+            det.object.top_left.x = scale(entry.box().left(), vigil::kMaskWidth);
+            det.object.top_left.y = scale(entry.box().top(), vigil::kMaskHeight);
+            det.object.bottom_right.x = scale(entry.box().right(), vigil::kMaskWidth);
+            det.object.bottom_right.y = scale(entry.box().bottom(), vigil::kMaskHeight);
+
+            detections.push_back(std::move(det));
+        };
+
         if (proto_result.has_detection())
         {
             vigil::DetectionResultVec detections;
             detections.reserve(proto_result.detection().entries_size());
-
-            auto scale = [](float val, size_t max_dim) -> vigil::DetectionResult::value_type {
-                if (!std::isfinite(val))
-                    return 0;
-                auto scaled
-                    = static_cast<vigil::DetectionResult::value_type>(std::round(val * static_cast<float>(max_dim)));
-                return std::clamp(scaled, std::numeric_limits<vigil::DetectionResult::value_type>::min(),
-                    std::numeric_limits<vigil::DetectionResult::value_type>::max());
-            };
-
             for (const auto &entry: proto_result.detection().entries())
+                append_detection(detections, entry);
+            result.second = std::move(detections);
+        }
+        else if (proto_result.has_tracking())
+        {
+            // The rule engine accepts detection/classification variants only.
+            // A tracked object's current class, confidence, and box are enough
+            // to evaluate detection rules; its track_id is not represented.
+            vigil::DetectionResultVec detections;
+            detections.reserve(proto_result.tracking().entries_size());
+            for (const auto &entry: proto_result.tracking().entries())
+                append_detection(detections, entry);
+            result.second = std::move(detections);
+        }
+        else if (proto_result.has_keypoints())
+        {
+            // A keypoint instance can supply an object-level class, confidence,
+            // and box. Project those instances to detections for the rule engine;
+            // point-only instances have no representable rule-engine result.
+            vigil::DetectionResultVec detections;
+            detections.reserve(proto_result.keypoints().instances_size());
+            for (const auto &instance: proto_result.keypoints().instances())
             {
-                vigil::DetectionResult det;
-                det.class_name = entry.class_name();
-                det.confidence = entry.score();
-
-                det.object.top_left.x = scale(entry.box().left(), vigil::kMaskWidth);
-                det.object.top_left.y = scale(entry.box().top(), vigil::kMaskHeight);
-                det.object.bottom_right.x = scale(entry.box().right(), vigil::kMaskWidth);
-                det.object.bottom_right.y = scale(entry.box().bottom(), vigil::kMaskHeight);
-
-                detections.push_back(std::move(det));
+                if (!instance.has_object() || !instance.object().has_box())
+                    continue;
+                append_detection(detections, instance.object());
             }
             result.second = std::move(detections);
         }
