@@ -294,11 +294,11 @@ else()
 	protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${CMAKE_CURRENT_SOURCE_DIR}/protocol/inference.proto)
 endif()
 
-set(ACOUSTICSD_PROTO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/acousticsd_protobuf)
-protobuf_generate_cpp(ACOUSTICSD_PROTO_SRCS ACOUSTICSD_PROTO_HDRS
-	${ACOUSTICSD_PROTO_DIR}/audio_stream.proto
-	${ACOUSTICSD_PROTO_DIR}/inference_stream.proto
-	${ACOUSTICSD_PROTO_DIR}/envelope.proto
+set(ACOUSTICSLAB_PROTO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/acousticslab_proto)
+protobuf_generate_cpp(ACOUSTICSLAB_PROTO_SRCS ACOUSTICSLAB_PROTO_HDRS
+	${ACOUSTICSLAB_PROTO_DIR}/audio_stream.proto
+	${ACOUSTICSLAB_PROTO_DIR}/inference_stream.proto
+	${ACOUSTICSLAB_PROTO_DIR}/envelope.proto
 )
 
 add_custom_command(
@@ -306,8 +306,8 @@ add_custom_command(
 		"${CMAKE_CURRENT_BINARY_DIR}/envelope.pb.h"
 	APPEND
 	DEPENDS
-		"${ACOUSTICSD_PROTO_DIR}/audio_stream.proto"
-		"${ACOUSTICSD_PROTO_DIR}/inference_stream.proto"
+		"${ACOUSTICSLAB_PROTO_DIR}/audio_stream.proto"
+		"${ACOUSTICSLAB_PROTO_DIR}/inference_stream.proto"
 )
 
 add_library(vigil)
@@ -319,8 +319,8 @@ target_sources(vigil
 		$<$<BOOL:${VIGIL_ENABLE_JEMALLOC}>:vigil/allocator.cpp>
 		${PROTO_SRCS}
 		${PROTO_HDRS}
-		${ACOUSTICSD_PROTO_SRCS}
-		${ACOUSTICSD_PROTO_HDRS}
+		${ACOUSTICSLAB_PROTO_SRCS}
+		${ACOUSTICSLAB_PROTO_HDRS}
 )
 
 if(VIGIL_NEEDS_JEMALLOC AND VIGIL_JEMALLOC_EXTERNAL_PROJECT)

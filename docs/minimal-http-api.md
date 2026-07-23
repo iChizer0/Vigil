@@ -145,7 +145,7 @@ The payload depends on the `sCurrentSelected` field.
 {
     "sCurrentSelected": "SED",
     "dSED": {
-        "sID": "00000000-0000-0000-0000-000000000000", // String, acoustics head/model ID to match against inference head_id; empty string accepts any model
+        "sID": "00000000-0000-0000-0000-000000000000", // String, AcousticsLab head/model ID to match against inference head_id; empty string accepts any model
         "iConsecutiveWindowMs": 1000, // Integer, required consecutive active duration in milliseconds before activation, must be >= 0
         "lConfidenceFilter": [0.5, 1.0], // Array of number [min, max], confidence range to filter, configurable range between 0.0 and 1.0
         "lClassFilter": ["doorbell", "baby_cry"] // Array of strings, class labels to filter; empty array accepts any label

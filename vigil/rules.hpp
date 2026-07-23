@@ -442,7 +442,7 @@ private:
     {
         try
         {
-            acoustics::Envelope envelope;
+            acousticslab::v1::Envelope envelope;
             if (size > static_cast<size_t>(std::numeric_limits<int>::max())
                 || !envelope.ParseFromArray(data, static_cast<int>(size)))
                 return DecodeStatus::Malformed;
