@@ -191,7 +191,14 @@ vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len)
             return EINVAL;
 
         vigil::InferenceResult result;
-        result.first = proto_result.timestamp_ms();
+        result.timestamp_ms = proto_result.timestamp_ms();
+        if (!proto_result.source_id().empty())
+            result.source_id = proto_result.source_id();
+        if (proto_result.delivery() == INFERENCE_DELIVERY_EVENT)
+        {
+            vigil_instance->context().enqueueInferenceResult(std::move(result));
+            return 0;
+        }
 
         auto scale = [](float val, size_t max_dim) -> vigil::DetectionResult::value_type {
             using value_type = vigil::DetectionResult::value_type;
@@ -225,7 +232,7 @@ vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len)
             detections.reserve(proto_result.detection().entries_size());
             for (const auto &entry: proto_result.detection().entries())
                 append_detection(detections, entry);
-            result.second = std::move(detections);
+            result.data = std::move(detections);
         }
         else if (proto_result.has_tracking())
         {
@@ -236,7 +243,7 @@ vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len)
             detections.reserve(proto_result.tracking().entries_size());
             for (const auto &entry: proto_result.tracking().entries())
                 append_detection(detections, entry);
-            result.second = std::move(detections);
+            result.data = std::move(detections);
         }
         else if (proto_result.has_keypoints())
         {
@@ -251,7 +258,7 @@ vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len)
                     continue;
                 append_detection(detections, instance.object());
             }
-            result.second = std::move(detections);
+            result.data = std::move(detections);
         }
         else if (proto_result.has_classification())
         {
@@ -264,7 +271,7 @@ vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len)
                 cls.confidence = entry.score();
                 classifications.push_back(std::move(cls));
             }
-            result.second = std::move(classifications);
+            result.data = std::move(classifications);
         }
         else
         {
@@ -278,6 +285,26 @@ vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len)
         return EFAULT;
     }
 
+    return 0;
+}
+
+vg_sta_e vg_inference_queue_reset(const char *source_id)
+{
+    if (!source_id)
+        source_id = "";
+
+    const std::shared_lock lock(vigil_instance_mutex);
+    if (!vigil_instance)
+        return ESRCH;
+
+    try
+    {
+        vigil_instance->context().resetInference(source_id);
+    }
+    catch (const std::exception &e)
+    {
+        return EFAULT;
+    }
     return 0;
 }
 

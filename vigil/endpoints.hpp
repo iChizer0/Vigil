@@ -712,8 +712,9 @@ private:
 
     inline void ruleTaskLoop() noexcept
     {
-        if (!_ctx->tick())
-            return; // No new data to evaluate or disabled
+        _ctx->tick();
+        if (!_ctx->shared_inference_result.has_value())
+            return;
 
         vg_rule_type_e type = VG_RULE_TYPE_UNKNOWN;
         std::string id;
@@ -727,6 +728,13 @@ private:
             else if (_schedule_rule)
                 return;
         }
+        // External event must trigger record event, but behind the schedule rule check
+        if (std::holds_alternative<std::monostate>((*_ctx->shared_inference_result).data))
+        {
+            type = VG_RULE_TYPE_UNKNOWN;
+            id = _ctx->shared_inference_result->source_id;
+        }
+        else
         {
             const std::shared_lock lock_record(_record_rule_mutex);
             if (_record_rule && _record_rule->operator()(*_ctx))

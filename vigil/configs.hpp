@@ -80,6 +80,7 @@ struct InferenceRuleConfig
 {
     std::string id;
     size_t debounce_times;
+    std::unordered_set<std::string> source_filter;
     Range<float> confidence_filter;
     std::unordered_set<std::string> class_filter;
     std::vector<ROI<float>> region_filter;
@@ -88,6 +89,19 @@ struct InferenceRuleConfig
     {
         j.at("sID").get_to(id);
         j.at("iDebounceTimes").get_to(debounce_times);
+        if (j.contains("lSourceFilter"))
+        {
+            const auto &src_arr = j.at("lSourceFilter");
+            if (!src_arr.is_array())
+                throw Exception("Source filter must be an array while parsing inference rule");
+            for (const auto &src_j: src_arr)
+            {
+                const auto source = src_j.get<std::string>();
+                if (source.empty() || source.size() > 128)
+                    throw Exception("Invalid source id while parsing inference rule");
+                source_filter.emplace(source);
+            }
+        }
         {
             auto &conf_rg = j.at("lConfidenceFilter");
             const auto lb = conf_rg.at(0).get<float>();
@@ -132,6 +146,7 @@ struct InferenceRuleConfig
     {
         j["sID"] = id;
         j["iDebounceTimes"] = debounce_times;
+        j["lSourceFilter"] = nlohmann::json(source_filter);
         j["lConfidenceFilter"] = { confidence_filter.lb(), confidence_filter.ub() };
         j["lClassFilter"] = nlohmann::json(class_filter);
         if (!region_filter.empty())
@@ -154,8 +169,9 @@ struct InferenceRuleConfig
 
     bool operator==(const InferenceRuleConfig &other) const noexcept
     {
-        return id == other.id && debounce_times == other.debounce_times && confidence_filter == other.confidence_filter
-               && class_filter == other.class_filter && region_filter == other.region_filter;
+        return id == other.id && debounce_times == other.debounce_times && source_filter == other.source_filter
+               && confidence_filter == other.confidence_filter && class_filter == other.class_filter
+               && region_filter == other.region_filter;
     }
 };
 

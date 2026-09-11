@@ -288,7 +288,17 @@ using DetectionResult = Detection<BoundingBox<uint8_t>>;
 using DetectionResultVec = std::vector<DetectionResult>;
 using ClassificationResult = Classification;
 using ClassificationResultVec = std::vector<ClassificationResult>;
-using InferenceResult = std::pair<int64_t, std::variant<DetectionResultVec, ClassificationResultVec>>;
+
+struct InferenceResult final
+{
+    int64_t timestamp_ms;
+    std::string source_id;
+    std::variant<std::monostate, DetectionResultVec, ClassificationResultVec> data; // Monostate represents event
+
+    InferenceResult() noexcept : timestamp_ms(0), source_id(), data(std::monostate {}) { }
+
+    ~InferenceResult() = default;
+};
 
 template<typename T>
 struct Polygon final

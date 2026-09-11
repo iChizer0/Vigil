@@ -120,6 +120,7 @@ The payload depends on the `sCurrentSelected` field.
     "lInferenceSet": [
         {
             "sID": "person_detection", // String, rule ID (uniqueness not enforced but recommended)
+            "lSourceFilter": ["builtin", "fall-detection"], // Optional; array of source ids to consume, empty or absent matches every source. "builtin" is the on-device inference pipeline
             "iDebounceTimes": 3, // Integer, number of consecutive frames to confirm the activation
             "lConfidenceFilter": [0.5, 1.0], // Array of number [min, max], confidence range to filter, configurable range between 0.0 and 1.0 for each part
             "lClassFilter": ["person", "car"], // Array of strings, class names to filter
@@ -138,6 +139,10 @@ The payload depends on the `sCurrentSelected` field.
     "message": "" // String, optional, present only on failure
 }
 ```
+
+`lSourceFilter` selects the result sources this rule consumes, matched against the canonical source id. Source ids are stamped by the receiving ingress from the peer identity; a producer's self-reported `source_id` is never honored verbatim. An absent or empty filter matches every source, preserving the pre-source-filter contract under which rules consumed builtin and validated ResultSink traffic. Results from unlisted sources neither advance nor decay this rule's debounce state.
+
+Applications whose post-processing does not fit the detection/classification result formats decide on recording internally and emit a discrete event (`INFERENCE_DELIVERY_EVENT` with no result payload) instead. Subject to the schedule rule, such an event triggers recording immediately with the source id as the event id, bypassing rule filters and debounce entirely.
 
 #### Sound Event Rule
 
@@ -253,6 +258,8 @@ Notes:
 ## Storage API
 
 ### Storage Configuration
+
+Mount-root ownership follows a shared-filesystem contract: the internal storage root (`/userdata`, `root:root 01777`) and any bind alias of it are owned by the factory image, retaining admin/application write access while protecting root-owned configuration entries; the recording service never modifies them. Vigil applies the historical `1000:1000 0777` policy only to slots the integrator declared external via the storage C API (`internal_device_path`), and recording subdirectories are unchanged.
 
 Get or set the storage configuration.
 

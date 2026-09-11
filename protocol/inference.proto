@@ -45,6 +45,9 @@ message InferenceClassificationEntry {
   float score = 1;
   int32 class_id = 2;
   string class_name = 3;
+  // Present only when the classification is region-scoped (e.g. per-face
+  // attributes); consumers check has_box(). Unset means whole-frame.
+  InferenceBox box = 4;
 }
 
 message InferenceClassificationResult {
@@ -109,11 +112,36 @@ message InferenceKeypointsResult {
   repeated InferenceKeypointInstance instances = 1;
 }
 
+// Whether a result is a per-frame observation or a discrete event. An event is
+// an edge-like declaration from the source's own post-processing: applications
+// whose data does not fit the builtin result formats decide internally whether
+// recording is warranted and, if so, emit an event. A recording rule consumes
+// frames through its debounce, while a matching event triggers it immediately.
+// The builtin pipeline only produces FRAME.
+enum InferenceDelivery {
+  INFERENCE_DELIVERY_FRAME = 0;  // per-frame observation, drives rule debounce
+  INFERENCE_DELIVERY_EVENT = 1;  // discrete event; replaces the model_id sentinel
+}
+
 // Top-level message corresponding to rc_result
 message InferenceResult {
   TaskType task_type = 1;
-  int64 timestamp_ms = 2;  // Timestamp in milliseconds since epoch
-  int32 model_id = 3;      // Identifier for the model that produced the result
+  // Timestamp in milliseconds since epoch
+  int64 timestamp_ms = 2;
+  // Identifier for the model that produced the result;
+  // the INT32_MIN event sentinel is deprecated, use delivery
+  int32 model_id = 3;
+  // Canonical source identity (builtin is the on-device
+  // pipeline); asserted by the producing ingress and never
+  // honored verbatim from a peer: a receiving ingress
+  // overwrites it with the peercred-derived identity
+  string source_id = 4;
+  // Frame PTS (CLOCK_MONOTONIC us), 0 = no frame
+  uint64 pts_us = 5;
+  // FRAME for the builtin pipeline and legacy payloads. During the transition,
+  // producers emitting EVENT must keep setting the model_id sentinel so older
+  // consumers still recognize the result as an event.
+  InferenceDelivery delivery = 6;
   oneof data {
     InferenceDetectionResult detection = 10;
     InferenceClassificationResult classification = 11;

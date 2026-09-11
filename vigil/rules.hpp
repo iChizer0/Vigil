@@ -492,14 +492,14 @@ class InferenceRule final: public BaseRule
 public:
     InferenceRule(const InferenceRuleConfig &cfg, const Context &ctx) noexcept
         : BaseRule(VG_RULE_TYPE_INFERENCE, 0), _sub_ref(ctx.inference_subscribers), _id(cfg.id), _active_times(0),
-          _active_times_min(cfg.debounce_times), _conf_rg(cfg.confidence_filter),
-          _cls_set(cfg.class_filter.begin(), cfg.class_filter.end())
+          _active_times_min(cfg.debounce_times), _source_set(cfg.source_filter.begin(), cfg.source_filter.end()),
+          _conf_rg(cfg.confidence_filter), _cls_set(cfg.class_filter.begin(), cfg.class_filter.end())
     {
         updateMaskRegion(cfg.region_filter);
 
         VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Initialized inference rule: '", _id,
-            "' with active_times_min: ", _active_times_min, ", confidence_filter: [", _conf_rg.lb(), ", ",
-            _conf_rg.ub(), "], class_filter size: ", _cls_set.size(),
+            "' with active_times_min: ", _active_times_min, ", source_filter size: ", _source_set.size(),
+            ", confidence_filter: [", _conf_rg.lb(), ", ", _conf_rg.ub(), "], class_filter size: ", _cls_set.size(),
             ", region_filter size: ", cfg.region_filter.size(), ", mask initialized: ", (_msk_rng ? "yes" : "no"));
         if constexpr (VG_LOG_LEVEL == vg_log_level_e::VG_LOG_LEVEL_DEBUG)
         {
@@ -522,7 +522,20 @@ public:
 
     bool operator()(const Context &ctx) const noexcept override
     {
-        return finalActive(filterDetection(ctx) || filterClassification(ctx));
+        if (!ctx.shared_inference_result.has_value()) [[unlikely]]
+            return false;
+        const auto &result = ctx.shared_inference_result.value();
+
+        if (!_source_set.empty() && !_source_set.contains(result.source_id))
+            return false;
+
+        bool active = false;
+        if (const auto *detections = std::get_if<DetectionResultVec>(&result.data))
+            active = filterDetection(*detections);
+        else if (const auto *classifications = std::get_if<ClassificationResultVec>(&result.data))
+            active = filterClassification(*classifications);
+
+        return finalActive(active);
     }
 
 private:
@@ -557,13 +570,13 @@ private:
         _msk_rng = std::move(p);
     }
 
-    bool filterDetection(const Context &ctx) const noexcept
+    bool filterDetection(const DetectionResultVec &detections) const noexcept
     {
-        static_assert(std::is_unsigned_v<decltype(ctx.shared_inference_result.detections)::value_type::value_type>,
+        static_assert(std::is_unsigned_v<DetectionResultVec::value_type::value_type>,
             "Value type of detection result should be unsigned.");
 
         bool active = false;
-        for (const auto &det: ctx.shared_inference_result.detections)
+        for (const auto &det: detections)
         {
             if (!(_conf_rg & det.confidence))
                 continue;
@@ -581,10 +594,10 @@ private:
         return active;
     }
 
-    bool filterClassification(const Context &ctx) const noexcept
+    bool filterClassification(const ClassificationResultVec &classifications) const noexcept
     {
         bool active = false;
-        for (const auto &cls: ctx.shared_inference_result.classifications)
+        for (const auto &cls: classifications)
         {
             if (!(_conf_rg & cls.confidence))
                 continue;
@@ -605,6 +618,7 @@ private:
     mutable int _active_times;
     int _active_times_min;
 
+    std::unordered_set<std::string> _source_set;
     Range<float> _conf_rg;
     std::unordered_set<std::string> _cls_set;
     std::unique_ptr<Mask<kMaskWidth, kMaskHeight>> _msk_rng;

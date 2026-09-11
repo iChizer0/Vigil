@@ -11,13 +11,12 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <shared_mutex>
+#include <string_view>
 #include <thread>
 #include <tuple>
 #include <type_traits>
 #include <utility>
-#include <variant>
 
 #include "constants.hpp"
 #include "log.hpp"
@@ -71,13 +70,13 @@ struct Context
     }
 
     // Tick function to update context state
-    bool tick() noexcept
+    void tick() noexcept
     {
         if (!record_rule_enabled.load(std::memory_order_relaxed))
         {
             shared_inference_result.reset();
             shared_rule_event.reset(WriteEvent::Status::Canceled);
-            return false;
+            return;
         }
 
         shared_time.tick();
@@ -85,20 +84,18 @@ struct Context
         if (inference_subscribers.load(std::memory_order_relaxed) > 0)
         {
             const std::unique_lock lock(inference_mutex);
-            if (inference_queue.empty())
-                return false;
-            auto &[ts, result] = inference_queue.front();
-            shared_time.updateUnixTime(ts); // Update timestamp to that of the inference result
-            if (auto *detection_vec = std::get_if<DetectionResultVec>(&result))
-                shared_inference_result.detections = std::move(*detection_vec);
-            else if (auto *classification_vec = std::get_if<ClassificationResultVec>(&result))
-                shared_inference_result.classifications = std::move(*classification_vec);
-            inference_queue.pop();
+            auto it = inference_queue.begin();
+            if (it == inference_queue.end())
+            {
+                shared_inference_result.reset();
+                return;
+            }
+            shared_time.updateUnixTime(it->timestamp_ms); // Update timestamp to that of the inference result
+            shared_inference_result = std::move(*it);
+            inference_queue.pop_front();
         }
         else
-            shared_inference_result.reset();
-
-        return true;
+            shared_inference_result.reset(); // Clear the optional if no subscribers are present
     }
 
     // Inference result enqueueing (thread-safe)
@@ -111,18 +108,35 @@ struct Context
             || inference_subscribers.load(std::memory_order_relaxed) == 0)
         {
             const std::unique_lock lock(inference_mutex);
-
-            while (!inference_queue.empty())
-                inference_queue.pop();
-
+            inference_queue.clear();
             return; // Skip enqueueing new inference results
         }
 
         const std::unique_lock lock(inference_mutex);
 
         while (inference_queue.size() >= kInferenceQueueSize)
-            inference_queue.pop();
-        inference_queue.push(std::forward<T>(result));
+            inference_queue.pop_front();
+        inference_queue.push_back(std::forward<T>(result));
+    }
+
+    void resetInference(std::string_view source_id)
+    {
+        if (source_id.empty())
+        {
+            const std::unique_lock lock(inference_mutex);
+            inference_queue.clear();
+        }
+        else
+        {
+            const std::unique_lock lock(inference_mutex);
+            for (auto it = inference_queue.begin(); it != inference_queue.end();)
+            {
+                if (it->source_id == source_id)
+                    it = inference_queue.erase(it);
+                else
+                    ++it;
+            }
+        }
     }
 
     // Media frame enqueueing (thread-safe)
@@ -178,7 +192,7 @@ struct Context
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<int> inference_subscribers = 0;
     // Sync inference results queue, updated in enqueueInferenceResult()
     std::mutex inference_mutex;
-    std::queue<InferenceResult> inference_queue;
+    std::deque<InferenceResult> inference_queue;
     // Sync video/audio frame buffers, updated in enqueueMediaFrame()
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> media_paused = false;
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> media_writers_active = 0;
@@ -446,19 +460,7 @@ struct Context
     } shared_time;
 
     // Shared inference results (not thread-safe)
-    struct SharedInferenceResult
-    {
-        DetectionResultVec detections = {};
-        ClassificationResultVec classifications = {};
-
-        void reset()
-        {
-            if (!detections.empty())
-                detections.clear();
-            if (!classifications.empty())
-                classifications.clear();
-        }
-    } shared_inference_result;
+    std::optional<InferenceResult> shared_inference_result;
 
     // Constructor
     Context(const vg_config_t &cfg) : c_api(cfg)

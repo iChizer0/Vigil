@@ -90,6 +90,14 @@ vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue);
  */
 vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len);
 
+/**
+ * @brief Invalidates queued state for one inference source specified by source_id (thread-safe).
+ *
+ * @param source_id Identifier of the inference source whose queued state should be reset, empty means all sources.
+ * @return vg_sta_e 0 on success, otherwise an error status.
+ */
+vg_sta_e vg_inference_queue_reset(const char *source_id);
+
 // - MARK: HTTP API
 
 // Rule Endpoint APIs
