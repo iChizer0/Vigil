@@ -1419,8 +1419,9 @@ private:
                         _mount_path, ", code: ", ret);
                     return false;
                 }
-                EnsureOwnerAndPermissions(_mount_path, kStorageDefaultUid, kStorageDefaultGid,
-                    fs::perms::owner_all | fs::perms::group_all | fs::perms::others_all);
+                if (!_internal)
+                    EnsureOwnerAndPermissions(_mount_path, kStorageDefaultUid, kStorageDefaultGid,
+                        fs::perms::owner_all | fs::perms::group_all | fs::perms::others_all);
             }
             catch (const std::exception &e)
             {
