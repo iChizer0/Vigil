@@ -17,6 +17,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 #include "constants.hpp"
 #include "log.hpp"
@@ -81,7 +82,6 @@ struct Context
 
         shared_time.tick();
 
-        if (inference_subscribers.load(std::memory_order_relaxed) > 0)
         {
             const std::unique_lock lock(inference_mutex);
             auto it = inference_queue.begin();
@@ -94,8 +94,6 @@ struct Context
             shared_inference_result = std::move(*it);
             inference_queue.pop_front();
         }
-        else
-            shared_inference_result.reset(); // Clear the optional if no subscribers are present
     }
 
     // Inference result enqueueing (thread-safe)
@@ -104,19 +102,23 @@ struct Context
     {
         static_assert(std::is_same_v<std::remove_cvref_t<T>, InferenceResult>,
             "enqueueInferenceResult only accepts InferenceResult type.");
-        if (!record_rule_enabled.load(std::memory_order_relaxed)
-            || inference_subscribers.load(std::memory_order_relaxed) == 0)
+        if (!record_rule_enabled.load(std::memory_order_relaxed))
         {
             const std::unique_lock lock(inference_mutex);
             inference_queue.clear();
             return; // Skip enqueueing new inference results
         }
 
-        const std::unique_lock lock(inference_mutex);
+        if (inference_subscribers.load(std::memory_order_relaxed) == 0
+            && !std::holds_alternative<std::monostate>(result.data))
+            return;
 
-        while (inference_queue.size() >= kInferenceQueueSize)
-            inference_queue.pop_front();
-        inference_queue.push_back(std::forward<T>(result));
+        {
+            const std::unique_lock lock(inference_mutex);
+            while (inference_queue.size() >= kInferenceQueueSize)
+                inference_queue.pop_front();
+            inference_queue.push_back(std::forward<T>(result));
+        }
     }
 
     void resetInference(std::string_view source_id)
