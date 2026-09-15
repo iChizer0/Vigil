@@ -20,6 +20,7 @@
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <fcntl.h>
@@ -109,7 +110,7 @@ public:
         return {};
     }
 
-    virtual bool operator()(const Context &ctx) const noexcept = 0;
+    virtual std::shared_ptr<EventOwner> operator()(const Context &ctx) const = 0;
 
     std::strong_ordering operator<=>(const BaseRule &other) const noexcept
     {
@@ -159,9 +160,11 @@ public:
         return _id;
     }
 
-    bool operator()(const Context &ctx [[maybe_unused]]) const noexcept override
+    std::shared_ptr<EventOwner> operator()(const Context &ctx [[maybe_unused]]) const override
     {
-        return _last_active.exchange(false, std::memory_order_acq_rel);
+        return _last_active.exchange(false, std::memory_order_acq_rel)
+                   ? std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event)
+                   : nullptr;
     }
 
 private:
@@ -520,14 +523,14 @@ public:
         return _id;
     }
 
-    bool operator()(const Context &ctx) const noexcept override
+    std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
         if (!ctx.shared_inference_result.has_value()) [[unlikely]]
-            return false;
+            return nullptr;
         const auto &result = ctx.shared_inference_result.value();
 
         if (!_source_set.empty() && !_source_set.contains(result.source_id))
-            return false;
+            return nullptr;
 
         bool active = false;
         if (const auto *detections = std::get_if<DetectionResultVec>(&result.data))
@@ -535,7 +538,12 @@ public:
         else if (const auto *classifications = std::get_if<ClassificationResultVec>(&result.data))
             active = filterClassification(*classifications);
 
-        return finalActive(active);
+        return finalActive(active)
+                   ? std::make_shared<EventOwner>(type(), id(), result.source_id,
+                         std::holds_alternative<std::monostate>(result.data) ? EventOwner::SourceDelivery::Event
+                                                                             : EventOwner::SourceDelivery::Frame,
+                         result.timestamp_ms)
+                   : nullptr;
     }
 
 private:
@@ -645,18 +653,22 @@ public:
         return _last_activated_id;
     }
 
-    bool operator()(const Context &ctx) const noexcept override
+    std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
         _last_activated_id.clear();
         for (const auto &rule: _rules)
         {
-            if (rule && (*rule)(ctx))
+            if (!rule) [[unlikely]]
+                continue;
+
+            if (auto evt = (*rule)(ctx); evt)
             {
+                evt->type = type();
                 _last_activated_id = rule->id();
-                return true;
+                return evt;
             }
         }
-        return false;
+        return nullptr;
     }
 
 private:
@@ -677,15 +689,15 @@ public:
 
     ~TimerRule() = default;
 
-    bool operator()(const Context &ctx) const noexcept override
+    std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
         const auto now = ctx.shared_time.steadyTime();
         if (now - _last_trigger_time >= _interval)
         {
             _last_trigger_time = now;
-            return true;
+            return std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event);
         }
-        return false;
+        return nullptr;
     }
 
 private:
@@ -719,13 +731,17 @@ public:
         _release_cb(_pin_number);
     }
 
-    bool operator()(const Context &ctx) const noexcept override
+    std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
         if (_event != VG_GPIO_PIN_EVT_NONE)
-            return ctx.c_api.gpios.sync_event_cb(_pin_number) == _event;
+            return ctx.c_api.gpios.sync_event_cb(_pin_number) == _event
+                       ? std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event)
+                       : nullptr;
         else if (_level != VG_GPIO_PIN_LVL_NONE)
-            return ctx.c_api.gpios.sync_level_cb(_pin_number) == _level;
-        return false;
+            return ctx.c_api.gpios.sync_level_cb(_pin_number) == _level
+                       ? std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event)
+                       : nullptr;
+        return nullptr;
     }
 
 private:
@@ -759,7 +775,7 @@ public:
         closeSocket();
     }
 
-    bool operator()(const Context &ctx) const noexcept override
+    std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
         if (!isSocketOpen())
             openSocket(ctx);
@@ -802,7 +818,7 @@ public:
 
         const bool found = _found > 0;
         _found -= found;
-        return found;
+        return found ? std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event) : nullptr;
     }
 
 private:
@@ -886,13 +902,23 @@ public:
 
     vg_sta_e tryActivate() noexcept
     {
-        return _ctx.tryUpdateRuleEvent(type(), id()) ? 0 : EBUSY;
+        try
+        {
+            return _ctx.tryCreateWriterEvent(
+                       std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event))
+                       ? 0
+                       : EBUSY;
+        }
+        catch (...)
+        {
+            return EFAULT;
+        }
     }
 
 private:
-    bool operator()(const Context &ctx [[maybe_unused]]) const noexcept override
+    std::shared_ptr<EventOwner> operator()(const Context &ctx [[maybe_unused]]) const override
     {
-        return false;
+        return nullptr;
     }
 
 private:
@@ -911,22 +937,22 @@ public:
 
     ~AlwaysOnRule() = default;
 
-    bool operator()(const Context &ctx) const noexcept override
+    std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
         if (ctx.media_paused.load(std::memory_order_relaxed)
             || ctx.media_writers_active.load(std::memory_order_relaxed) > 0)
-            return false;
+            return nullptr;
 
         const auto now = ctx.shared_time.steadyTime();
         if (const auto interval = currentInterval(ctx); now - _last_trigger_time >= interval)
         {
             if (ctx.shared_rule_event.getCurrent())
-                return false;
+                return nullptr;
 
             _last_trigger_time = now;
-            return true;
+            return std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event);
         }
-        return false;
+        return nullptr;
     }
 
 private:
@@ -965,9 +991,11 @@ public:
     }
 
 private:
-    bool operator()(const Context &ctx) const noexcept override
+    std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
-        return isActive(ctx.shared_time.localTime());
+        return isActive(ctx.shared_time.localTime())
+                   ? std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event)
+                   : nullptr;
     }
 
 private:

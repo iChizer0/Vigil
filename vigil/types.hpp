@@ -86,11 +86,12 @@ struct WriteEvent
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<Status> status;
     const std::chrono::steady_clock::time_point timepoint;
     const int64_t timestamp;
+    const uint64_t owner_uid;
 
-    WriteEvent() : status(Status::Pending), timepoint(), timestamp(0) { }
+    WriteEvent() : status(Status::Pending), timepoint(), timestamp(0), owner_uid(0) { }
 
-    WriteEvent(std::chrono::steady_clock::time_point tp, int64_t ts)
-        : status(Status::Pending), timepoint(tp), timestamp(ts)
+    WriteEvent(std::chrono::steady_clock::time_point tp, int64_t ts, uint64_t o)
+        : status(Status::Pending), timepoint(tp), timestamp(ts), owner_uid(o)
     {
     }
 
@@ -99,13 +100,50 @@ struct WriteEvent
 
 struct EventOwner
 {
-    vg_rule_type_e type;
-    std::string id;
-    int64_t timestamp;
+    enum SourceDelivery { Unknown = 0, Frame, Event };
 
-    EventOwner(vg_rule_type_e t, const std::string &i, int64_t ts) : type(t), id(i), timestamp(ts) { }
+    static inline const char *SourceDeliveryString(SourceDelivery sd) noexcept
+    {
+        switch (sd)
+        {
+            case SourceDelivery::Frame:
+                return "FRAME";
+            case SourceDelivery::Event:
+                return "EVENT";
+            default:
+                return "";
+        }
+    }
+
+    vg_rule_type_e type;
+    const std::string id;
+    const std::string source_id;
+    const SourceDelivery source_delivery;
+    const int64_t timestamp;
+    const uint64_t uid;
+
+    EventOwner(vg_rule_type_e tp, const std::string &id, const std::string &src_id, SourceDelivery src_delivery,
+        int64_t ts
+        = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+              .count())
+        : type(tp), id(id), source_id(src_id), source_delivery(src_delivery), timestamp(ts), uid(NextUid(ts))
+    {
+    }
 
     ~EventOwner() = default;
+
+    static uint64_t NextUid(uint64_t ts) noexcept
+    {
+        for (auto prev = _last_uid.load(std::memory_order_relaxed);;)
+        {
+            const auto next = std::max(ts, prev + 1);
+            if (_last_uid.compare_exchange_weak(prev, next, std::memory_order_relaxed))
+                return next;
+        }
+    }
+
+private:
+    alignas(kHardwareDestructiveInterferenceSize) static inline std::atomic<uint64_t> _last_uid { 0 };
 };
 
 template<typename T>

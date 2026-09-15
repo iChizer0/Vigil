@@ -11,7 +11,9 @@
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <tuple>
@@ -75,6 +77,7 @@ struct Context
     {
         if (!record_rule_enabled.load(std::memory_order_relaxed))
         {
+            resetInference();
             shared_inference_result.reset();
             shared_rule_event.reset(WriteEvent::Status::Canceled);
             return;
@@ -121,7 +124,7 @@ struct Context
         }
     }
 
-    void resetInference(std::string_view source_id)
+    void resetInference(std::string_view source_id = {})
     {
         if (source_id.empty())
         {
@@ -156,36 +159,47 @@ struct Context
         capture_media_buffer.clear();
     }
 
-    // Try to update rule event
-    bool tryUpdateRuleEvent(vg_rule_type_e type, const std::string &id) const noexcept
+    bool tryCreateWriterEvent(std::shared_ptr<EventOwner> owner) const noexcept
     {
+        if (!owner)
+            return false;
+        const auto [steady_time, unix_time, _] = shared_time.getAll();
+        bool writer_created = false;
         try
         {
-            const auto [steady_time, unix_time, _] = shared_time.getAll();
-            if (c_api.basic.on_rule_event_cb)
-            {
-                const auto evt = vg_rule_evt_t { .type = type,
-                    .id = id.c_str(),
-                    .uid
-                    = std::chrono::duration_cast<std::chrono::milliseconds>(steady_time.time_since_epoch()).count(),
-                    .timestamp = unix_time };
-                c_api.basic.on_rule_event_cb(&evt);
-            }
             {
                 const std::unique_lock lock(shared_rule_event.mutex);
                 if (!shared_rule_event.current)
                 {
-                    shared_rule_event.current = std::make_shared<WriteEvent>(steady_time, unix_time);
-                    shared_rule_event.current_owner = std::make_shared<EventOwner>(type, id, unix_time);
-                    return true;
+                    auto event = std::make_shared<WriteEvent>(steady_time, unix_time, owner->uid);
+                    shared_rule_event.current = std::move(event);
+                    shared_rule_event.current_owner = owner;
+                    writer_created = true;
                 }
             }
+            if (c_api.basic.on_rule_event_cb)
+            {
+                const auto evt = vg_rule_evt_t { .type = owner->type,
+                    .id = owner->id.c_str(),
+                    .timestamp = owner->timestamp,
+                    .uid = owner->uid,
+                    .source_id = owner->source_id.c_str(),
+                    .source_delivery = EventOwner::SourceDeliveryString(owner->source_delivery),
+                    .writer_created = writer_created };
+                c_api.basic.on_rule_event_cb(&evt);
+            }
         }
-        catch (std::exception &e)
+        catch (const std::exception &e)
         {
-            VG_LOG(log, VG_LOG_LEVEL_ERROR, "Failed to create rule evaluation events: ", e.what());
+            VG_LOG(log, VG_LOG_LEVEL_ERROR, "Failed to publish rule evaluation event: ", e.what());
+            return false;
         }
-        return false;
+        catch (...)
+        {
+            VG_LOG(log, VG_LOG_LEVEL_ERROR, "Unknown exception occurred while publishing rule evaluation event");
+            return false;
+        }
+        return writer_created;
     }
 
     // Shared data

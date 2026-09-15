@@ -4,7 +4,7 @@
 #ifdef VG_CTYPES_VERSION
 #error "Duplicate definition of VG_CTYPES_VERSION"
 #else
-#define VG_CTYPES_VERSION "2025.11.25"
+#define VG_CTYPES_VERSION "2026.09.15"
 #endif
 
 #include <stdbool.h>
@@ -91,10 +91,13 @@ typedef enum vg_rule_type_e {
 
 typedef struct vg_rule_evt_t
 {
-    vg_rule_type_e type; /**< Type of the last evaluated rule. */
-    const char *id;      /**< Internal managed string, null terminated, do not free. */
-    int64_t uid;         /**< Unique identifier for the rule event, can be used for event correlation. */
-    int64_t timestamp;   /**< Timestamp of the last evaluation. */
+    vg_rule_type_e type;         /**< Type of the last evaluated rule. */
+    const char *id;              /**< Internal managed string, null terminated, do not free. */
+    int64_t timestamp;           /**< Timestamp of the last evaluation. */
+    uint64_t uid;                /**< Unique identifier for the rule event, can be used for event correlation. */
+    const char *source_id;       /**< Canonical source snapshot, null/empty for non-inference triggers. */
+    const char *source_delivery; /**< FRAME or EVENT, null/empty when unknown. */
+    bool writer_created;         /**< Indicates whether a new recording writer was created. */
 } vg_rule_evt_t;
 
 typedef enum vg_file_evt_op_type_e {
@@ -107,8 +110,8 @@ typedef struct vg_file_evt_t
     const char *path;              /**< Internal managed string, null terminated, do not free. */
     size_t size_bytes;             /**< Size of the file in bytes. */
     const char *attributes;        /**< Internal managed string, null terminated, do not free. */
-    int64_t event_uid;             /**< Unique identifier for the file event, can be used for event correlation. */
-    int64_t timestamp; /**< Timestamp of the file event (can be corresponding to the timestamp of rule event). */
+    int64_t timestamp;  /**< Timestamp of the file event (can be corresponding to the timestamp of rule event). */
+    uint64_t event_uid; /**< Unique identifier for the file event, can be used for event correlation. */
 } vg_file_evt_t;
 
 /**

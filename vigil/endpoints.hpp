@@ -545,6 +545,7 @@ public:
                     auto obj = nlohmann::json::object();
                     obj["sStatus"] = WriteEvent::StatusString(evt->status.load(std::memory_order_relaxed));
                     obj["iTimestamp"] = evt->timestamp;
+                    obj["iOwnerUID"] = evt->owner_uid;
                     return obj;
                 };
 
@@ -554,7 +555,10 @@ public:
                     auto obj = nlohmann::json::object();
                     obj["sRuleType"] = BaseRule::TypeString(owner->type);
                     obj["sRuleID"] = owner->id;
+                    obj["sSourceID"] = owner->source_id;
+                    obj["sSourceDelivery"] = EventOwner::SourceDeliveryString(owner->source_delivery);
                     obj["iTimestamp"] = owner->timestamp;
+                    obj["iUID"] = owner->uid;
                     return obj;
                 };
 
@@ -704,48 +708,53 @@ private:
         while (!_rule_stop_token.load(std::memory_order_relaxed))
         {
             const auto start = std::chrono::steady_clock::now();
-            ruleTaskLoop();
+            try
+            {
+                ruleTaskLoop();
+            }
+            catch (const std::exception &e)
+            {
+                VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Exception caught in rule thread: ", e.what());
+            }
             if (auto duration = std::chrono::steady_clock::now() - start; duration < kRuleEvaluationInterval)
                 std::this_thread::sleep_for(kRuleEvaluationInterval - duration);
         }
     }
 
-    inline void ruleTaskLoop() noexcept
+    inline void ruleTaskLoop()
     {
         _ctx->tick();
+        if (!_ctx->record_rule_enabled.load(std::memory_order_relaxed))
+            return;
 
-        vg_rule_type_e type = VG_RULE_TYPE_UNKNOWN;
-        std::string id;
+        std::shared_ptr<EventOwner> event_owner { nullptr };
         {
             const std::shared_lock lock(_schedule_rule_mutex);
-            if (_schedule_rule && _schedule_rule->operator()(*_ctx))
+            if (_schedule_rule)
             {
-                type = _schedule_rule->type();
-                id = _schedule_rule->id();
+                event_owner = _schedule_rule->operator()(*_ctx);
+                if (!event_owner)
+                    return;
             }
-            else if (_schedule_rule)
-                return;
         }
 
         if (_ctx->shared_inference_result.has_value()
             && std::holds_alternative<std::monostate>(_ctx->shared_inference_result->data))
         {
-            type = VG_RULE_TYPE_UNKNOWN;
-            id = _ctx->shared_inference_result->source_id;
+            event_owner = std::make_shared<EventOwner>(VG_RULE_TYPE_UNKNOWN, "",
+                _ctx->shared_inference_result->source_id, EventOwner::SourceDelivery::Event);
         }
         else
         {
             const std::shared_lock lock_record(_record_rule_mutex);
-            if (_record_rule && _record_rule->operator()(*_ctx))
-            {
-                type = _record_rule->type();
-                id = _record_rule->id();
-            }
-            else
+            if (!_record_rule)
+                return;
+            event_owner = _record_rule->operator()(*_ctx);
+            if (!event_owner)
                 return;
         }
 
-        _ctx->tryUpdateRuleEvent(type, id);
+        _ctx->tryCreateWriterEvent(std::move(event_owner));
     }
 
 private:
@@ -1266,10 +1275,10 @@ private:
 
         const auto steady_now = std::chrono::steady_clock::now();
         const auto system_now = std::chrono::system_clock::now();
+        const auto unix_ms = static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(system_now.time_since_epoch()).count());
 
-        auto write_event = std::make_shared<WriteEvent>(steady_now,
-            static_cast<int64_t>(
-                std::chrono::duration_cast<std::chrono::milliseconds>(system_now.time_since_epoch()).count()));
+        auto write_event = std::make_shared<WriteEvent>(steady_now, unix_ms, EventOwner::NextUid(unix_ms));
 
         auto fmt = config.settings->format;
         std::transform(fmt.begin(), fmt.end(), fmt.begin(), [](unsigned char c) { return std::tolower(c); });
