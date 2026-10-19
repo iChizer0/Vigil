@@ -353,10 +353,9 @@ VG_TEST_CASE(direct_event_bypasses_the_selected_rule_on_its_tick)
     VG_CHECK_EQ(events[0].id, "");
     VG_CHECK_EQ(events[0].source_id, "cam0");
     VG_CHECK_EQ(events[0].source_delivery, "EVENT");
-    VG_CHECK(!events[0].writer_created); // the timer's writer event is still pending
-    // Today the direct EVENT owner is stamped with the dispatch time, not with the input time (4242);
-    // the input time only reaches the context clock. See docs/PLAN.md section 6.1.
-    VG_CHECK(events[0].timestamp >= before && events[0].timestamp <= after);
+    VG_CHECK(!events[0].writer_created);                // the timer's writer event is still pending
+    VG_CHECK_EQ(events[0].timestamp, int64_t { 4242 }); // the input's time is the event time
+    VG_CHECK(before <= after);
     VG_CHECK_EQ(f.ctx->inference_queue.size(), size_t { 0 });
 
     f.evaluate(); // tick 3: no input, the timer is evaluated again
@@ -433,6 +432,39 @@ VG_TEST_CASE(rule_disable_cancels_the_current_event_and_rule_info_reports_it)
     VG_CHECK_EQ(info.at("dLastRuleEvent").at("sStatus").get<std::string>(), "CANCELED");
     VG_CHECK_EQ(info.at("dLastRuleEvent").at("iOwnerUID").get<uint64_t>(), events[0].uid);
     VG_CHECK_EQ(info.at("dLastRuleEventOwner").at("sRuleType").get<std::string>(), "TIMER");
+}
+
+VG_TEST_CASE(rule_info_reports_the_event_time_and_the_dispatch_time)
+{
+    Fixture f;
+    f.start();
+    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0); // never fires from the loop by itself
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
+
+    const auto before = NowMs();
+    f.ctx->enqueueInferenceResult(DirectEvent(4242, "cam0"));
+    f.evaluate();
+    const auto after = NowMs();
+    const auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_UNKNOWN);
+    VG_CHECK(events[0].writer_created);
+    VG_CHECK_EQ(events[0].timestamp, int64_t { 4242 });
+
+    auto owner = f.endpoint->getRuleInfo().at("dLastRuleEventOwner");
+    VG_CHECK_EQ(owner.at("sRuleType").get<std::string>(), "UNKNOWN");
+    VG_CHECK_EQ(owner.at("sSourceID").get<std::string>(), "cam0");
+    VG_CHECK_EQ(owner.at("iTimestamp").get<int64_t>(), int64_t { 4242 });
+    const auto dispatched = owner.at("iDispatchTimestamp").get<int64_t>();
+    VG_CHECK(dispatched >= before && dispatched <= after);
+    VG_CHECK_EQ(owner.at("iUID").get<uint64_t>(), events[0].uid);
+
+    // An owner that observes its own condition reports the same value twice.
+    f.ctx->shared_rule_event.reset(WriteEvent::Status::Completed);
+    VG_CHECK_EQ(f.activateHTTP(), 0);
+    owner = f.endpoint->getRuleInfo().at("dLastRuleEventOwner");
+    VG_CHECK_EQ(owner.at("sRuleType").get<std::string>(), "HTTP");
+    VG_CHECK_EQ(owner.at("iTimestamp").get<int64_t>(), owner.at("iDispatchTimestamp").get<int64_t>());
 }
 
 VG_TEST_CASE(record_rule_config_switches_rules_persists_and_rolls_back_failures)

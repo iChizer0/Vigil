@@ -10,7 +10,7 @@
 4. Keep direct discrete EVENT delivery as today: it bypasses the selected rule's filters and debounce, and on an EVENT tick the selected rule is not evaluated.
 5. Keep `ALWAYS_ON` as a single-file-action rule. Never convert it to continuous MP4 or change JPG/RAW into video.
 6. Keep RULE events simple: one owner's `type`, `id`, timestamp, UID, source, and delivery. No `trace`, no `triggers[]`, no action-result `actions[]`; `dActions` is a configuration dictionary only.
-7. The only public C ABI change is the appended `sound_play_cb` in `vg_config_media_t`.
+7. The only public C ABI changes are appended fields, both in Phase 4B: `sound_play_cb` in `vg_config_media_t` and `dispatch_timestamp` in `vg_rule_evt_t`.
 8. Configuration migration is not this library's job. An external manager migrates `record_config.json` to the version-2 shape; the library reads and writes only that shape and rejects anything else without touching the file.
 
 ### Non-goals
@@ -32,6 +32,7 @@
 - The `sound_play_cb` ABI change moves to Phase 4B, so Phases 1 to 3 ship without a public layout change (section 11).
 - Existing rule-info fields keep a defined meaning for single-file-action configurations; new fields carry per-channel state (section 6.2).
 - No legacy configuration handling in the library: no `dWriterConfig` import, no mirrored GET, no mixed-shape or destructive-write detection. `iSchemaVersion` is required and must be 2; an external manager migrates old files (section 4.1).
+- Every owner carries both an event time and a dispatch time (decided 2026-10-19, "carry both"): `timestamp` is the input's time for FRAME and direct EVENT owners and the observed time otherwise; `dispatch_timestamp` is when Vigil created the owner. Rule info reports both; `vg_rule_evt_t` gains the appended `dispatch_timestamp` in Phase 4B (section 6.1).
 
 ## 2. Current module baseline and reading map
 
@@ -40,7 +41,7 @@ The current flow is a selected `BaseRule`, a single `SharedRuleEvent`, and one a
 | Area | Read first | Relevant current state |
 | :--- | :--- | :--- |
 | Rule implementations | `vigil/rules.hpp` | Evaluation stays as is. Defects to fix: `TTYRule` never frees its `new char[]` read buffer, so every rule replacement leaks it, and its mismatch fallback loses overlapping prefixes (`AAB` is missed in `AAAB`); `GPIORule` checks that one of the two sync callbacks exists, not the one its signal mode uses. HTTP dispatches directly from the request thread and keeps doing so. |
-| Inputs, clocks, admission | `vigil/context.hpp` | One shared file task; identity-free reset; rule disable returns before the clock update, which continuous recording needs; inference input time overwrites the current wall time used for event and file timestamps. The direct EVENT owner built by the rule loop is stamped with the dispatch time, not the input time (section 2 table). |
+| Inputs, clocks, admission | `vigil/context.hpp` | One shared file task; identity-free reset; rule disable returns before the clock update, which continuous recording needs; inference input time overwrites the current wall time used for event and file timestamps. The direct EVENT owner built by the rule loop was stamped with the dispatch time, not the input time, until 2026-10-19 (section 2 table). |
 | Configuration | `vigil/configs.hpp`, `vigil/endpoints.hpp` | Before Phase 1C: single `dWriterConfig`, and `RecordConfig::sync` applied enablement before the settings revision check, so a conflict left a partial update. Since Phase 1C (2026-10-19): the version-2 `RecordConfig` is read whole, and `sync` publishes the writer settings under the revision check before the flag, so a conflict applies nothing to the runtime. |
 | Endpoint loop and startup | `vigil/endpoints.hpp` | Startup load failures used to leave the default `ALWAYS_ON` rule live; since Phase 1C an unusable file keeps rules disabled. `ConfigStore` used to write a temporary file and rename it without fsync, and reported a missing file as `EIO` because `is_regular_file` sets the error code for a not-found path; both fixed in Phase 1C (fsync before the rename; `ENOENT` for a missing file). |
 | Identity/settings | `vigil/types.hpp` | `WriteEvent`, `EventOwner`, and `FileWriterSettings` are the building blocks to extend. `WaterMarks::from` reads past its format table for an unknown format instead of using the fallback entry (latent: every caller validates the format first; found by the Phase 1A tests). |
@@ -69,7 +70,7 @@ These are separate compatibility decisions, not permission to make incidental be
 | TTY matching and diagram | The architecture diagram describes a Boyer-Moore matcher, names `tryUpdateRuleEvent()`, and omits the SED and ALWAYS_ON rules; the code is a streaming prefix matcher whose mismatch fallback loses overlapping prefixes. | Fix the matcher defect and the buffer leak with tests, then update the diagram with the missing rules and the real `tryCreateWriterEvent` name. |
 | Media suspension | Header wording is broader than current video-only activity accounting. | Extend the barrier to image capture, thumbnail generation, and Sound (section 8.3); the parallel Photo worker needs it. |
 | Source delivery without a source | Every non-inference owner (SED, Timer, GPIO, TTY, HTTP, ALWAYS_ON) is stamped `source_delivery=EVENT` even with an empty `source_id`, while the header says empty means unknown. | **Kept (2026-10-19).** Pin it with a test and correct the header comment; the emitted value does not change. |
-| Direct EVENT timestamp | Section 6.1 says FRAME/EVENT owners keep the input event time. Inference-member owners do; the direct EVENT owner is stamped with the dispatch wall time, and the input time only reaches the shared clock (and from there today's writer event). | **Open (found 2026-10-19).** Pinned as implemented in `tests/test_rule_endpoint.cpp`. Either keep the dispatch time and correct section 6.1, or make the direct EVENT owner carry the input time in Phase 3A together with the clock separation. |
+| Direct EVENT timestamp | Section 6.1 says FRAME/EVENT owners keep the input event time. Inference-member owners did; the direct EVENT owner was stamped with the dispatch wall time, and the input time only reached the shared clock (and from there the writer event). | **Decided (2026-10-19): carry both.** Every owner has `timestamp` (event time: the input's time for FRAME and direct EVENT owners, the observed time otherwise) and `dispatch_timestamp` (when Vigil created it). Done ahead of Phase 3A: the direct EVENT owner carries the input time, rule info adds `iDispatchTimestamp`, and `vg_rule_evt_t` gains the appended field in Phase 4B. The shared-clock separation itself stays in Phase 3A. |
 
 Before Phase 1A the source had no first-party `tests/` directory or CTest registration, and no commit in the history had ever added one; a fresh configure in the dev container on 2026-10-19 reported `ctest -N` as `Total Tests: 0`. Phase 1A (2026-10-19) added `tests/` behind `VIGIL_BUILD_TESTS` (section 12.1). `vigil_example` is a demonstration; `vigil_index_manager_test` is an interactive filesystem monitor that needs fanotify privileges; `vigil_mask_test` prints examples without assertions. `build/` is git-ignored and absent from both this checkout and the dev-container mirror; generated binaries or CTest registrations found in any stale build directory are not reproducible evidence and must not be reused as the test source of truth.
 
@@ -182,7 +183,7 @@ Keep evaluation free of storage operations and playback. The 10 ms loop period r
 
 `source_delivery` is kept as is (decided 2026-10-19): FRAME for inference frame owners and EVENT for every other owner, including owners with an empty `source_id`. Correct the header comment's "empty when unknown" wording; the emitted value does not change. SCHEDULE remains a gate, never an emitted owner.
 
-Capture `uid`, timestamp, condition ID, and source once; published owners are read-only. FRAME/EVENT owners keep the input event time (for the direct EVENT owner this is an open decision, section 2); other owners use the time observed. The current wall time stays independent of inference timestamps. FILE timestamp is the actual publication time. Preserve exact 64-bit UIDs across module-owned JSON output, including values above `2^53`; do not route integers through floating point. UID uniqueness is process-local, not a cross-restart guarantee.
+Capture `uid`, both timestamps, condition ID, and source once; published owners are read-only. Every owner carries two times (decided 2026-10-19): `timestamp`, the event time, is the input's timestamp for FRAME and direct EVENT owners and the observed time for every other owner; `dispatch_timestamp` is when Vigil created the owner, and equals the event time for owners without an input. The C callback keeps `timestamp` and gains `dispatch_timestamp` in Phase 4B; rule info reports both as `iTimestamp` and `iDispatchTimestamp`. The current wall time stays independent of inference timestamps. FILE timestamp is the actual publication time. Preserve exact 64-bit UIDs across module-owned JSON output, including values above `2^53`; do not route integers through floating point. UID uniqueness is process-local, not a cross-restart guarantee.
 
 ### 6.2 RULE and FILE behavior
 
@@ -192,7 +193,7 @@ Capture `uid`, timestamp, condition ID, and source once; published owners are re
 - Continuous files use `event_uid=0` with their own unique file identity; no synthetic RULE with UID zero is created. Never use the event UID alone as a file identifier.
 - There is no expected-file-count or all-actions-completed signal, and no event `actions[]` array.
 - Callbacks are best-effort notifications, not a durable ordered stream. FILE may be observed before RULE because of concurrent execution. Do not hold internal locks across notification callbacks.
-- Rule info adds the last **dispatched** owner, independent of file tasks, plus Photo/Video readiness and cooldown state and Sound busy/unavailable state. The existing fields keep a defined meaning: `bReadyForNewEvent` is true when no file channel holds a pending or running task; `dLastRuleEvent` and `dLastRuleEventOwner` describe the most recently accepted file task (current if any, else last) across both channels. For a single-file-action configuration this is identical to today.
+- Rule info adds the last **dispatched** owner, independent of file tasks, plus Photo/Video readiness and cooldown state and Sound busy/unavailable state. Owner objects carry `iTimestamp` (event time) and `iDispatchTimestamp` (since 2026-10-19). The existing fields keep a defined meaning: `bReadyForNewEvent` is true when no file channel holds a pending or running task; `dLastRuleEvent` and `dLastRuleEventOwner` describe the most recently accepted file task (current if any, else last) across both channels. For a single-file-action configuration this is identical to today.
 
 ## 7. Action execution
 
@@ -297,9 +298,10 @@ In `include/vigil_ctypes.h`:
 
 - Append `vg_sta_e (*sound_play_cb)(void *user_data)` at the end of `vg_config_media_t` with the bounded contract in section 7.3. Null means unavailable.
 - Update `VG_CTYPES_VERSION` (currently `2026.09.15`) and `VG_CAPI_VERSION` (currently `2025.11.25`) and the header comments, including the corrected `source_delivery` wording.
-- No new enum values; `vg_rule_type_e`, `vg_rule_evt_t`, and `vg_file_evt_t` are unchanged.
+- Append `int64_t dispatch_timestamp` at the end of `vg_rule_evt_t` (the owner's dispatch time; `timestamp` stays the event time) in the same phase, and document both fields.
+- No new enum values; `vg_rule_type_e` and `vg_file_evt_t` are unchanged.
 
-This is still a **C ABI change**: tail-appending to `vg_config_media_t` shifts the following `storage` field in `vg_config_t`, and the initialization API has no size/version negotiation. The library and callers built with the new layout must be rebuilt together. Do not claim that header version strings or tail-appending make old binaries compatible. Audit zero initialization, aggregate initialization, and field-by-field initialization in the module examples and tests.
+This is still a **C ABI change**: tail-appending to `vg_config_media_t` shifts the following `storage` field in `vg_config_t`, the appended `vg_rule_evt_t` field is only readable by callers built against the new header, and the initialization API has no size/version negotiation. The library and callers built with the new layout must be rebuilt together. Do not claim that header version strings or tail-appending make old binaries compatible. Audit zero initialization, aggregate initialization, and field-by-field initialization in the module examples and tests.
 
 Strings and event objects are borrowed for the duration of the callback; consumers that retain them must copy. Do not add an assumption that all callbacks run on one thread.
 
@@ -327,14 +329,14 @@ Each row is a review unit, not a mandate to combine unrelated edits into one com
 
 | Unit | Scope | Expected result and acceptance |
 | :--- | :--- | :--- |
-| 3A | `vigil/context.hpp`, `vigil/rules.hpp`, `vigil/endpoints.hpp` | Update clocks before the enable check; stop inference timestamps overwriting the wall clock; fill GPIO/TTY attribution; fix the TTY leak and overlapping-prefix matching; validate the GPIO mode callback; route HTTP activation through `dispatchRuleEvent` with body bounds and file-action-only storage prechecks. Everything else is pinned unchanged. |
+| 3A | `vigil/context.hpp`, `vigil/rules.hpp`, `vigil/endpoints.hpp` | Update clocks before the enable check; stop inference timestamps overwriting the wall clock (the owner's two timestamps landed early on 2026-10-19, so the writer event can take its time from the owner); fill GPIO/TTY attribution; fix the TTY leak and overlapping-prefix matching; validate the GPIO mode callback; route HTTP activation through `dispatchRuleEvent` with body bounds and file-action-only storage prechecks. Everything else is pinned unchanged. |
 
 ### Phase 4: Action settings, Sound, two file channels, multi-action API
 
 | Unit | Scope | Expected result and acceptance |
 | :--- | :--- | :--- |
 | 4A | `vigil/configs.hpp`, `vigil/context.hpp`, writer settings adapters | `ActionSettings` with per-channel revisions on the Phase 1 commit foundation. Preserve the single-writer behavior; test config/refresh conflicts. |
-| 4B | `include/`, runtime-owned Sound executor, C callback fakes, `example/` | Append the null-default `sound_play_cb`, bump the version declarations, update initializers, and implement `Idle/Pending/Playing/Stopping` with pause/stop integration. Test null/error callbacks, Pending/Playing rejection, cancel-before-start, bounded in-flight completion, and no retry/backlog. |
+| 4B | `include/`, runtime-owned Sound executor, C callback fakes, `example/` | Append the null-default `sound_play_cb` and the `dispatch_timestamp` field of `vg_rule_evt_t`, bump the version declarations, update initializers, and implement `Idle/Pending/Playing/Stopping` with pause/stop integration. Test null/error callbacks, Pending/Playing rejection, cancel-before-start, bounded in-flight completion, and no retry/backlog. |
 | 4C | `vigil/context.hpp`, `vigil/writers.hpp`, `vigil/slot.hpp` | Independent Photo/Video tasks, workers, budgets, and per-channel state. Preserve manual capture and `ALWAYS_ON` pacing. Test identity/settings isolation, simultaneous work, and partial worker startup. |
 | 4D | `vigil/configs.hpp`, `vigil/endpoints.hpp`, dispatch/info | Enable version-2 multi-action configuration and canonical round trips. Validate both POSTs and startup against the ALWAYS_ON invariant. Exercise Photo+Video+Sound and same-UID multiple FILE callbacks with fakes; Sound-only works without storage. Still reject `bContinuousRecordEnabled=true`. |
 
@@ -367,7 +369,7 @@ Tests must execute production rule, configuration, executor, and writer code. Us
 | C1 Schema | Missing or other `iSchemaVersion`, the old `dWriterConfig` shape, missing fields, wrong types, zero/fraction/overflow intervals, not-yet-supported capabilities in intermediate phases. | Canonical GET/save; precise rejection; a rejected file is never rewritten. |
 | C2 Commit and startup | Revision conflict, pre-rename failure, missing files, corrupt rule/action/schedule files, unimplemented capability in an intermediate phase. | No partial flags; old state preserved on failure; retained invalid files; no default ungated/ALWAYS_ON execution; no success-without-behavior. |
 | C3 ALWAYS_ON | MP4/JPG/RAW, enable/schedule combinations, intervals, both POST orders and concurrent POSTs. | No automatic continuous conversion or format/pacing change; single-file-action invariant cannot be bypassed. |
-| W1 Event boundary | All enum types, direct EVENT, null/empty source, UID above `2^53`. | Attribution per section 6.1, delivery `EVENT` for source-less owners, exact integers, no trigger/action arrays. |
+| W1 Event boundary | All enum types, direct EVENT, null/empty source, UID above `2^53`, event and dispatch times. | Attribution per section 6.1, delivery `EVENT` for source-less owners, exact integers, input time as the event time for FRAME/EVENT owners, no trigger/action arrays. |
 | W2 File association | Photo+Video from one owner, failures with zero successful files, FILE before RULE, several continuous UID-zero clips. | Task-bound UID stable; no promised count/order; file identity distinct from event UID. |
 
 ### 12.1 Reproducible module-only build and test setup
@@ -406,7 +408,7 @@ Vigil builds and runs on Linux only: it uses fanotify, netlink uevents, libblkid
   ctest --test-dir /root/build/vigil-host-tests --output-on-failure  # 100% tests passed, 0 tests failed out of 5
   ```
 
-  After Phase 1C the five executables hold 51 cases (inference rules 12, schedule rule 7, context 11, record configuration 8, rule endpoint 13).
+  After Phase 1C and the carry-both change the five executables hold 53 cases (inference rules 12, schedule rule 7, context 12, record configuration 8, rule endpoint 14).
 - Sanitizers: `-DCMAKE_C_FLAGS`/`-DCMAKE_CXX_FLAGS` of `-fsanitize=address,undefined -fno-omit-frame-pointer` (`/root/build/vigil-host-asan`) and, separately, `-fsanitize=thread` (`/root/build/vigil-host-tsan`) both build with the allocator off. On 2026-10-19 `vigil_mask_test` and the demo ran under both with no reports, which only proves the toolchain works: the demo exercises no rules, inputs, or writers. The Phase 1A test executables also pass under both (`/root/build/vigil-host-tests-asan` and `/root/build/vigil-host-tests-tsan`, examples off, 5 of 5 each). Keep ASan/UBSan and TSan in separate configurations, run them with the allocator off, and document allocator/sanitizer limitations rather than hiding failures. Ordinary unit tests should need neither real peripherals nor elevated filesystem-monitor privileges.
 - Distinguish host logic correctness from target timing/media capability. Report actual evaluation delay, callback bounds, memory/CPU use, and clip gaps only when measured. Do not claim hardware success, hard real-time bounds, or gap-free recording from fake callbacks.
 

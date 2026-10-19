@@ -119,15 +119,27 @@ struct EventOwner
     const std::string id;
     const std::string source_id;
     const SourceDelivery source_delivery;
+    // When Vigil created this owner, in Unix milliseconds.
+    const int64_t dispatch_timestamp;
+    // The event time, in Unix milliseconds: the input's own timestamp for FRAME and direct EVENT owners,
+    // the dispatch time for owners that observe their condition themselves.
     const int64_t timestamp;
     const uint64_t uid;
 
+    // `event_ts` is the input's timestamp for owners that come from an input; owners that observe a
+    // condition themselves leave it unset and carry the dispatch time as their event time.
     EventOwner(vg_rule_type_e tp, const std::string &id, const std::string &src_id, SourceDelivery src_delivery,
-        int64_t ts
-        = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
-              .count())
-        : type(tp), id(id), source_id(src_id), source_delivery(src_delivery), timestamp(ts), uid(NextUid(ts))
+        std::optional<int64_t> event_ts = std::nullopt)
+        : type(tp), id(id), source_id(src_id), source_delivery(src_delivery), dispatch_timestamp(NowMs()),
+          timestamp(event_ts.value_or(dispatch_timestamp)), uid(NextUid(timestamp))
     {
+    }
+
+    static int64_t NowMs() noexcept
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count();
     }
 
     ~EventOwner() = default;
