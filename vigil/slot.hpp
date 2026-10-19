@@ -381,6 +381,7 @@ public:
 
         if (const auto p = getRecordRootPath(); IsPathUnderRoot(p, relative_path))
         {
+            const std::lock_guard lock(_publication_mutex); // never while a file is being published
             if (!RemoveWithThumbnailCheck(p / relative_path))
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove file or directory ", relative_path,
@@ -492,7 +493,10 @@ public:
 
                 const auto entry_path = entry.path();
                 std::error_code ec;
-                std::filesystem::remove_all(entry_path, ec);
+                {
+                    const std::lock_guard lock(_publication_mutex); // never while a file is being published
+                    std::filesystem::remove_all(entry_path, ec);
+                }
                 if (ec)
                 {
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to remove file or directory: ", entry_path,
@@ -581,32 +585,51 @@ protected:
             return;
         }
 
-        size_t size = 0;
-        const auto target_dir_path = getRecordRootPath() / cache_file_info.first_level_dir_name;
-        const auto target_file_path = target_dir_path / cache_file_info.path.filename();
-
-        if (!EnsureDirectoryExists(target_dir_path, true, false, &_ctx))
-            goto l_fail_and_clean_up;
-
-        if (std::error_code ec; cache_file_info.thumbnail && _ctx.c_api.media.thumbnail_generate_cb)
+        // The thumbnail is generated into the cache directory before the publication lock is taken, so the
+        // callback never runs under it.
+        std::filesystem::path thumbnail_cache_path;
+        if (cache_file_info.thumbnail && _ctx.c_api.media.thumbnail_generate_cb)
         {
-            const auto thumbnail_path = ThumbnailPathFrom(target_file_path);
-            const auto thumbnail_cache_path = getRecordCachePath() / thumbnail_path.filename();
+            thumbnail_cache_path = getRecordCachePath()
+                                   / (cache_file_info.path.filename().string() + std::string(kStorageThumbnailFileExt));
             if (const auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
                     cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_cache_path.c_str(),
                     kStorageThumbnailFileType, kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
-                ret == 0) [[likely]]
+                ret != 0) [[unlikely]]
             {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to generate thumbnail for cache file ",
+                    cache_file_info.path, ", code: ", static_cast<int>(ret));
+                thumbnail_cache_path.clear();
+            }
+        }
+
+        size_t size = 0;
+        std::filesystem::path target_file_path;
+        {
+            // Publication excludes removal (rotation, free-up, explicit removal), so the target directory cannot
+            // disappear between its creation and the rename (docs/PLAN.md section 9). A taken name gets a numbered
+            // suffix; nothing is overwritten.
+            const std::lock_guard lock(_publication_mutex);
+            const auto target_dir_path = getRecordRootPath() / cache_file_info.first_level_dir_name;
+            if (!EnsureDirectoryExists(target_dir_path, true, false, &_ctx))
+                goto l_fail_and_clean_up;
+            target_file_path = UniquePublicationPath(target_dir_path, cache_file_info.path.filename());
+
+            if (!thumbnail_cache_path.empty())
+            {
+                std::error_code ec;
+                const auto thumbnail_path = ThumbnailPathFrom(target_file_path);
                 if (EnsureDirectoryExists(thumbnail_path.parent_path(), true, false, &_ctx)) [[likely]]
                 {
                     EnsureOwnerAndPermissions(thumbnail_cache_path, kStorageDefaultUid, kStorageDefaultGid,
                         fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
                             | fs::perms::others_read,
-                        &this->ctxRef());
+                        &_ctx);
                     if (std::filesystem::rename(thumbnail_cache_path, thumbnail_path, ec); ec)
                     {
                         VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to move thumbnail from ", thumbnail_cache_path,
                             " to ", thumbnail_path, ": ", ec.message());
+                        std::filesystem::remove_all(thumbnail_cache_path, ec);
                     }
                 }
                 else
@@ -615,38 +638,34 @@ protected:
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to create thumbnail directory at ",
                         thumbnail_path.parent_path());
                 }
+                thumbnail_cache_path.clear(); // moved or removed: nothing left to clean up
             }
-            else
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to generate thumbnail for cache file ",
-                    cache_file_info.path, ", code: ", static_cast<int>(ret));
-            }
-        }
 
-        {
-            std::error_code ec;
-            if (size = std::filesystem::file_size(cache_file_info.path, ec); ec)
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to get file size for cache file ", cache_file_info.path,
-                    ": ", ec.message());
-                goto l_fail_and_clean_up;
+                std::error_code ec;
+                if (size = std::filesystem::file_size(cache_file_info.path, ec); ec)
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to get file size for cache file ",
+                        cache_file_info.path, ": ", ec.message());
+                    goto l_fail_and_clean_up;
+                }
             }
-            _write_stats.addNewWriteStat(size);
-        }
 
-        EnsureOwnerAndPermissions(cache_file_info.path, kStorageDefaultUid, kStorageDefaultGid,
-            fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
-                | fs::perms::others_read,
-            &this->ctxRef());
-        {
-            std::error_code ec;
-            if (std::filesystem::rename(cache_file_info.path, target_file_path, ec); ec)
+            EnsureOwnerAndPermissions(cache_file_info.path, kStorageDefaultUid, kStorageDefaultGid,
+                fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
+                    | fs::perms::others_read,
+                &_ctx);
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to move file from ", cache_file_info.path, " to ",
-                    target_file_path, ": ", ec.message());
-                goto l_fail_and_clean_up;
+                std::error_code ec;
+                if (std::filesystem::rename(cache_file_info.path, target_file_path, ec); ec)
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to move file from ", cache_file_info.path, " to ",
+                        target_file_path, ": ", ec.message());
+                    goto l_fail_and_clean_up;
+                }
             }
         }
+        _write_stats.addNewWriteStat(size);
 
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Created new record file at ", target_file_path, ", size: ", size,
             " bytes");
@@ -670,6 +689,8 @@ protected:
     l_fail_and_clean_up:
         std::error_code ec;
         std::filesystem::remove_all(cache_file_info.path, ec);
+        if (!thumbnail_cache_path.empty())
+            std::filesystem::remove_all(thumbnail_cache_path, ec);
         return;
     }
 
@@ -758,7 +779,11 @@ private:
             kManagerEstimatedWriteBytesPeriod.count(), " minutes: ", estimated_write_bytes_in_period,
             " bytes, will free up ", watermarks.recycle_bytes, " bytes");
 
-        const auto freed = idx_mgr->tryReleaseSpace(watermarks.recycle_bytes);
+        size_t freed = 0;
+        {
+            const std::lock_guard lock(_publication_mutex); // never while a file is being published
+            freed = idx_mgr->tryReleaseSpace(watermarks.recycle_bytes);
+        }
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Freed up ", freed, " bytes on storage slot for device path", _dev_path);
     }
 
@@ -1836,6 +1861,9 @@ private:
 
     // Write stats
     mutable WriteStats _write_stats;
+
+    // Publication (directory creation and rename) excludes removal (rotation, free-up, explicit removal)
+    mutable std::mutex _publication_mutex;
 
     // Relay
     Relay _relay;
