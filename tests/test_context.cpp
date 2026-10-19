@@ -62,6 +62,12 @@ std::shared_ptr<EventOwner> Owner(vg_rule_type_e type, const std::string &id = "
     return std::make_shared<EventOwner>(type, id, source, delivery);
 }
 
+// What the writer thread does at the end of its task.
+void CompleteCurrent(Context &ctx, WriteEvent::Status status)
+{
+    ctx.shared_rule_event.complete(ctx.shared_rule_event.getCurrent(), status);
+}
+
 } // namespace
 
 VG_TEST_CASE(frames_are_dropped_without_subscribers_but_events_are_kept)
@@ -214,7 +220,7 @@ VG_TEST_CASE(rule_event_is_reported_on_every_dispatch_but_the_writer_event_is_cr
     VG_CHECK_EQ(events[1].uid, owner2->uid);
 
     // Completing the event frees the slot and keeps the previous owner as "last".
-    f.ctx.shared_rule_event.reset(WriteEvent::Status::Completed);
+    CompleteCurrent(f.ctx, WriteEvent::Status::Completed);
     VG_CHECK(f.ctx.shared_rule_event.getCurrent() == nullptr);
     const auto last = f.ctx.shared_rule_event.getLast();
     VG_REQUIRE(last != nullptr);
@@ -235,6 +241,42 @@ VG_TEST_CASE(rule_event_is_reported_on_every_dispatch_but_the_writer_event_is_cr
     VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 1 });
 }
 
+VG_TEST_CASE(claim_cancel_and_complete_are_identity_aware)
+{
+    Fixture f;
+    VG_CHECK(f.ctx.shared_rule_event.claim() == nullptr); // nothing pending
+    VG_CHECK(f.ctx.tryCreateWriterEvent(Owner(VG_RULE_TYPE_TIMER)));
+    const auto a = f.ctx.shared_rule_event.claim();
+    VG_REQUIRE(a != nullptr);
+    VG_CHECK(a->status.load() == WriteEvent::Status::Writing);
+    VG_CHECK(f.ctx.shared_rule_event.claim() == nullptr); // claimed once
+    f.ctx.shared_rule_event.cancelPending();              // a claimed event belongs to its writer
+    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == a);
+    f.ctx.record_rule_enabled.store(false);
+    f.ctx.tick(); // the disabled tick cancels only a pending event
+    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == a);
+    f.ctx.shared_rule_event.complete(a, WriteEvent::Status::Interrupted);
+    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == nullptr);
+    VG_CHECK(f.ctx.shared_rule_event.getLast() == a);
+    VG_CHECK(a->status.load() == WriteEvent::Status::Interrupted);
+
+    // A newer event B is never touched by the stale completion of A.
+    VG_CHECK(f.ctx.tryCreateWriterEvent(Owner(VG_RULE_TYPE_HTTP)));
+    const auto b = f.ctx.shared_rule_event.getCurrent();
+    VG_REQUIRE(b != nullptr);
+    f.ctx.shared_rule_event.complete(a, WriteEvent::Status::Failed);
+    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == b);
+    VG_CHECK(a->status.load() == WriteEvent::Status::Interrupted);
+    f.ctx.shared_rule_event.complete(nullptr, WriteEvent::Status::Failed);
+    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == b);
+
+    // A pending event is what cancelPending (the disabled tick) retires.
+    f.ctx.shared_rule_event.cancelPending();
+    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == nullptr);
+    VG_CHECK(f.ctx.shared_rule_event.getLast() == b);
+    VG_CHECK(b->status.load() == WriteEvent::Status::Canceled);
+}
+
 VG_TEST_CASE(source_less_owners_report_event_delivery)
 {
     // Decided on 2026-10-19 (docs/PLAN.md section 6.1): owners without a source still carry EVENT delivery.
@@ -244,11 +286,11 @@ VG_TEST_CASE(source_less_owners_report_event_delivery)
     for (const auto type: types)
     {
         VG_CHECK(f.ctx.tryCreateWriterEvent(Owner(type)));
-        f.ctx.shared_rule_event.reset(WriteEvent::Status::Completed);
+        CompleteCurrent(f.ctx, WriteEvent::Status::Completed);
     }
     // The direct EVENT owner as the rule loop builds it, and a FRAME owner as an inference member builds it.
     VG_CHECK(f.ctx.tryCreateWriterEvent(Owner(VG_RULE_TYPE_UNKNOWN, "", "cam0")));
-    f.ctx.shared_rule_event.reset(WriteEvent::Status::Completed);
+    CompleteCurrent(f.ctx, WriteEvent::Status::Completed);
     VG_CHECK(f.ctx.tryCreateWriterEvent(
         Owner(VG_RULE_TYPE_INFERENCE_SET, "person", "cam0", EventOwner::SourceDelivery::Frame)));
 
@@ -322,7 +364,7 @@ VG_TEST_CASE(always_on_waits_for_the_current_event_and_for_media)
         VG_CHECK(f.ctx.tryCreateWriterEvent(Owner(VG_RULE_TYPE_HTTP)));
         const AlwaysOnRule rule(AlwaysOnRuleConfig {}, f.ctx);
         VG_CHECK(rule(f.ctx) == nullptr); // a pending writer event blocks it without consuming its interval
-        f.ctx.shared_rule_event.reset(WriteEvent::Status::Completed);
+        CompleteCurrent(f.ctx, WriteEvent::Status::Completed);
         VG_CHECK(rule(f.ctx) != nullptr);
     }
     {

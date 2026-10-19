@@ -79,7 +79,7 @@ struct Context
         {
             resetInference();
             shared_inference_result.reset();
-            shared_rule_event.reset(WriteEvent::Status::Canceled);
+            shared_rule_event.cancelPending(); // a claimed event is completed by its writer
             return;
         }
 
@@ -228,18 +228,43 @@ struct Context
         std::shared_ptr<WriteEvent> current;
         std::shared_ptr<EventOwner> current_owner;
 
+        // Retires the current event with its terminal status. Call with the lock held.
+        void retireUnsafe(WriteEvent::Status status) noexcept
+        {
+            current->status.store(status, std::memory_order_release);
+            last = std::move(current);
+            current.reset();
+            last_owner = std::move(current_owner);
+            current_owner.reset();
+        }
+
     public:
-        void reset(WriteEvent::Status status) noexcept
+        // Claims the current event for a writer: Pending becomes Writing. Null when nothing is pending.
+        std::shared_ptr<WriteEvent> claim() noexcept
         {
             const std::unique_lock lock(mutex);
-            if (current)
-            {
-                current->status.store(status, std::memory_order_relaxed);
-                last = std::move(current);
-                current.reset();
-                last_owner = std::move(current_owner);
-                current_owner.reset();
-            }
+            if (!current || current->status.load(std::memory_order_acquire) != WriteEvent::Status::Pending)
+                return nullptr;
+            current->status.store(WriteEvent::Status::Writing, std::memory_order_release);
+            return current;
+        }
+
+        // Cancels the current event unless a writer has claimed it. A claimed event belongs to its writer,
+        // which interrupts itself when rules are disabled and completes the event (docs/PLAN.md section 7.2).
+        void cancelPending() noexcept
+        {
+            const std::unique_lock lock(mutex);
+            if (current && current->status.load(std::memory_order_acquire) == WriteEvent::Status::Pending)
+                retireUnsafe(WriteEvent::Status::Canceled);
+        }
+
+        // Completes `expected` with its terminal status if it is still the current event. A stale event never
+        // touches a newer one.
+        void complete(const std::shared_ptr<WriteEvent> &expected, WriteEvent::Status status) noexcept
+        {
+            const std::unique_lock lock(mutex);
+            if (expected && current == expected)
+                retireUnsafe(status);
         }
 
         std::shared_ptr<WriteEvent> getLast() const noexcept
