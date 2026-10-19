@@ -534,64 +534,117 @@ private:
 
 struct RecordConfig
 {
-    bool enabled;
-    size_t settings_rev;
-    std::shared_ptr<FileWriterSettings> settings;
+    // Version-2 record action configuration (docs/PLAN.md section 4.1). Only this schema is read, and it is
+    // read whole: every field is required, in the shape GET returns. An external manager migrates older
+    // files; the library imports nothing from them.
+    static inline constexpr int kSchemaVersion = 2;
 
-    RecordConfig(bool e, std::pair<size_t, std::shared_ptr<FileWriterSettings>> p)
-        : enabled(e), settings_rev(p.first), settings(p.second)
+    struct PhotoAction
     {
-        if (!settings)
-            throw Exception("FileWriterSettings is null while constructing RecordConfig");
+        bool enabled = false;
+        std::string format = kRecordPhotoDefaultFormat;
+        std::chrono::milliseconds interval = kRecordWriterDefaultIntervalMs;
+    };
+
+    struct VideoAction
+    {
+        bool enabled = false;
+        std::chrono::milliseconds interval = kRecordWriterDefaultIntervalMs;
+    };
+
+    struct SoundAction
+    {
+        bool enabled = false;
+    };
+
+    bool rule_enabled = false;
+    bool continuous_enabled = false;
+    PhotoAction photo;
+    VideoAction video;
+    SoundAction sound;
+
+    // First-start defaults: rules disabled, every action disabled, continuous recording off.
+    RecordConfig() noexcept = default;
+
+    // A missing field or a field of the wrong type is reported by nlohmann::json; nothing is defaulted.
+    RecordConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
+    {
+        if (j.at("iSchemaVersion") != kSchemaVersion)
+            throw Exception("Unsupported record configuration schema version " + j.at("iSchemaVersion").dump()
+                            + ", expected " + std::to_string(kSchemaVersion));
+        rule_enabled = j.at("bRuleEnabled").get<bool>();
+        continuous_enabled = j.at("bContinuousRecordEnabled").get<bool>();
+        const auto &actions = j.at("dActions");
+        const auto &photo_j = actions.at("dPhoto");
+        photo.enabled = photo_j.at("bEnabled").get<bool>();
+        photo.format = photo_j.at("sFormat").get<std::string>();
+        if (CaptureTypeFrom(photo.format) != CaptureType::Image)
+            throw Exception("Invalid photo format '" + photo.format + "', expected JPG or RAW");
+        photo.interval = IntervalFrom(photo_j.at("iIntervalMs"));
+        const auto &video_j = actions.at("dVideo");
+        video.enabled = video_j.at("bEnabled").get<bool>();
+        video.interval = IntervalFrom(video_j.at("iIntervalMs"));
+        sound.enabled = actions.at("dSound").at("bEnabled").get<bool>();
+
+        // Limits of the single-writer runtime, lifted in Phase 4D: one file action, no Sound, no continuous
+        // recording. Rules without a file action would have nothing to do, so that is rejected as well.
+        if (continuous_enabled || sound.enabled)
+            throw Exception("bContinuousRecordEnabled and dActions.dSound are not supported yet");
+        if (photo.enabled && video.enabled)
+            throw Exception("Only one of dActions.dPhoto and dActions.dVideo can be enabled for now");
+        if (rule_enabled && !photo.enabled && !video.enabled)
+            throw Exception("bRuleEnabled requires an enabled file action (dActions.dPhoto or dActions.dVideo)");
     }
 
-    RecordConfig(const nlohmann::json &j, const Context &ctx)
-    {
-        enabled = j.at("bRuleEnabled").get<bool>();
-
-        {
-            const auto settings_j = j.at("dWriterConfig");
-            const auto itv_ms = settings_j.at("iIntervalMs").get<long>();
-            if (itv_ms <= 0)
-                throw Exception(
-                    "Invalid recording interval " + std::to_string(itv_ms) + "ms while parsing RecordConfig");
-            settings_rev = ctx.shared_writer_settings.get().first;
-            const auto fmt = settings_j.at("sFormat").get<std::string>();
-            const auto t = CaptureTypeFrom(fmt);
-            if (t == CaptureType::Unknown)
-                throw Exception("Invalid capture format '" + fmt + "' while parsing RecordConfig");
-            if (settings = FileWriterSettings::create(t, fmt, std::chrono::milliseconds(itv_ms),
-                    kRecordWriterPrefixDefault, kVideoClipLengthDefault,
-                    WaterMarks::from(fmt, t == CaptureType::Video ? kVideoClipLengthDefault.count() : 1,
-                        &ctx.c_api.media));
-                !settings)
-                throw Exception("Failed to create FileWriterSettings while parsing RecordConfig");
-        }
-    }
-
-    static RecordConfig from(const Context &ctx)
-    {
-        return RecordConfig(ctx.record_rule_enabled.load(std::memory_order_acquire), ctx.shared_writer_settings.get());
-    }
-
+    // The canonical document: every field, with no extras.
     void to(nlohmann::json &j, const Context &ctx [[maybe_unused]]) const
     {
-        j["bRuleEnabled"] = enabled;
-        if (auto settings_j = nlohmann::json::object(); settings)
-        {
-            settings_j["sFormat"] = settings->format;
-            settings_j["iIntervalMs"] = static_cast<long>(settings->interval.count());
-            j["dWriterConfig"] = settings_j;
-        }
+        j["iSchemaVersion"] = kSchemaVersion;
+        j["bRuleEnabled"] = rule_enabled;
+        j["bContinuousRecordEnabled"] = continuous_enabled;
+        j["dActions"]["dPhoto"]
+            = { { "bEnabled", photo.enabled }, { "sFormat", photo.format }, { "iIntervalMs", photo.interval.count() } };
+        j["dActions"]["dVideo"] = { { "bEnabled", video.enabled }, { "iIntervalMs", video.interval.count() } };
+        j["dActions"]["dSound"] = { { "bEnabled", sound.enabled } };
     }
 
+    // Writer settings of the single enabled file action, or nullptr when no file action is enabled.
+    std::shared_ptr<FileWriterSettings> createWriterSettings(const Context &ctx) const
+    {
+        if (photo.enabled)
+            return FileWriterSettings::create(CaptureType::Image, photo.format, photo.interval,
+                kRecordWriterPrefixDefault, kVideoClipLengthDefault,
+                WaterMarks::from(photo.format, 1, &ctx.c_api.media));
+        if (video.enabled)
+            return FileWriterSettings::create(CaptureType::Video, kRecordWriterDefaultFormat, video.interval,
+                kRecordWriterPrefixDefault, kVideoClipLengthDefault,
+                WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), &ctx.c_api.media));
+        return nullptr;
+    }
+
+    // Publishes the configuration to the runtime: the writer settings of the enabled file action, if any,
+    // then the rule flag. Returns EAGAIN, with nothing applied, when the writer settings changed concurrently
+    // (a media refresh); the caller retries.
     vg_sta_e sync(Context &ctx) const noexcept
     {
-        ctx.record_rule_enabled.store(enabled, std::memory_order_release);
-        if (ctx.shared_writer_settings.update(settings_rev, settings))
-            return 0;
-        else
-            return EAGAIN;
+        if (auto settings = createWriterSettings(ctx); settings)
+        {
+            const auto rev = ctx.shared_writer_settings.get().first;
+            if (!ctx.shared_writer_settings.update(rev, std::move(settings)))
+                return EAGAIN;
+        }
+        ctx.record_rule_enabled.store(rule_enabled, std::memory_order_release);
+        return 0;
+    }
+
+private:
+    // A positive integer number of milliseconds. There is no upper bound: the manager is trusted to send
+    // intervals that fit the clock arithmetic.
+    static std::chrono::milliseconds IntervalFrom(const nlohmann::json &j)
+    {
+        if (!j.is_number_integer() || j.get<int64_t>() <= 0)
+            throw Exception("Invalid interval " + j.dump() + "ms, expected a positive integer");
+        return std::chrono::milliseconds(j.get<int64_t>());
     }
 };
 

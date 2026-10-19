@@ -22,6 +22,7 @@ static inline constexpr const size_t kHardwareDestructiveInterferenceSize = 64;
 
 static inline constexpr const std::string_view kRecordWriterPrefixDefault = "";
 static inline constexpr const char *kRecordWriterDefaultFormat = "MP4";
+static inline constexpr const char *kRecordPhotoDefaultFormat = "JPG";
 static inline constexpr const std::chrono::milliseconds kRecordWriterDefaultIntervalMs
     = std::chrono::milliseconds(5000);
 static inline constexpr const std::string_view kCaptureWriterPrefixDefault = "Capture ";

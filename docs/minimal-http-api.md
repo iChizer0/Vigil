@@ -1,14 +1,17 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2026-06-17
-Version: 1.6.0
+Revised: 2026-10-19
+Version: 2.0.0
 
 ## Rule API
 
 ### General Rule Configuration
 
-Get or set the global rule enablement status.
+Get or set the rule enablement and the post-trigger actions. The payload is the version-2 record configuration
+(`record_config.json`): the library accepts no other version and never rewrites a stored file it cannot read, so an
+external manager migrates older files. `GET` returns the canonical document; `POST` takes the document shown below
+(a missing action block means a disabled action) and stores it in canonical form.
 
 **Path:** `.../vigil/rule/config`
 
@@ -18,15 +21,35 @@ Get or set the global rule enablement status.
 
 ```json
 {
-    "bRuleEnabled": true, // Boolean, enable or disable the evaluation of all rules, evalute precedence: schedule rule > record rule
-    "dWriterConfig": {
-        "sFormat": "MP4", // String, case-sensitive, one of: "MP4", "JPG", "RAW"
-        "iIntervalMs": 0 // Integer, the delay between recordings in milliseconds including the write duration; 0 means continuous recording
+    "iSchemaVersion": 2, // Integer, required, must be 2
+    "bRuleEnabled": true, // Boolean, required, enable or disable the evaluation of all rules, evaluate precedence: schedule rule > record rule
+    "bContinuousRecordEnabled": false, // Boolean, required, standalone continuous MP4 recording; not supported yet, must be false
+    "dActions": { // Object, required, the post-trigger actions
+        "dPhoto": {
+            "bEnabled": false, // Boolean, required
+            "sFormat": "JPG", // String, required, case-sensitive, one of: "JPG", "RAW"
+            "iIntervalMs": 5000 // Integer, required, positive, the delay between captures in milliseconds including the write duration
+        },
+        "dVideo": {
+            "bEnabled": true, // Boolean, required; the format is always MP4
+            "iIntervalMs": 5000 // Integer, required, positive, the delay between recordings in milliseconds including the write duration
+        },
+        "dSound": {
+            "bEnabled": false // Boolean, required, sound playback on trigger; not supported yet, must be false
+        }
     },
     "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
     "message": "" // String, optional, present only on failure
 }
 ```
+
+The document is always complete: `GET` returns every field, and `POST` takes the whole document back (edit the `GET` response
+and post it). Until multi-action support lands, at most one of `dPhoto` and `dVideo` may be enabled, `bRuleEnabled: true`
+requires one of them, and `dSound` and `bContinuousRecordEnabled` are rejected when enabled. A missing field, a field of
+the wrong type, a non-positive or non-integer interval, an unknown photo format, and any other `iSchemaVersion` are
+rejected with `EINVAL` (`30022`); a rejected payload changes neither the runtime nor the stored file. Unknown fields are
+ignored and dropped from the stored document. `EAGAIN` (`30011`) means a media refresh changed the writer settings while
+the document was being applied; post it again. A first start without `record_config.json` reports every action disabled.
 
 ### Rule Info
 
@@ -217,9 +240,9 @@ The HTTP rule requires no additional configuration, select it to enable external
 
 #### Always-On Rule
 
-The always-on rule requires no additional configuration. When selected, it continuously re-arms using the current
-`dWriterConfig.iIntervalMs` pacing. If `iIntervalMs` is `0`, the rule becomes eligible again immediately after the
-previous write finishes.
+The always-on rule requires no additional configuration. When selected, it continuously re-arms using the enabled
+file action's `iIntervalMs` pacing (see General Rule Configuration): the next recording starts no earlier than the
+interval after the previous one started, and only once the previous write has finished.
 
 ```json
 {

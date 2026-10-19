@@ -1,11 +1,13 @@
-// Characterization tests for the record action configuration and the shared writer settings
-// (docs/PLAN.md sections 2 and 4.3; matrix C1/C2). The fixtures use today's shape (bRuleEnabled +
-// dWriterConfig); Phase 1C replaces them with the version-2 shape and keeps the assertions on
-// validation and revision handling.
+// Characterization tests for the version-2 record action configuration (docs/PLAN.md section 4.1; matrix
+// C1) and for the shared writer settings and watermarks it is mapped onto.
 
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <exception>
+#include <initializer_list>
+#include <string>
+#include <utility>
 
 #include "vigil/configs.hpp"
 #include "vigil/constants.hpp"
@@ -31,12 +33,46 @@ struct Fixture
     Fixture() : ctx(MakeFakeConfig()) { }
 };
 
-nlohmann::json RecordJson(bool enabled, const char *format, long interval_ms)
+using Overrides = std::initializer_list<std::pair<const char *, nlohmann::json>>;
+
+// The first-start document in the shape GET returns, with `overrides` applied by JSON pointer.
+nlohmann::json Document(Overrides overrides = {})
 {
-    return nlohmann::json {
-        { "bRuleEnabled", enabled },
-        { "dWriterConfig", { { "sFormat", format }, { "iIntervalMs", interval_ms } } },
-    };
+    auto j = nlohmann::json::parse(R"({
+        "iSchemaVersion": 2,
+        "bRuleEnabled": false,
+        "bContinuousRecordEnabled": false,
+        "dActions": {
+            "dPhoto": { "bEnabled": false, "sFormat": "JPG", "iIntervalMs": 5000 },
+            "dVideo": { "bEnabled": false, "iIntervalMs": 5000 },
+            "dSound": { "bEnabled": false }
+        }
+    })");
+    for (const auto &[pointer, value]: overrides)
+        j[nlohmann::json::json_pointer(pointer)] = value;
+    return j;
+}
+
+nlohmann::json Canonical(const RecordConfig &cfg, const Context &ctx)
+{
+    nlohmann::json j;
+    cfg.to(j, ctx);
+    return j;
+}
+
+// True when the document is rejected; an accepted document is printed so that a failed check names it.
+bool Rejected(const nlohmann::json &j, const Context &ctx)
+{
+    try
+    {
+        const RecordConfig cfg(j, ctx);
+    }
+    catch (const std::exception &)
+    {
+        return true;
+    }
+    std::fprintf(stderr, "accepted: %s\n", j.dump().c_str());
+    return false;
 }
 
 int64_t EstimateOneMiB(const char *, size_t, void *)
@@ -51,7 +87,140 @@ int64_t EstimateNothing(const char *, size_t, void *)
 
 } // namespace
 
-VG_TEST_CASE(default_settings_exist_before_any_configuration)
+VG_TEST_CASE(defaults_are_the_first_start_document)
+{
+    Fixture f;
+    const RecordConfig cfg;
+    VG_CHECK(!cfg.rule_enabled);
+    VG_CHECK(!cfg.continuous_enabled);
+    VG_CHECK(!cfg.photo.enabled && !cfg.video.enabled && !cfg.sound.enabled);
+    VG_CHECK_EQ(Canonical(cfg, f.ctx), Document());
+    VG_CHECK(cfg.createWriterSettings(f.ctx) == nullptr);
+    VG_CHECK_EQ(Canonical(RecordConfig(Document(), f.ctx), f.ctx), Document()); // and it round-trips
+}
+
+VG_TEST_CASE(parses_a_complete_document_and_returns_it_canonically)
+{
+    Fixture f;
+    const auto doc = Document(
+        { { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true }, { "/dActions/dPhoto/sFormat", "RAW" },
+            { "/dActions/dPhoto/iIntervalMs", 1500 }, { "/dActions/dVideo/iIntervalMs", 2500 } });
+    const RecordConfig cfg(doc, f.ctx);
+    VG_CHECK(cfg.rule_enabled);
+    VG_CHECK(!cfg.continuous_enabled);
+    VG_CHECK(cfg.photo.enabled);
+    VG_CHECK_EQ(cfg.photo.format, "RAW");
+    VG_CHECK_EQ(cfg.photo.interval.count(), 1500L);
+    VG_CHECK(!cfg.video.enabled);
+    VG_CHECK_EQ(cfg.video.interval.count(), 2500L);
+    VG_CHECK(!cfg.sound.enabled);
+    VG_CHECK_EQ(Canonical(cfg, f.ctx), doc);
+
+    // Unknown fields are ignored and dropped from the canonical document.
+    auto extra = doc;
+    extra["sNote"] = "dropped";
+    extra["dActions"]["dPhoto"]["iExtra"] = 1;
+    VG_CHECK_EQ(Canonical(RecordConfig(extra, f.ctx), f.ctx), doc);
+}
+
+VG_TEST_CASE(rejects_other_schemas_incomplete_documents_and_wrong_types)
+{
+    Fixture f;
+    VG_CHECK(!Rejected(Document(), f.ctx));
+    for (const auto &[pointer, value]: Overrides {
+             { "/iSchemaVersion", 1 },
+             { "/iSchemaVersion", "2" },
+             { "/iSchemaVersion", nullptr },
+             { "/bRuleEnabled", "yes" },
+             { "/bRuleEnabled", 1 },
+             { "/bContinuousRecordEnabled", 0 },
+             { "/dActions", nlohmann::json::array() },
+             { "/dActions/dPhoto", "JPG" },
+             { "/dActions/dPhoto/sFormat", "MP4" },
+             { "/dActions/dPhoto/sFormat", "jpg" },
+             { "/dActions/dPhoto/sFormat", 1 },
+             { "/dActions/dPhoto/iIntervalMs", 0 }, // pinned 2026-10-19 (docs/PLAN.md section 2): not "no gap"
+             { "/dActions/dVideo/iIntervalMs", -1 },
+             { "/dActions/dVideo/iIntervalMs", 1.5 },
+             { "/dActions/dVideo/iIntervalMs", "5000" },
+             { "/dActions/dVideo/iIntervalMs", uint64_t { 1 } << 63 }, // not representable as int64
+             { "/dActions/dSound/bEnabled", "false" },
+         })
+        VG_CHECK(Rejected(Document({ { pointer, value } }), f.ctx));
+
+    // Every field is required: a document missing any of them is rejected rather than defaulted.
+    for (const char *pointer: { "/iSchemaVersion", "/bRuleEnabled", "/bContinuousRecordEnabled", "/dActions",
+             "/dActions/dPhoto", "/dActions/dPhoto/sFormat", "/dActions/dVideo/iIntervalMs", "/dActions/dSound" })
+    {
+        auto doc = Document();
+        const nlohmann::json::json_pointer p(pointer);
+        doc[p.parent_pointer()].erase(p.back());
+        VG_CHECK(Rejected(doc, f.ctx));
+    }
+    // The retired version-1 shape is one such document; nothing is imported from it.
+    VG_CHECK(Rejected(
+        nlohmann::json::parse(R"({"bRuleEnabled":true,"dWriterConfig":{"sFormat":"MP4","iIntervalMs":5000}})"), f.ctx));
+    VG_CHECK(Rejected(nlohmann::json::array(), f.ctx));
+    VG_CHECK(Rejected(nlohmann::json(nullptr), f.ctx));
+}
+
+VG_TEST_CASE(rejects_capabilities_the_single_writer_runtime_cannot_run_yet)
+{
+    Fixture f;
+    VG_CHECK(Rejected(Document({ { "/bContinuousRecordEnabled", true } }), f.ctx));
+    VG_CHECK(Rejected(Document({ { "/dActions/dSound/bEnabled", true } }), f.ctx));
+    VG_CHECK(
+        Rejected(Document({ { "/dActions/dPhoto/bEnabled", true }, { "/dActions/dVideo/bEnabled", true } }), f.ctx));
+    VG_CHECK(Rejected(Document({ { "/bRuleEnabled", true } }), f.ctx)); // rules on with nothing to do
+    VG_CHECK(!Rejected(Document({ { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true } }), f.ctx));
+    VG_CHECK(!Rejected(Document({ { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true } }), f.ctx));
+    VG_CHECK(!Rejected(Document({ { "/dActions/dVideo/bEnabled", true } }), f.ctx)); // rules off, action armed
+}
+
+VG_TEST_CASE(writer_settings_follow_the_single_enabled_file_action)
+{
+    Fixture f;
+    const auto photo
+        = RecordConfig(Document({ { "/dActions/dPhoto/bEnabled", true }, { "/dActions/dPhoto/sFormat", "RAW" },
+                           { "/dActions/dPhoto/iIntervalMs", 1500 } }),
+            f.ctx)
+              .createWriterSettings(f.ctx);
+    VG_REQUIRE(photo != nullptr);
+    VG_CHECK(photo->type == CaptureType::Image);
+    VG_CHECK_EQ(photo->format, "RAW");
+    VG_CHECK_EQ(photo->interval.count(), 1500L);
+    VG_CHECK_EQ(photo->file_name_prefix, kRecordWriterPrefixDefault);
+    VG_CHECK_EQ(photo->video_clip_length.count(), kVideoClipLengthDefault.count());
+    VG_CHECK(photo->watermarks == WaterMarks::from("RAW", 1, nullptr));
+
+    const auto video = RecordConfig(
+        Document({ { "/dActions/dVideo/bEnabled", true }, { "/dActions/dVideo/iIntervalMs", 2500 } }), f.ctx)
+                           .createWriterSettings(f.ctx);
+    VG_REQUIRE(video != nullptr);
+    VG_CHECK(video->type == CaptureType::Video);
+    VG_CHECK_EQ(video->format, "MP4");
+    VG_CHECK_EQ(video->interval.count(), 2500L);
+    VG_CHECK(video->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), nullptr));
+}
+
+VG_TEST_CASE(sync_publishes_the_settings_and_the_rule_flag)
+{
+    Fixture f;
+    const auto rev0 = f.ctx.shared_writer_settings.getRevision();
+    const RecordConfig photo(Document({ { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true } }), f.ctx);
+    VG_CHECK_EQ(photo.sync(f.ctx), 0);
+    VG_CHECK(f.ctx.record_rule_enabled.load());
+    VG_CHECK_EQ(f.ctx.shared_writer_settings.get().second->format, "JPG");
+    VG_CHECK_EQ(f.ctx.shared_writer_settings.getRevision(), rev0 + 1);
+
+    // No enabled file action: the flag is published and the writer settings stay as they were.
+    VG_CHECK_EQ(RecordConfig(Document(), f.ctx).sync(f.ctx), 0);
+    VG_CHECK(!f.ctx.record_rule_enabled.load());
+    VG_CHECK_EQ(f.ctx.shared_writer_settings.get().second->format, "JPG");
+    VG_CHECK_EQ(f.ctx.shared_writer_settings.getRevision(), rev0 + 1);
+}
+
+VG_TEST_CASE(default_writer_settings_exist_before_any_configuration)
 {
     Fixture f;
     const auto settings = f.ctx.shared_writer_settings.get().second;
@@ -62,98 +231,6 @@ VG_TEST_CASE(default_settings_exist_before_any_configuration)
     VG_CHECK_EQ(settings->video_clip_length.count(), kVideoClipLengthDefault.count());
     VG_CHECK_EQ(settings->file_name_prefix, kRecordWriterPrefixDefault);
     VG_CHECK(!f.ctx.record_rule_enabled.load());
-
-    nlohmann::json j;
-    RecordConfig::from(f.ctx).to(j, f.ctx);
-    VG_CHECK_EQ(j, RecordJson(false, "MP4", 5000));
-}
-
-VG_TEST_CASE(parses_the_current_shape_and_round_trips)
-{
-    Fixture f;
-    const auto j = RecordJson(true, "JPG", 1500);
-    const RecordConfig cfg(j, f.ctx);
-    VG_CHECK(cfg.enabled);
-    VG_REQUIRE(cfg.settings != nullptr);
-    VG_CHECK(cfg.settings->type == CaptureType::Image);
-    VG_CHECK_EQ(cfg.settings->format, "JPG");
-    VG_CHECK_EQ(cfg.settings->interval.count(), 1500L);
-    VG_CHECK_EQ(cfg.settings->file_name_prefix, kRecordWriterPrefixDefault);
-    VG_CHECK_EQ(cfg.settings->video_clip_length.count(), kVideoClipLengthDefault.count());
-    VG_CHECK_EQ(cfg.settings_rev, f.ctx.shared_writer_settings.getRevision()); // prepared against the current revision
-
-    nlohmann::json out;
-    cfg.to(out, f.ctx);
-    VG_CHECK_EQ(out, j);
-
-    const RecordConfig raw(RecordJson(false, "RAW", 100), f.ctx);
-    VG_CHECK(!raw.enabled);
-    VG_CHECK(raw.settings->type == CaptureType::Image);
-    VG_CHECK_EQ(raw.settings->format, "RAW");
-
-    // Unknown fields are ignored.
-    auto extra = j;
-    extra["sUnknown"] = 1;
-    extra["dWriterConfig"]["iExtra"] = 2;
-    const RecordConfig with_extra(extra, f.ctx);
-    VG_CHECK(with_extra.enabled);
-}
-
-VG_TEST_CASE(rejects_non_positive_intervals_unknown_formats_and_wrong_types)
-{
-    Fixture f;
-    // Pinned on 2026-10-19 (docs/PLAN.md section 2): a zero interval is rejected, not treated as "no gap".
-    VG_CHECK_THROWS(RecordConfig(RecordJson(true, "MP4", 0), f.ctx));
-    VG_CHECK_THROWS(RecordConfig(RecordJson(true, "MP4", -1), f.ctx));
-    VG_CHECK_THROWS(RecordConfig(RecordJson(true, "AVI", 1000), f.ctx));
-    VG_CHECK_THROWS(RecordConfig(RecordJson(true, "mp4", 1000), f.ctx)); // case-sensitive
-
-    auto wrong_enabled = RecordJson(true, "MP4", 1000);
-    wrong_enabled["bRuleEnabled"] = "yes";
-    VG_CHECK_THROWS(RecordConfig(wrong_enabled, f.ctx));
-    auto missing_enabled = RecordJson(true, "MP4", 1000);
-    missing_enabled.erase("bRuleEnabled");
-    VG_CHECK_THROWS(RecordConfig(missing_enabled, f.ctx));
-    auto missing_writer = RecordJson(true, "MP4", 1000);
-    missing_writer.erase("dWriterConfig");
-    VG_CHECK_THROWS(RecordConfig(missing_writer, f.ctx));
-    auto string_interval = RecordJson(true, "MP4", 1000);
-    string_interval["dWriterConfig"]["iIntervalMs"] = "1000";
-    VG_CHECK_THROWS(RecordConfig(string_interval, f.ctx));
-    auto missing_format = RecordJson(true, "MP4", 1000);
-    missing_format["dWriterConfig"].erase("sFormat");
-    VG_CHECK_THROWS(RecordConfig(missing_format, f.ctx));
-}
-
-VG_TEST_CASE(sync_applies_the_snapshot_only_at_the_expected_revision)
-{
-    Fixture f;
-    const auto rev0 = f.ctx.shared_writer_settings.getRevision();
-
-    const RecordConfig first(RecordJson(true, "MP4", 2000), f.ctx);
-    VG_CHECK_EQ(first.sync(f.ctx), 0);
-    VG_CHECK(f.ctx.record_rule_enabled.load());
-    VG_CHECK_EQ(f.ctx.shared_writer_settings.getRevision(), rev0 + 1);
-    VG_CHECK_EQ(f.ctx.shared_writer_settings.get().second->interval.count(), 2000L);
-    VG_CHECK_EQ(RecordConfig::from(f.ctx).settings->interval.count(), 2000L);
-
-    // Two configurations prepared against the same revision: the second one to commit loses.
-    const RecordConfig second(RecordJson(true, "MP4", 2500), f.ctx);
-    const RecordConfig third(RecordJson(true, "JPG", 3000), f.ctx);
-    VG_CHECK_EQ(second.sync(f.ctx), 0);
-    VG_CHECK_EQ(f.ctx.shared_writer_settings.getRevision(), rev0 + 2);
-    VG_CHECK_EQ(third.sync(f.ctx), EAGAIN);
-    VG_CHECK_EQ(f.ctx.shared_writer_settings.getRevision(), rev0 + 2);
-    VG_CHECK_EQ(f.ctx.shared_writer_settings.get().second->format, "MP4");
-    VG_CHECK_EQ(f.ctx.shared_writer_settings.get().second->interval.count(), 2500L);
-    // Note: today sync() stores bRuleEnabled before the revision check, so a losing commit still changes
-    // enablement. Phase 1C makes a conflict leave both unchanged (docs/PLAN.md section 4.3) and adds that
-    // assertion here.
-
-    // Re-committing identical settings succeeds without bumping the revision.
-    const RecordConfig same(RecordJson(true, "MP4", 2500), f.ctx);
-    VG_CHECK_EQ(same.sync(f.ctx), 0);
-    VG_CHECK_EQ(f.ctx.shared_writer_settings.getRevision(), rev0 + 2);
 }
 
 VG_TEST_CASE(watermarks_follow_the_format_table_unless_the_host_estimates)
@@ -172,8 +249,8 @@ VG_TEST_CASE(watermarks_follow_the_format_table_unless_the_host_estimates)
     VG_CHECK_EQ(mp4.high_remain_bytes, 5 * 180 * kMiB + kMinFree);
 
     // Not asserted: WaterMarks::from with an unknown format reads past the end of its format table instead
-    // of reaching the fallback entry (found 2026-10-19). It is unreachable today because every caller
-    // validates the format first; the fix is tracked in docs/TODO.md (SAFE-7).
+    // of reaching the fallback entry (found 2026-10-19). It is unreachable because every caller validates
+    // the format first; the fix is tracked in docs/TODO.md (SAFE-7).
 
     vg_config_media_t media {};
     media.max_bytes_estimate_cb = &EstimateOneMiB;
