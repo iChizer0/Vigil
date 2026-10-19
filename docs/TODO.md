@@ -1,3 +1,5 @@
+# Original Request
+
 We plan to refactor to meet new requirements. First, please familiarize yourself with the project structure, then design, discuss (ask promptly if anything is unclear), and refine the refactoring plan. The specific details are as follows:
 
 **Engineering Guidelines (Plan First):**
@@ -14,113 +16,98 @@ We plan to refactor to meet new requirements. First, please familiarize yourself
 3. Support configurable standalone continuous recording. When standalone recording is enabled, the video recording action within the post-trigger behaviors should automatically be disabled.
 4. Enhance the content of post-trigger event reporting. For complex `Record Rules`, structured event information may need to be retained to ensure observability.
 
-# DRAFT
+> **Status 2026-10-19:** requirement 1 (`Mixed Rule`) is dropped. The checklist below covers requirements 2 to 4 only; rule selection and evaluation stay as they are today. With no complex rules, requirement 4 reduces to filling in attribution that is empty today and exposing per-channel action status.
+
+# Refactor Checklist (DRAFT)
 
 ## 1. Scope and engineering discipline
 
 - [ ] **ENG-1** Separate configuration, rule evaluation, action execution, and the public C API. Keep each layer's responsibilities explicit.
-- [ ] **ENG-2** Implement the six phases in `docs/PLAN.md` as small, independently reviewable changes. Keep prerequisite correctness fixes separate from new rule/action semantics.
-- [ ] **ENG-3** Preserve unrelated APIs and behavior. Do not introduce a generic scheduler, thread pool, multi-candidate queue, durable event bus, or source-identity framework.
+- [ ] **ENG-2** Implement the five phases in `docs/PLAN.md` as small, independently reviewable changes. Keep prerequisite correctness fixes separate from new action semantics.
+- [ ] **ENG-3** Preserve unrelated APIs and behavior. Do not introduce a generic scheduler, thread pool, rule arbitration, durable event bus, or source-identity framework.
 - [ ] **ENG-4** Keep implementation, tests, examples, and documentation within this module. Represent media dependencies through the existing callback boundary and deterministic fakes, not device-specific implementations.
-- [ ] **ENG-5** Establish reproducible module-owned tests and CTest registration. Existing examples and generated files in `build/` are not a regression suite.
+- [ ] **ENG-5** Establish reproducible module-owned tests and CTest registration. Existing examples and generated files in any build directory are not a regression suite; a fresh configure in the dev container reports `ctest -N` as `Total Tests: 0` (verified 2026-10-19).
 - [ ] **ENG-6** Every change must have an objective, expected result, compatibility implications, and validation evidence. Never accept a configuration for a capability that the intermediate implementation does not yet support.
 
-## 2. Rules, full evaluation, and arbitration
+## 2. Rule evaluation (preserved)
 
-- [ ] **RULE-1** Add `MIXED`: OR across distinct rule types, with at most one child of each type. Allow only `INFERENCE_SET`, `SED`, `GPIO`, `TTY`, `TIMER`, and `HTTP`; reject duplicates, empty lists, unknown types, and nested `MIXED`.
-- [ ] **RULE-2** Evaluate every enabled, schedule-open MIXED child exactly once per tick. Evaluate every `InferenceRuleSet` member even after an earlier member matches. A recoverable child error must not skip later children.
-- [ ] **RULE-3** Use `Inactive`, `OnHold`, and `Active` results. Only `Active` carries an owner. Keep full state advancement separate from winner selection; `OnHold` is an unfinished-confirmation qualifier, not source health or a new Boolean algebra.
-- [ ] **RULE-4** Apply the explicit priority order `INFERENCE_SET > SED > GPIO > TTY > TIMER > HTTP`, independent of configuration-list order and existing tied precedence values.
-- [ ] **RULE-5** Maintain one pending MIXED candidate: earliest owner wins at equal priority; strictly higher priority replaces the owner without refreshing the deadline. Lower-priority matches are consumed and discarded/coalesced.
-- [ ] **RULE-6** Wait only for higher-priority `OnHold` results, using an initial 500 ms arbitration budget. Evaluate before deciding on the deadline tick. Never create an event from timeout alone or reset inference debounce because the deadline elapsed.
-- [ ] **RULE-7** Explicitly retain single-winner, lossy coalescing. Do not claim lossless edges, fair attribution, cross-tick scene deduplication, or one report per physical incident. A late confirmation may produce another RULE.
-- [ ] **RULE-8** Preserve inference source filters, confidence/class filters, ROI behavior, and increment/decrement debounce. Missing frames, unrelated sources, and discrete EVENT input must not alter the counter. Queue reset remains queue-only.
-- [ ] **RULE-9** Track inference hold eligibility separately from its counter: negative input or gate closure ends eligibility; an empty tick after confirmation is `Inactive`, not a repeated owner or renewed hold.
-- [ ] **RULE-10** Keep SED input confirmation separate from sound playback. Use one consistent snapshot of pending activation and unfinished confirmation; consume activation first. Preserve the time-window algorithm and document silence, ignored input, disconnect, and gate-close behavior.
-- [ ] **RULE-11** Make TTY connection and evaluation bounded: nonblocking connection state, completion checks, retry backoff, per-tick read limits, bounded match counts, RAII buffers, and correct overlapping-prefix matching. Do not add an arbitrary 200 ms partial-command reset.
-- [ ] **RULE-12** GPIO remains `Active`/`Inactive` unless the callback actually supplies more state. Validate the callback for the selected level/edge mode. Preserve observed historical candidates and explicitly acknowledge edge coalescing.
-- [ ] **RULE-13** Replace direct HTTP dispatch with a thread-safe capacity-one request latch consumed by the evaluation thread. Bound payload size before parsing and reject lock contention quickly; activation must not wait for configuration I/O, resource handover, or media drain.
-- [ ] **RULE-14** An HTTP acknowledgement means request acceptance, not arbitration victory or action success. Storage availability must not reject rule-only or sound-only activation.
-- [ ] **RULE-15** Preserve direct discrete EVENT delivery, gated by rule enablement and schedule. Also evaluate the configured tree on that tick. Dispatch EVENT first, then the configured winner; both publish separate RULE events and independently attempt action admission.
+- [ ] **RULE-1** Keep rule selection and evaluation as today: one selected rule, one owner or nothing per tick, first-match `InferenceRuleSet`, and `record_rule_config.json` unchanged. No `MIXED`, priorities, or three-state results.
+- [ ] **RULE-2** Preserve inference source/confidence/class/ROI filters and the saturating debounce counter. Missing frames, unrelated sources, and direct EVENT input must not alter the counter. Queue reset remains queue-only.
+- [ ] **RULE-3** Keep the SED input rule unchanged (time-window algorithm, frame bound, reconnect backoff, latched activation) and separate from `dSound` playback. Document silence, ignored input, disconnect, and gate-close behavior as observed.
+- [ ] **RULE-4** TTY: free the read buffer (the current `new char[]` buffer is never freed) and fix the mismatch fallback so overlapping prefixes such as `AAB` in `AAAB` match. Change nothing else; do not add a partial-command timeout.
+- [ ] **RULE-5** GPIO: validate the sync callback for the selected level/edge mode at construction; today only "either callback exists" is checked, so an event-mode rule can call a null callback. Level/edge semantics are unchanged.
+- [ ] **RULE-6** HTTP activation stays on the request thread and goes through the new `dispatchRuleEvent` path. Bound the request body before parsing. Keep today's response meaning: `code=0` when dispatched and, if any file action is enabled, at least one was accepted; `EBUSY` when every enabled file action was busy or unavailable. The storage precheck applies only when a file action is enabled.
+- [ ] **RULE-7** Preserve direct discrete EVENT delivery, gated by rule enablement and schedule, bypassing the selected rule on that tick.
 
 ## 3. Event identity and observability
 
-- [ ] **EVT-1** Extend `EventOwner` and `vg_rule_evt_t` with a bounded top-to-leaf winning `trace`; require `type == trace[0]`. Current legal depth is at most three, with capacity four and explicit overflow checks.
-- [ ] **EVT-2** Preserve simple RULE events: no `triggers[]`, no action-result `actions[]`, and no all-children evaluation trace. `dActions` is a configuration object only.
-- [ ] **EVT-3** Normalize attribution: inference condition ID/source ID; SED model ID; GPIO signal/pin name; TTY command/port name; empty condition IDs for Timer, HTTP, and direct EVENT. Preserve FRAME/EVENT delivery semantics.
-- [ ] **EVT-4** Capture owner UID, timestamp, ID, and source once. Prepend each parent type only once before publication; publish immutable ownership and never reuse a discarded candidate's UID.
-- [ ] **EVT-5** Separate event time, current wall time, and steady time. Update clocks even when rules are disabled; inference timestamps must not replace the system's current time. FILE timestamps describe publication.
-- [ ] **EVT-6** Preserve exact 64-bit UID values. Every file action retains its admitted owner's UID; several FILE events may share one RULE UID. Continuous files use `event_uid=0` and retain independent file identities.
-- [ ] **EVT-7** Define `writer_created` as `photo_accepted || video_accepted`, not successful file creation, sound success, or proof that all actions completed.
-- [ ] **EVT-8** Maintain `last_rule_owner` independently of file tasks. Expose `lTrace` and separate Photo/Video/Sound status in rule info; document any retained aggregate compatibility fields.
-- [ ] **EVT-9** Document callback borrowing, best-effort reporting, possible RULE/FILE reordering, and zero-to-many file association. Do not promise an expected artifact count or end-to-end delivery guarantee.
+- [ ] **EVT-1** Keep the `vg_rule_evt_t` layout and `vg_rule_type_e` values. Fill the empty GPIO (`id` = signal, `source_id` = pin name) and TTY (`id` = command, `source_id` = TTY name) attribution; keep empty condition IDs for Timer, HTTP, ALWAYS_ON, and direct EVENT, and `source_delivery=EVENT` for owners without a source (current behavior, kept by decision on 2026-10-19; pin with a test).
+- [ ] **EVT-2** Keep RULE events simple: no `trace`, no `triggers[]`, no action-result `actions[]`. `dActions` is a configuration object only.
+- [ ] **EVT-3** Separate event time, current wall time, and steady time. Update clocks even when rules are disabled; inference timestamps must not replace the system's current time. FILE timestamps describe publication.
+- [ ] **EVT-4** Preserve exact 64-bit UID values. Every file action retains its admitted owner's UID; several FILE events may share one RULE UID. Continuous files use `event_uid=0` and retain independent file identities.
+- [ ] **EVT-5** Define `writer_created` as `photo_accepted || video_accepted`, not successful file creation, sound success, or proof that all actions completed.
+- [ ] **EVT-6** Maintain `last_rule_owner` independently of file tasks. Expose separate Photo/Video/Sound status in rule info. Keep the existing fields with a defined meaning (`bReadyForNewEvent`: no file channel holds a task; `dLastRuleEvent`/`dLastRuleEventOwner`: most recently accepted file task across channels, identical to today for a single file action) and document `iOwnerUID`, `iUID`, `sSourceID`, `sSourceDelivery`.
+- [ ] **EVT-7** Document callback borrowing, best-effort reporting, possible RULE/FILE reordering, and zero-to-many file association. Do not promise an expected artifact count or end-to-end delivery guarantee.
 
 ## 4. Configuration and compatibility
 
-- [ ] **CFG-1** Introduce schema version 2 for record action and selected-rule configurations. Reject unsupported future versions without modifying their files; distinguish missing files from invalid existing files.
+- [ ] **CFG-1** Read and write only the version-2 record action configuration; `iSchemaVersion` is required and must be 2. Reject a missing version, the old `dWriterConfig` shape, or any other version without modifying the file (an external manager migrates old files); distinguish missing files from invalid existing files. `record_rule_config.json` and `schedule_rule_config.json` are unchanged.
 - [ ] **CFG-2** Add `bContinuousRecordEnabled` and `dActions.dPhoto/dVideo/dSound`. New actions default to disabled; Photo defaults to JPG; Photo/Video intervals default to 5000 ms. Sound has only an enable switch.
-- [ ] **CFG-3** Validate types strictly. Photo accepts only JPG/RAW, Video is MP4, and Photo/Video intervals are nonnegative representable integers. Reject fractions, negative values, and overflow rather than substituting defaults.
-- [ ] **CFG-4** Read legacy `dWriterConfig` as the equivalent single file action, preserving rule enablement, format, and interval. Keep continuous and sound disabled. Do not automatically convert `ALWAYS_ON` to continuous MP4.
-- [ ] **CFG-5** Write and return canonical versioned JSON. Reject mixed new/legacy structures and destructive legacy whole-object overwrites of MIXED, multi-action, sound, or continuous configurations. Retain inactive rule configuration blocks.
-- [ ] **CFG-6** Commit enablement, actions, derived settings, and watermarks as an immutable snapshot. Serialize configuration commits and media-settings refresh; revision conflicts must not partially apply.
-- [ ] **CFG-7** Define durable commit boundaries: failure before rename leaves old disk/runtime state; successful rename publishes the matching runtime snapshot. A later directory-fsync failure means **applied, durability unconfirmed**, not uncommitted. Expose that state and block further persistent commits until recovery.
-- [ ] **CFG-8** Validate configuration before enabling automatic work at startup. Corrupt rules, actions, or schedule must fail closed without overwriting the source file or silently enabling default `ALWAYS_ON`/ungated recording.
-- [ ] **CFG-9** Prepare replacement rules before releasing old resources where possible. Use explicit handover for exclusive resources, clean partial construction, and fail closed if best-effort restoration fails. Do not promise restoration of old debounce/timer/connection state.
-- [ ] **CFG-10** Validate legacy `ALWAYS_ON` restrictions in both configuration POSTs and startup under the same serialized combined-state check: one enabled file channel, sound disabled, continuous disabled. Preserve MP4/JPG/RAW, original pacing, schedule, and UID association.
-- [ ] **CFG-11** Resolve existing documented-versus-implemented edge cases with separate tests and compatibility notes: debounce zero, empty SED class filters, interval zero, and direct EVENT attribution. Do not silently redefine them inside the refactor.
+- [ ] **CFG-3** Validate types strictly. Photo accepts only JPG/RAW, Video is MP4, and Photo/Video intervals are positive representable integers, as `iIntervalMs` is today. Reject zero, fractions, negative values, and overflow rather than substituting defaults.
+- [ ] **CFG-4** Write and return the canonical version-2 JSON. Until Phase 4D, reject payloads that enable more than one file action, Sound, or continuous recording instead of accepting a no-op write.
+- [ ] **CFG-5** Commit enablement, actions, derived settings, and watermarks as an immutable snapshot. Serialize configuration commits and media-settings refresh; recheck the revision before changing any runtime flag so a conflict applies nothing. Write and fsync the temporary file, then rename; failure before rename leaves old disk and runtime state.
+- [ ] **CFG-6** Validate configuration before enabling automatic work at startup. Corrupt rules, actions, or schedule must fail closed without overwriting the source file or silently leaving the default `ALWAYS_ON`/ungated recording live. A missing selected-rule file keeps today's `ALWAYS_ON` default.
+- [ ] **CFG-7** Validate the `ALWAYS_ON` invariant in both configuration POSTs and startup under the same serialized combined-state check: one enabled file channel, sound disabled, continuous disabled. Preserve MP4/JPG/RAW, original pacing, schedule, and UID association.
+- [ ] **CFG-8** Pin the documented-versus-implemented edge cases with tests and fix the documentation, keeping the implemented behavior: debounce zero (reject only negative/oversized values), empty SED class filter, interval zero rejection, and direct EVENT attribution.
 
 ## 5. Independent action execution
 
 - [ ] **ACT-1** Dispatch Photo, Video, and Sound independently after attribution. Failure, cooldown, or unavailability in one channel must not suppress the other channels or RULE reporting.
-- [ ] **ACT-2** Give Photo and Video independent settings and intervals. The next successful start is no earlier than `max(previous actual start + interval, previous finalization completion)`; zero interval does not permit concurrent writers within one channel.
+- [ ] **ACT-2** Give Photo and Video independent settings and intervals. The next successful start is no earlier than `max(previous actual start + interval, previous finalization completion)`; a channel never runs two automatic tasks at once.
 - [ ] **ACT-3** Bind each accepted file task to its owner, immutable channel settings, and Slot identity. Implement identity-aware `tryAccept`, `claim`, `complete(expected_task)`, and pending cancellation; separate cancellation from stopping running work.
-- [ ] **ACT-4** Keep global revision for commits, not universal writer interruption. Channel-specific changes affect that channel; media refresh updates both triggered and continuous video settings coherently.
+- [ ] **ACT-4** Keep the global revision for commits, not universal writer interruption. Channel-specific changes affect only that channel, and changing a channel's own settings still finalizes its running task as today; media refresh updates both triggered and continuous video settings coherently. Dispatch may run on the rule thread and the HTTP thread concurrently.
 - [ ] **ACT-5** Use one Photo worker and one automatic Video worker per enabled Slot. Photo must not consume the video queue. Manual capture retains its own queue and lifecycle; do not build a general job scheduler.
 - [ ] **ACT-6** Add one sound worker with `Idle / Pending / Playing / Stopping` protected by a mutex and condition variable. Reject Pending/Playing retriggers, keep no backlog or business cooldown, and do not retry a failed trigger automatically.
-- [ ] **ACT-7** Add optional `vg_sta_e (*sound_play_cb)(void *user_data)` to the media callback surface. Null means unavailable. Call outside internal locks and report real errors; require bounded total callback completion.
+- [ ] **ACT-7** Append optional `vg_sta_e (*sound_play_cb)(void *user_data)` to the media callback surface. Null means unavailable. Call outside internal locks and report real errors; require bounded total callback completion.
 - [ ] **ACT-8** Cancel pending sound on disable/gate closure/stop; let an in-flight bounded callback finish before joining. No detached threads, forced termination, or claims that a stop flag can interrupt an arbitrary C callback.
 
 ## 6. Gates and continuous recording
 
-- [ ] **GATE-1** Rule disable and schedule closure block new configured/direct EVENT dispatch and triggered-action admission. Clear MIXED pending, HTTP/SED latches, TTY completed/partial input, and cached GPIO edges; do not replay disabled-period input.
-- [ ] **GATE-2** Preserve inference counters across gate closure but stop accumulating and clear hold eligibility. Timer does not catch up every missed interval; GPIO level reads the current value on reopening.
-- [ ] **GATE-3** Make gate changes and action admission linearizable so an old tick cannot enqueue work after closure. Never join a worker while holding a configuration lock it needs.
-- [ ] **GATE-4** Independent continuous MP4 obeys schedule but ignores `bRuleEnabled`. Storage and media availability still gate its execution. When continuous is configured, triggered Video is suppressed even while continuous cannot currently run; do not rewrite `dVideo.bEnabled`.
-- [ ] **GATE-5** Use the single Video worker for triggered/continuous mode handover. Cancel old pending work, finalize the current clip with its original owner, and release its sink before starting the other mode. Never overlap automatic muxers or revive old tasks.
-- [ ] **GATE-6** On schedule closure, finalize the current continuous clip promptly through bounded checks. Preserve the existing admission-only schedule policy for already-started triggered video; rule disable requests triggered-video stop.
-- [ ] **GATE-7** Continuous entry/resume starts at a new post-admission keyframe without historical pre-roll. Normal adjacent continuous clips retain keyframe continuity. Keep the 60-second target, not an exact-duration or gap-free guarantee.
-- [ ] **GATE-8** Bound initial-keyframe wait, end-keyframe wait, and input-loss handling. Define failure/interrupted-clip behavior and avoid zero-interval failure retry loops.
+- [ ] **GATE-1** Rule disable and schedule closure block new dispatch and triggered-action admission. Rule disable also cancels pending triggered actions and stops a running triggered video, as today; schedule closure lets an already-accepted task start and finish, as today. Storage unavailability rejects file actions at dispatch instead of parking one event that blocks all later ones. Leaf rule state keeps today's behavior across closure (counters survive, inference queue cleared while disabled, Timer does not catch up, GPIO level reads the current value).
+- [ ] **GATE-2** Make gate changes and action admission linearizable so an old tick cannot enqueue work after closure. Never join a worker while holding a configuration lock it needs.
+- [ ] **GATE-3** Independent continuous MP4 obeys schedule but ignores `bRuleEnabled`. Storage and media availability still gate its execution. When continuous is configured, triggered Video is suppressed even while continuous cannot currently run; do not rewrite `dVideo.bEnabled`.
+- [ ] **GATE-4** Use the single Video worker for triggered/continuous mode handover. Cancel old pending work, finalize the current clip with its original owner, and release its sink before starting the other mode. Never overlap automatic muxers or revive old tasks.
+- [ ] **GATE-5** On schedule closure, finalize the current continuous clip promptly through bounded checks. Preserve the existing admission-only schedule policy for already-started triggered video; rule disable requests triggered-video stop.
+- [ ] **GATE-6** Continuous entry/resume starts at a new post-admission keyframe without historical pre-roll. Normal adjacent continuous clips retain keyframe continuity. Keep the 60-second target, not an exact-duration or gap-free guarantee.
+- [ ] **GATE-7** Bound initial-keyframe wait, end-keyframe wait, and input-loss handling. Define failure/interrupted-clip behavior with bounded per-channel failure backoff.
 
 ## 7. Lifecycle, media admission, and storage prerequisites
 
 - [ ] **SAFE-1** Fix current single-writer ownership/finalization defects before adding parallel writers. Old task completion must never clear a newer task.
-- [ ] **SAFE-2** Linearize media pause with new-operation admission and use exception-safe activity guards before fallible create calls. Cover automatic/manual video, image capture, device-dependent thumbnails, and sound.
-- [ ] **SAFE-3** Support balanced overlapping pause/resume and explicit stop ordering. Release global instance/configuration/device-operation locks before waiting for workers that need or may reenter them.
+- [ ] **SAFE-2** Linearize media pause with new-operation admission and use exception-safe activity guards before fallible create calls (the `VideoWriter` constructor leaks `media_writers_active` today). Cover automatic/manual video, image capture, device-dependent thumbnails, and sound.
+- [ ] **SAFE-3** Keep balanced overlapping pause/resume and explicit stop ordering. Release global instance/configuration/device-operation locks before waiting for workers that need or may reenter them; `vg_service_deinit` holds the instance lock while joining today.
 - [ ] **SAFE-4** Execute `claim -> admission recheck -> create/write -> finish -> publish -> terminal result`, release resources, then apply channel cooldown. Destructors are cleanup fallbacks, not the normal publication mechanism.
-- [ ] **SAFE-5** Handle create/write/finish/rename failures uniformly: correct terminal status, no false success FILE, balanced activity/budget counts, and bounded per-channel retry backoff.
+- [ ] **SAFE-5** Handle create/write/finish/rename failures uniformly: correct terminal status, no false success FILE, balanced activity/budget counts, and today's 3-second cooldown and 10-consecutive-failure limit applied per channel (reaching it marks the Slot failed, as today).
 - [ ] **SAFE-6** Make directory creation idempotent and non-destructive. Coordinate final publication with rotation/removal; use collision-safe non-overwriting automatic file naming, including continuous UID-zero files.
-- [ ] **SAFE-7** Synchronize shared space probes and state. Estimate one simultaneous video plus photo, include pre-roll/GOP/thumbnail margin, and register in-flight budgets across automatic and manual capture on the same filesystem. Still handle actual ENOSPC and device failure.
-- [ ] **SAFE-8** Do not terminate a healthy active video merely because a settings change raises the new-task admission watermark.
-- [ ] **SAFE-9** On Slot switch/removal, close admission and join the old consumers before opening the new Slot. Do not migrate tasks across devices. Roll back partial worker startup safely.
-- [ ] **SAFE-10** Stop rule production, cancel pending work, drain/join action and capture workers, finish publication, then tear down storage and Context. Keep callback data alive until joins complete and prohibit synchronous self-join operations from callbacks.
+- [ ] **SAFE-7** Synchronize shared space probes and state. Estimate one simultaneous video plus photo, include pre-roll/GOP/thumbnail margin, and register in-flight budgets across automatic and manual capture on the same filesystem. Still handle actual ENOSPC and device failure. Do not terminate a healthy active video merely because a settings change raises the new-task admission watermark.
+- [ ] **SAFE-8** On Slot switch/removal, close admission and join the old consumers before opening the new Slot; do not migrate tasks across devices. Stop rule production, cancel pending work, drain/join action and capture workers, finish publication, then tear down storage and Context. Keep callback data alive until joins complete and prohibit synchronous self-join operations from callbacks.
 
 ## 8. Public API and module documentation
 
-- [ ] **API-1** Append `VG_RULE_TYPE_MIXED = 10`; preserve values 0-9 and update every module-owned type/string conversion.
-- [ ] **API-2** Append fixed-capacity trace fields, validate lengths/types, and update public version declarations. `trace_len=0` fallback is source compatibility for the new layout, not binary compatibility.
-- [ ] **API-3** Document that growing `vg_config_media_t` changes enclosing `vg_config_t` layout. Rebuild the library and module examples together; no old/new binary-layout mixing is supported by the current initialization API.
-- [ ] **API-4** Audit all module-owned initializers, borrowed-pointer lifetimes, and callback status handling, including nonzero positive error codes and null callbacks.
-- [ ] **API-5** Update `docs/minimal-http-api.md`, `docs/architecture.dot`, public header comments, and relevant examples after implementation. Keep current behavior distinct from planned behavior until then.
-- [ ] **API-6** Document capability limits without embedding playback, device routing, or application implementations in Vigil. A fake callback passing tests does not establish real-device timing guarantees.
+- [ ] **API-1** Append `sound_play_cb` to `vg_config_media_t` and update `VG_CTYPES_VERSION` and `VG_CAPI_VERSION` in Phase 4B, so Phases 1 to 3 need no host rebuild. No new enum values; `vg_rule_evt_t` and `vg_file_evt_t` keep their layout.
+- [ ] **API-2** Document that growing `vg_config_media_t` changes the enclosing `vg_config_t` layout. Rebuild the library and module examples together; no old/new binary-layout mixing is supported by the current initialization API.
+- [ ] **API-3** Audit all module-owned initializers, borrowed-pointer lifetimes, and callback status handling, including nonzero positive error codes and null callbacks.
+- [ ] **API-4** Update `docs/minimal-http-api.md` (rule-info fields the code already emits, debounce and interval prose, empty SED filter, direct EVENT id), `docs/architecture.dot` (TTY matcher, SED/ALWAYS_ON rules, `tryCreateWriterEvent` name), `README.txt` (its option list omits the jemalloc options and must gain any test option), public header comments (`source_delivery` wording), and relevant examples after implementation. Keep current behavior distinct from planned behavior until then.
+- [ ] **API-5** Document capability limits without embedding playback, device routing, or application implementations in Vigil: a SED rule with Sound enabled can retrigger itself through the microphone, and a persistently failing Photo callback still stops automatic recording on that Slot. A fake callback passing tests does not establish real-device timing guarantees.
 
 ## 9. Verification and review handoff
 
-- [ ] **TEST-1** Test production rule/arbitration code with a controllable clock and scripted inputs: full evaluation, slow inputs, reset, priority ties/replacement, 499/500/501 ms boundaries, and EVENT plus configured RULE output.
-- [ ] **TEST-2** Test bounded TTY/SED behavior, GPIO consumption, HTTP concurrency/payload bounds, gate close/reopen, and configuration replacement failures.
+- [ ] **TEST-1** Pin current rule behavior with a controllable clock and scripted inputs: first-match set, debounce counter including zero, missing/unrelated/negative input, queue reset, EVENT bypass, gate close/reopen.
+- [ ] **TEST-2** Test the named peripheral fixes only (TTY leak and overlapping prefixes, GPIO callback validation), SED behavior as observed, HTTP body bounds and file-action-only storage gating, and configuration replacement failures.
 - [ ] **TEST-3** Test independent action admission, task identity races, cooldown/finalization ordering, settings isolation, sound no-backlog semantics, pause/stop, and partial initialization.
 - [ ] **TEST-4** Test continuous-mode handover, rule-disabled operation, schedule boundaries, no stale pre-roll, input loss, manual capture concurrency, storage rotation/removal, and fault cleanup.
-- [ ] **TEST-5** Test legacy/new/invalid schemas, canonical round trips, destructive legacy writes, both POST orders/concurrency, ALWAYS_ON compatibility, startup failure, and persistence failure before/after rename.
-- [ ] **TEST-6** Test callback/JSON boundaries where owned by Vigil: all rule types, trace limits, attribution, exact UIDs above `2^53`, multiple FILE callbacks per RULE, and independent continuous files.
+- [ ] **TEST-5** Test version-2 parsing and canonical round trips, rejection of a missing/other version and of the old `dWriterConfig` shape with the file untouched, rejection of not-yet-supported capabilities in intermediate phases, both POST orders/concurrency, the ALWAYS_ON invariant, startup failure, and persistence failure before rename.
+- [ ] **TEST-6** Test callback/JSON boundaries where owned by Vigil: all rule types, attribution and delivery per PLAN section 6.1, exact UIDs above `2^53`, multiple FILE callbacks per RULE, and independent continuous files.
 - [ ] **TEST-7** Use deterministic thread barriers, fake callbacks, and temporary filesystems. Run ASan/UBSan and TSan separately where supported; do not substitute sleeps or stress-only runs for race tests.
-- [ ] **TEST-8** Verify a fresh standalone build and reproducible CTest discovery without modifying existing build caches. Clearly separate build success, host logic tests, sanitizer results, and any unavailable device validation.
+- [ ] **TEST-8** Verify a fresh standalone build and reproducible CTest discovery without modifying existing build caches. Build and run on Linux only: use the `dev` container and the `~/dev/Vigil` mirror with out-of-tree build directories as described in PLAN section 12.1 (the macOS host cannot compile the module). Clearly separate build success, host logic tests, sanitizer results, and any unavailable device validation.
 - [ ] **TEST-9** Return a module-only review report with commit sequence, changed interfaces/configurations, test commands/results, remaining limitations, and deviations requiring review. Update this checklist with evidence before handing back the module.
