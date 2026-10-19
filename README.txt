@@ -15,9 +15,15 @@
     cmake ..
     make
 
+[Testing]
+    cmake -S . -B build -DVIGIL_BUILD_TESTS=ON
+    cmake --build build
+    ctest --test-dir build --output-on-failure
+
 [CMake-Options]
     VIGIL_ENABLE_WARNINGS (ON): Enable extra compiler warnings
     VIGIL_BUILD_EXAMPLES (ON): Build example executables
+    VIGIL_BUILD_TESTS (OFF): Build module-owned tests and register them with CTest
     VIGIL_USE_SYSTEM_NLOHMANN_JSON (OFF): Use system-provided nlohmann_json
     VIGIL_USE_SYSTEM_PROTOBUF (OFF): Use system-provided Protobuf
     VIGIL_USE_BUILDROOT_SYSROOT (OFF): Use Buildroot sysroot for cross-compilation

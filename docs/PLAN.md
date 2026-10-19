@@ -43,7 +43,7 @@ The current flow is a selected `BaseRule`, a single `SharedRuleEvent`, and one a
 | Inputs, clocks, admission | `vigil/context.hpp` | One shared file task; identity-free reset; rule disable returns before the clock update, which continuous recording needs; inference input time overwrites the current wall time used for event and file timestamps. |
 | Configuration | `vigil/configs.hpp`, `vigil/endpoints.hpp` | Single `dWriterConfig`; `RecordConfig::sync` applies enablement before the settings revision check, so a conflict leaves a partial update. |
 | Endpoint loop and startup | `vigil/endpoints.hpp` | Startup load failures leave the default `ALWAYS_ON` rule live; `ConfigStore` writes a temporary file and renames it without fsync. |
-| Identity/settings | `vigil/types.hpp` | `WriteEvent`, `EventOwner`, and `FileWriterSettings` are the building blocks to extend. |
+| Identity/settings | `vigil/types.hpp` | `WriteEvent`, `EventOwner`, and `FileWriterSettings` are the building blocks to extend. `WaterMarks::from` reads past its format table for an unknown format instead of using the fallback entry (latent: every caller validates the format first; found by the Phase 1A tests). |
 | Writers and publication | `vigil/writers.hpp`, `vigil/slot.hpp` | `VideoWriter` constructor failure leaks `media_writers_active`; publication runs in the destructor after the cooldown; any settings revision change interrupts the running writer. |
 | Filesystem coordination | `vigil/index_manager.hpp`, `vigil/slot.hpp` | `EnsureDirectoryExists` removes a non-directory path before creating it; publication and removal are not coordinated; automatic names are timestamp plus extension. |
 | Slot selection and lifetime | `vigil/storage.hpp`, `vigil/async_task.hpp` | Storage enables at most one Slot from configuration and netlink hotplug; Slot enable/disable starts and joins the manager/writer threads under the Slot mutex; async storage tasks run on a separate worker. |
@@ -70,7 +70,7 @@ These are separate compatibility decisions, not permission to make incidental be
 | Media suspension | Header wording is broader than current video-only activity accounting. | Extend the barrier to image capture, thumbnail generation, and Sound (section 8.3); the parallel Photo worker needs it. |
 | Source delivery without a source | Every non-inference owner (SED, Timer, GPIO, TTY, HTTP, ALWAYS_ON) is stamped `source_delivery=EVENT` even with an empty `source_id`, while the header says empty means unknown. | **Kept (2026-10-19).** Pin it with a test and correct the header comment; the emitted value does not change. |
 
-Current source has no first-party `tests/` directory or CTest registration, and no commit in the history ever added one. `vigil_example` is a demonstration; `vigil_index_manager_test` is an interactive filesystem monitor that needs fanotify privileges; `vigil_mask_test` prints examples without assertions. `build/` is git-ignored and absent from both this checkout and the dev-container mirror; generated binaries or CTest registrations found in any stale build directory are not reproducible evidence and must not be reused as the test source of truth. Verified on 2026-10-19 in the dev container (section 12.1): a fresh configure and build succeed and `ctest -N` reports `Total Tests: 0`.
+Before Phase 1A the source had no first-party `tests/` directory or CTest registration, and no commit in the history had ever added one; a fresh configure in the dev container on 2026-10-19 reported `ctest -N` as `Total Tests: 0`. Phase 1A (2026-10-19) added `tests/` behind `VIGIL_BUILD_TESTS` (section 12.1). `vigil_example` is a demonstration; `vigil_index_manager_test` is an interactive filesystem monitor that needs fanotify privileges; `vigil_mask_test` prints examples without assertions. `build/` is git-ignored and absent from both this checkout and the dev-container mirror; generated binaries or CTest registrations found in any stale build directory are not reproducible evidence and must not be reused as the test source of truth.
 
 ## 3. Target architecture and responsibilities
 
@@ -311,7 +311,7 @@ Each row is a review unit, not a mandate to combine unrelated edits into one com
 
 | Unit | Scope | Expected result and acceptance |
 | :--- | :--- | :--- |
-| 1A | `CMakeLists.txt`, new module-owned `tests/` | Add optional, reproducible CTest coverage with fake-clock/callback support. Characterize current single-rule, input-reset, EVENT, and single-file-action behavior, including the pinned discrepancies in section 2. |
+| 1A | `CMakeLists.txt`, new module-owned `tests/` | Add optional, reproducible CTest coverage with fake-clock/callback support. Characterize current single-rule, input-reset, EVENT, and single-file-action behavior, including the pinned discrepancies in section 2. Status 2026-10-19: harness (`tests/support/`) and four executables (inference rules, schedule rule, context/events, record configuration) pass in Debug, ASan/UBSan, and TSan builds; cases that need the rule loop (direct EVENT bypass, schedule close/reopen, startup defaults) are still open and need a deterministic way to drive `RuleEndpoint`. |
 | 1B | `vigil/types.hpp`, event projection, `example/` | Pin the C event projection with tests: type/id/source/delivery per section 6.1, exact UIDs above `2^53`, null/empty source. No public header changes in this phase. |
 | 1C | `vigil/configs.hpp`, `vigil/endpoints.hpp` | Add the version-2 parser and serializer with the strict `iSchemaVersion` check, the revision-safe commit, and startup fail-closed handling. Accept only single-file-action payloads until Phase 4D; reject the rest. |
 
@@ -381,7 +381,7 @@ Vigil builds and runs on Linux only: it uses fanotify, netlink uevents, libblkid
 - Jemalloc defaults on and replaces global C++ allocation. Bundled mode needs the `3rdparty/jemalloc` submodule (commit `81034ce`), `make`, and `autoconf`, and adds roughly 50 s to a clean build. Keep dependency and allocator changes out of this refactor unless necessary and separately reviewed.
 - Use a **fresh** build directory for every configuration, out of tree such as `/root/build/vigil-host`, or git-ignored `build/<name>` inside the mirror. `.gitignore` ignores only `build/`, so an in-tree `build-refactor-host/` would appear as untracked noise. Never edit a reused cache; record the compiler, dependency sources, and allocator options with every result. Standalone inference generation uses `protocol/inference.proto`.
 - Source-defined targets are `vigil`, plus `vigil_example`, `vigil_index_manager_test`, and `vigil_mask_test` when `VIGIL_BUILD_EXAMPLES=ON`. Building them checks compilation; do not automatically run interactive/privileged examples as tests.
-- Phase 1A must add the missing first-party tests and CTest registration, preferably behind a module-specific opt-in such as `VIGIL_BUILD_TESTS`. This option is **proposed, not currently implemented**. A fresh CTest listing must contain the intended cases; zero discovered tests is not success.
+- Module tests live in `tests/` behind `VIGIL_BUILD_TESTS` (default OFF, added in Phase 1A on 2026-10-19). `tests/CMakeLists.txt` registers one CTest entry per executable; each is a self-contained program built on `tests/support/check.hpp` (no external framework) and `tests/support/fake_config.hpp` (a `vg_config_t` whose only live callbacks are logging and rule-event recording). Executables are written to `<build>/tests/`. A fresh CTest listing must contain the intended cases; zero discovered tests is not success.
 - Verified baseline, 2026-10-19, in the container (Debug, allocator off):
 
   ```sh
@@ -394,8 +394,18 @@ Vigil builds and runs on Linux only: it uses fanotify, netlink uevents, libblkid
   /root/build/vigil-host/vigil_example              # 5 s demo with dummy callbacks, exit 0
   ```
 
-  The same configure with `-DVIGIL_ENABLE_JEMALLOC=ON` (`/root/build/vigil-host-jemalloc`) also builds and runs the demo. Once `VIGIL_BUILD_TESTS` exists, add `-DVIGIL_BUILD_TESTS=ON` and run `ctest --test-dir <build> --output-on-failure`. The allocator-off configuration is the logic-test baseline; validate the allocator-on configuration separately.
-- Sanitizers: `-DCMAKE_C_FLAGS`/`-DCMAKE_CXX_FLAGS` of `-fsanitize=address,undefined -fno-omit-frame-pointer` (`/root/build/vigil-host-asan`) and, separately, `-fsanitize=thread` (`/root/build/vigil-host-tsan`) both build with the allocator off. On 2026-10-19 `vigil_mask_test` and the demo ran under both with no reports, which only proves the toolchain works: the demo exercises no rules, inputs, or writers. Keep ASan/UBSan and TSan in separate configurations, run them with the allocator off, and document allocator/sanitizer limitations rather than hiding failures. Ordinary unit tests should need neither real peripherals nor elevated filesystem-monitor privileges.
+  The same configure with `-DVIGIL_ENABLE_JEMALLOC=ON` (`/root/build/vigil-host-jemalloc`) also builds and runs the demo. The allocator-off configuration is the logic-test baseline; validate the allocator-on configuration separately (on 2026-10-19 the Phase 1A tests also passed 4 of 4 in a fresh allocator-on build, `/root/build/vigil-host-tests-jemalloc`).
+- Verified test run, 2026-10-19, in the container (Debug, allocator off):
+
+  ```sh
+  cmake -S ~/dev/Vigil -B /root/build/vigil-host-tests -G Ninja \
+      -DVIGIL_USE_BUILDROOT_SYSROOT=OFF -DVIGIL_BUILD_EXAMPLES=ON -DVIGIL_BUILD_TESTS=ON \
+      -DVIGIL_ENABLE_JEMALLOC=OFF -DCMAKE_BUILD_TYPE=Debug
+  cmake --build /root/build/vigil-host-tests -j7                     # about 8 s, exit 0, no warnings
+  ctest --test-dir /root/build/vigil-host-tests -N                   # Total Tests: 4
+  ctest --test-dir /root/build/vigil-host-tests --output-on-failure  # 100% tests passed, 0 tests failed out of 4
+  ```
+- Sanitizers: `-DCMAKE_C_FLAGS`/`-DCMAKE_CXX_FLAGS` of `-fsanitize=address,undefined -fno-omit-frame-pointer` (`/root/build/vigil-host-asan`) and, separately, `-fsanitize=thread` (`/root/build/vigil-host-tsan`) both build with the allocator off. On 2026-10-19 `vigil_mask_test` and the demo ran under both with no reports, which only proves the toolchain works: the demo exercises no rules, inputs, or writers. The four Phase 1A test executables also pass under both (`/root/build/vigil-host-tests-asan` and `/root/build/vigil-host-tests-tsan`, examples off, 4 of 4 each). Keep ASan/UBSan and TSan in separate configurations, run them with the allocator off, and document allocator/sanitizer limitations rather than hiding failures. Ordinary unit tests should need neither real peripherals nor elevated filesystem-monitor privileges.
 - Distinguish host logic correctness from target timing/media capability. Report actual evaluation delay, callback bounds, memory/CPU use, and clip gaps only when measured. Do not claim hardware success, hard real-time bounds, or gap-free recording from fake callbacks.
 
 ## 13. Review gates and return package
