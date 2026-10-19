@@ -63,15 +63,20 @@ Get the information about the rule system.
 
 ```json
 {
-    "bReadyForNewEvent": true, // Boolean, whether a new recording event can be started (false if a current event is still writing)
-    "dLastRuleEvent": { // Optional, present only if a finished event exists, updated on current event finished
+    "bReadyForNewEvent": true, // Boolean, whether a new recording event can be started (false while a current event is pending or writing)
+    "dLastRuleEvent": { // Object or null: the current writer event while one is pending or writing, otherwise the last finished one
         "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", "UNKNOWN"
-        "iTimestamp": 1735574000 // Integer, Unix timestamp in milliseconds
+        "iTimestamp": 1735574000, // Integer, Unix timestamp in milliseconds
+        "iOwnerUID": 1735574400123 // Integer, UID of the owner that created the event (exact 64-bit value)
     },
-    "dLastRuleEventOwner": { // Optional, present and update when a rule evaluated as true and the current event is finished
-        "sRuleType": "TIMER", // String, rule type
-        "sRuleID": "Hourly Timer", // String, rule ID
-        "iTimestamp": 1735574400 // Integer, Unix timestamp in milliseconds (should be same as the corresponding timestamp of its event)
+    "dLastRuleEventOwner": { // Object or null: the owner of dLastRuleEvent
+        "sRuleType": "TIMER", // String, rule type; "UNKNOWN" for a direct EVENT delivered without a rule
+        "sRuleID": "Hourly Timer", // String, rule ID; empty for rules without a configured ID
+        "sSourceID": "", // String, inference source ID for inference and direct EVENT owners, otherwise empty
+        "sSourceDelivery": "EVENT", // String, "FRAME" for inference frame owners, "EVENT" for every other owner
+        "iTimestamp": 1735574400, // Integer, event time in Unix milliseconds: the input's timestamp for FRAME and EVENT owners, otherwise the time the condition was observed
+        "iDispatchTimestamp": 1735574400, // Integer, Unix milliseconds when Vigil created the owner; equals iTimestamp for owners without an input
+        "iUID": 1735574400123 // Integer, unique owner ID (exact 64-bit value), also carried by the rule and file callbacks
     },
     "dAvailableGPIOs": { // Object, available GPIO pins
         "GPIO_01": { // Key: String, GPIO pin name

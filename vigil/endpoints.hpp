@@ -588,6 +588,7 @@ public:
                     obj["sSourceID"] = owner->source_id;
                     obj["sSourceDelivery"] = EventOwner::SourceDeliveryString(owner->source_delivery);
                     obj["iTimestamp"] = owner->timestamp;
+                    obj["iDispatchTimestamp"] = owner->dispatch_timestamp;
                     obj["iUID"] = owner->uid;
                     return obj;
                 };
@@ -773,8 +774,9 @@ private:
         if (_ctx->shared_inference_result.has_value()
             && std::holds_alternative<std::monostate>(_ctx->shared_inference_result->data))
         {
-            event_owner = std::make_shared<EventOwner>(VG_RULE_TYPE_UNKNOWN, "",
-                _ctx->shared_inference_result->source_id, EventOwner::SourceDelivery::Event);
+            event_owner
+                = std::make_shared<EventOwner>(VG_RULE_TYPE_UNKNOWN, "", _ctx->shared_inference_result->source_id,
+                    EventOwner::SourceDelivery::Event, _ctx->shared_inference_result->timestamp_ms);
         }
         else
         {

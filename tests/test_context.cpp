@@ -337,6 +337,22 @@ VG_TEST_CASE(always_on_waits_for_the_current_event_and_for_media)
     }
 }
 
+VG_TEST_CASE(owners_carry_an_event_time_and_a_dispatch_time)
+{
+    const auto before = EventOwner::NowMs();
+    const EventOwner observed(VG_RULE_TYPE_TIMER, "", "", EventOwner::SourceDelivery::Event);
+    const EventOwner from_input(VG_RULE_TYPE_UNKNOWN, "", "cam0", EventOwner::SourceDelivery::Event, int64_t { 4242 });
+    const auto after = EventOwner::NowMs();
+
+    // An owner that observes its condition itself: the event time is the dispatch time.
+    VG_CHECK(observed.dispatch_timestamp >= before && observed.dispatch_timestamp <= after);
+    VG_CHECK_EQ(observed.timestamp, observed.dispatch_timestamp);
+    // An owner built from an input keeps the input's time as its event time and still records the dispatch.
+    VG_CHECK_EQ(from_input.timestamp, int64_t { 4242 });
+    VG_CHECK(from_input.dispatch_timestamp >= before && from_input.dispatch_timestamp <= after);
+    VG_CHECK(from_input.uid > observed.uid);
+}
+
 // Last on purpose: UIDs are process-global and only ever increase.
 VG_TEST_CASE(uids_are_unique_increasing_and_exact_above_2_to_53)
 {
