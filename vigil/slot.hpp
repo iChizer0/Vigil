@@ -873,33 +873,25 @@ private:
     {
         size_t consecutive_error_count = 0;
 
-        auto handle_write = [this, &consecutive_error_count](SlotAdaptedWriter<Slot> &writer) -> bool {
-            const auto result = writer.operator()();
-            auto end = writer.endTime();
-            if (result)
+        // Ends one task: the channel stays busy through the interval (plus the cooldown after a failure), as
+        // today, and only then is the event completed. Returns false when the thread must stop.
+        const auto finish_task = [this, &consecutive_error_count](const std::shared_ptr<WriteEvent> &event,
+                                     WriteEvent::Status status, std::chrono::steady_clock::time_point end) -> bool {
+            if (status != WriteEvent::Status::Interrupted)
             {
-                if (result->status != WriteEvent::Status::Interrupted)
+                if (status == WriteEvent::Status::Failed)
                 {
-                    if (result->status == WriteEvent::Status::Failed)
-                    {
-                        end += kWriterFailureCooldown;
-                        ++consecutive_error_count;
-                    }
-                    else
-                        consecutive_error_count = 0;
-                    do
-                    {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                        if (_stop_token.load(std::memory_order_acquire))
-                        {
-                            _ctx.shared_rule_event.reset(result->status);
-                            return false; // Stop requested
-                        }
-                    }
-                    while (std::chrono::steady_clock::now() < end);
+                    end += kWriterFailureCooldown;
+                    ++consecutive_error_count;
                 }
-                _ctx.shared_rule_event.reset(result->status);
+                else
+                    consecutive_error_count = 0;
+                while (std::chrono::steady_clock::now() < end && !_stop_token.load(std::memory_order_acquire))
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
+            _ctx.shared_rule_event.complete(event, status);
+            if (_stop_token.load(std::memory_order_acquire))
+                return false;
             if (consecutive_error_count >= kWriterConsecutiveFailureMax)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Writer thread for device path ", _dev_path,
@@ -910,10 +902,9 @@ private:
             return true;
         };
 
-        _ctx.shared_rule_event.reset(WriteEvent::Status::Canceled); // Clear any existing rule event at start
+        _ctx.shared_rule_event.cancelPending(); // An event from before this thread started is stale
         while (!_stop_token.load(std::memory_order_acquire))
         {
-            std::shared_ptr<WriteEvent> event = nullptr;
             const auto start = std::chrono::steady_clock::now();
             const auto [rev, settings] = _ctx.shared_writer_settings.get();
             if (!settings)
@@ -955,43 +946,42 @@ private:
                 if (_ctx.media_paused.load(std::memory_order_acquire))
                     goto l_continue;
 
-                // Check for new write event
-                if (event = _ctx.shared_rule_event.getCurrent(); !event)
+                // Claim the pending write event, if any
+                const auto event = _ctx.shared_rule_event.claim();
+                if (!event)
                     goto l_continue;
 
-                // Start new writer task
+                // One task: create, write, finish, publish, release, then back off and complete the event. The
+                // writer is destroyed before the cooldown, so the file is published right after the write. A
+                // constructor failure is a failed task like any other and enters the same cooldown and failure
+                // count instead of being retried immediately.
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting new writer task, dev path ", _dev_path);
+                auto status = WriteEvent::Status::Failed;
                 try
                 {
+                    std::unique_ptr<SlotAdaptedWriter<Slot>> writer;
                     switch (settings->type)
                     {
                         case CaptureType::Image:
-                            if (auto writer = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
-                                    rev, std::ref(_ctx), std::move(settings), std::move(event));
-                                writer && !handle_write(*writer))
-                                return;
+                            writer = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), rev,
+                                std::ref(_ctx), settings, event);
                             break;
                         case CaptureType::Video:
-                            if (auto writer = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
-                                    rev, std::ref(_ctx), std::move(settings), std::move(event));
-                                writer && !handle_write(*writer))
-                                return;
+                            writer = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), rev,
+                                std::ref(_ctx), settings, event);
                             break;
-                        default: {
-                            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
-                                "Unsupported writer type for storage slot with device path ", _dev_path);
-                            _ctx.shared_rule_event.reset(WriteEvent::Status::Failed); // Clear processed event
-                        }
-                        break;
+                        default:
+                            throw Exception("Unsupported writer type");
                     }
+                    status = (*writer)()->status.load(std::memory_order_acquire);
                 }
                 catch (const std::exception &e)
                 {
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
-                        "Failed to create new writer task for storage slot with device "
-                        "path ",
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Writer task failed for storage slot with device path ",
                         _dev_path, ": ", e.what());
                 }
+                if (!finish_task(event, status, start + settings->interval))
+                    return;
                 continue;
             }
 
@@ -1003,8 +993,6 @@ private:
             }
 
         l_continue:
-            if (event)
-                _ctx.shared_rule_event.reset(WriteEvent::Status::Canceled); // Clear processed event
             if (const auto elapsed = std::chrono::steady_clock::now() - start; elapsed < kWriterProbeInterval)
                 std::this_thread::sleep_for(kWriterProbeInterval - elapsed);
             continue;

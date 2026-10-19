@@ -208,6 +208,12 @@ int64_t NowMs()
 
 constexpr auto kHour = std::chrono::hours(1);
 
+// What the writer thread does at the end of its task.
+void CompleteCurrent(Context &ctx, WriteEvent::Status status)
+{
+    ctx.shared_rule_event.complete(ctx.shared_rule_event.getCurrent(), status);
+}
+
 } // namespace
 
 VG_TEST_CASE(startup_without_files_uses_defaults_and_writes_nothing)
@@ -390,7 +396,7 @@ VG_TEST_CASE(schedule_closure_blocks_dispatch_and_reopening_restores_it)
     VG_CHECK(events[0].writer_created);
 
     // Disabling the schedule opens the gate as well.
-    f.ctx->shared_rule_event.reset(WriteEvent::Status::Completed);
+    CompleteCurrent(*f.ctx, WriteEvent::Status::Completed);
     nlohmann::json disabled;
     disabled["bEnabled"] = false;
     disabled["lActiveWeekdays"] = nlohmann::json::array();
@@ -460,7 +466,7 @@ VG_TEST_CASE(rule_info_reports_the_event_time_and_the_dispatch_time)
     VG_CHECK_EQ(owner.at("iUID").get<uint64_t>(), events[0].uid);
 
     // An owner that observes its own condition reports the same value twice.
-    f.ctx->shared_rule_event.reset(WriteEvent::Status::Completed);
+    CompleteCurrent(*f.ctx, WriteEvent::Status::Completed);
     VG_CHECK_EQ(f.activateHTTP(), 0);
     owner = f.endpoint->getRuleInfo().at("dLastRuleEventOwner");
     VG_CHECK_EQ(owner.at("sRuleType").get<std::string>(), "HTTP");
@@ -599,7 +605,7 @@ VG_TEST_CASE(http_activation_reports_busy_and_gate_errors)
     events = RuleEventRecorder::take();
     VG_REQUIRE(events.size() == size_t { 1 });
     VG_CHECK(!events[0].writer_created);
-    f.ctx->shared_rule_event.reset(WriteEvent::Status::Completed);
+    CompleteCurrent(*f.ctx, WriteEvent::Status::Completed);
 
     // A storage slot that is not ready refuses the request before any RULE report.
     {
@@ -616,7 +622,7 @@ VG_TEST_CASE(http_activation_reports_busy_and_gate_errors)
     VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 1 });
 
     // The HTTP rule never fires from the rule loop itself.
-    f.ctx->shared_rule_event.reset(WriteEvent::Status::Completed);
+    CompleteCurrent(*f.ctx, WriteEvent::Status::Completed);
     RuleEventRecorder::clear();
     f.evaluate();
     VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
