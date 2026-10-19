@@ -65,7 +65,7 @@ Get the information about the rule system.
 {
     "bReadyForNewEvent": true, // Boolean, whether a new recording event can be started (false while a current event is pending or writing)
     "dLastRuleEvent": { // Object or null: the current writer event while one is pending or writing, otherwise the last finished one
-        "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", "UNKNOWN"
+        "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED" (a gate, pause, stop, or settings change stopped a task that had started; its file is kept), "CANCELED" (nothing was recorded: retired before a writer claimed it, or the gate was already closed when the writer started), "UNKNOWN"
         "iTimestamp": 1735574000, // Integer, Unix timestamp in milliseconds
         "iOwnerUID": 1735574400123 // Integer, UID of the owner that created the event (exact 64-bit value)
     },
