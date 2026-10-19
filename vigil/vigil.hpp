@@ -21,11 +21,27 @@ public:
     {
     }
 
-    ~Vigil() = default;
+    // Stops in dependency order (docs/PLAN.md section 8.3): the rule producer first, so nothing new is
+    // dispatched while the workers drain; then the manual capture worker and the storage slots, whose
+    // destructors interrupt, finish, and publish admitted work before joining; the context, which every
+    // worker and callback uses, goes last. A constructor that throws destroys the members built so far, so a
+    // partial initialization still joins every thread it started.
+    ~Vigil() noexcept
+    {
+        _rule_endpoint.reset();
+        _context->shared_rule_event.cancelPending();
+        _capture_endpoint.reset();
+        _storage_endpoint.reset();
+    }
 
     Context &context() noexcept
     {
         return *_context;
+    }
+
+    std::shared_ptr<Context> contextPtr() const noexcept
+    {
+        return _context;
     }
 
     RuleEndpoint &ruleEndpoint() noexcept
