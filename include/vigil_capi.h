@@ -59,7 +59,8 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
 /**
  * @brief Suspends media writing operations, optionally waiting for in-flight writes to complete (thread-safe).
  *
- * @param wait When true, blocks until all in-flight writes are completed.
+ * @param wait When true, blocks until every admitted media operation (video create/write/finish, image capture,
+ * thumbnail generation) has completed; nothing new is admitted until the matching resume.
  * @return vg_sta_e 0 on success, otherwise an error status (except EAGAIN when wait is false).
  * @note While suspended, incoming media frames may be dropped if internal buffers fill up. Generally used when the
  * frame settings are being changed to avoid partial writes.

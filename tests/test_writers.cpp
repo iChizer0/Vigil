@@ -1,6 +1,7 @@
 // Characterization tests for the writers over a fake adapter and fake media callbacks: no Slot, no
 // filesystem, no device (docs/PLAN.md section 7.2). They pin the sink call sequence (create, write, finish
-// once), the terminal status of every callback failure, interruption, and the balanced media activity count.
+// once), the terminal status of every callback failure, interruption, and the media operation every writer holds
+// from construction to destruction.
 
 #include <cerrno>
 #include <chrono>
@@ -45,6 +46,7 @@ struct FakeMedia
     size_t stop_after_frames = SIZE_MAX;
     size_t stop_after_continue_checks = SIZE_MAX;
     size_t continue_checks = 0;
+    bool pause_on_create = false; // pauses media from inside the create callback, after admission
 
     int creates = 0;
     int finishes = 0;
@@ -55,7 +57,9 @@ struct FakeMedia
     int last_fd = -1;
     std::string last_path;
     std::string last_format;
-    size_t active_while_writing = 0; // media_writers_active as seen from inside the write callback
+    size_t active_while_writing = 0;         // active media operations seen from inside the write callback
+    size_t active_while_capturing = 0;       // same, from inside the image capture callback
+    size_t active_at_destruction = SIZE_MAX; // same, from the adapter's destructor (where a Slot publishes)
     Context *ctx = nullptr;
 
     size_t framesWritten() const noexcept
@@ -76,6 +80,8 @@ struct FakeMedia
         m.last_format = format;
         if (m.create_result != 0)
             return m.create_result;
+        if (m.pause_on_create)
+            m.ctx->media_barrier.pause(false);
         *fd = 7;
         return 0;
     }
@@ -93,7 +99,7 @@ struct FakeMedia
         auto &m = of(user_data);
         ++m.video_frames;
         m.last_fd = fd;
-        m.active_while_writing = m.ctx->media_writers_active.load();
+        m.active_while_writing = m.ctx->media_barrier.activeOperations();
         return m.write_result;
     }
 
@@ -111,6 +117,7 @@ struct FakeMedia
         ++m.captures;
         m.last_path = path;
         m.last_format = format;
+        m.active_while_capturing = m.ctx->media_barrier.activeOperations();
         return m.capture_result;
     }
 };
@@ -123,6 +130,11 @@ public:
         std::shared_ptr<WriteEvent> event)
         : AdaptableWriter<FakeAdapter>(ctx, std::move(settings), std::move(event)), _media(media)
     {
+    }
+
+    ~FakeAdapter() override
+    {
+        _media.active_at_destruction = this->ctxRef().media_barrier.activeOperations();
     }
 
 protected:
@@ -240,13 +252,14 @@ VG_TEST_CASE(video_writer_writes_from_the_first_key_frame_and_finishes_on_the_ne
     f.media.finish_after_frames = 3;
     {
         auto writer = f.video();
-        VG_CHECK_EQ(f.ctx.media_writers_active.load(), size_t { 1 });
+        VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 1 }); // admitted at construction
         VG_CHECK(f.event->status.load() == WriteEvent::Status::Writing);
+        VG_CHECK_EQ(f.media.creates, 0); // the task creates the sink after its pre-check
+
+        VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Completed);
         VG_CHECK_EQ(f.media.creates, 1);
         VG_CHECK_EQ(f.media.last_format, "MP4");
         VG_CHECK_EQ(f.media.last_path, "/fake/record.file");
-
-        VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Completed);
         VG_CHECK_EQ(f.media.video_frames, 3);
         VG_CHECK_EQ(f.media.audio_frames, 1);
         VG_CHECK_EQ(f.media.finishes, 1);
@@ -256,7 +269,7 @@ VG_TEST_CASE(video_writer_writes_from_the_first_key_frame_and_finishes_on_the_ne
         VG_CHECK_EQ(f.media.queue.size(), size_t { 1 }); // the closing key frame starts the next clip
     }
     VG_CHECK_EQ(f.media.finishes, 1); // the destructor does not finish the sink again
-    VG_CHECK_EQ(f.ctx.media_writers_active.load(), size_t { 0 });
+    VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
 }
 
 VG_TEST_CASE(video_writer_interruption_finishes_the_sink_exactly_once)
@@ -274,10 +287,9 @@ VG_TEST_CASE(video_writer_interruption_finishes_the_sink_exactly_once)
             VG_CHECK_EQ(f.media.finishes, 1);
         }
         VG_CHECK_EQ(f.media.finishes, 1);
-        VG_CHECK_EQ(f.ctx.media_writers_active.load(), size_t { 0 });
+        VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
     }
-    // The gate is already closed when the task starts: nothing is written, the untouched sink is finished, and
-    // Canceled keeps it unpublished.
+    // The gate is already closed when the task starts: no sink is created, and Canceled publishes nothing.
     {
         Fixture f;
         f.push(true);
@@ -285,10 +297,10 @@ VG_TEST_CASE(video_writer_interruption_finishes_the_sink_exactly_once)
         {
             auto writer = f.video();
             VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Canceled);
+            VG_CHECK_EQ(f.media.creates, 0);
             VG_CHECK_EQ(f.media.video_frames, 0);
-            VG_CHECK_EQ(f.media.finishes, 1);
         }
-        VG_CHECK_EQ(f.media.finishes, 1);
+        VG_CHECK_EQ(f.media.finishes, 0);
     }
     // An interrupted clip whose finish fails is a failed task, so it is not published as usable.
     {
@@ -319,39 +331,29 @@ VG_TEST_CASE(video_writer_interruption_finishes_the_sink_exactly_once)
         }
         VG_CHECK_EQ(f.media.finishes, 1);
     }
-    // A media pause before the task starts cancels it the same way.
-    {
-        Fixture f;
-        f.push(true);
-        f.ctx.media_paused.store(true);
-        {
-            auto writer = f.video();
-            VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Canceled);
-            VG_CHECK_EQ(f.media.video_frames, 0);
-            VG_CHECK_EQ(f.media.finishes, 1);
-        }
-        VG_CHECK_EQ(f.media.finishes, 1);
-    }
 }
 
 VG_TEST_CASE(video_writer_failures_keep_the_activity_count_balanced)
 {
-    // The sink cannot be created: the constructor throws, the event is Failed, nothing stays counted.
+    // The sink cannot be created: the task is Failed, nothing is finished, nothing stays counted.
     {
         Fixture f;
         f.media.create_result = EIO;
-        VG_CHECK_THROWS(f.video());
-        VG_CHECK(f.event->status.load() == WriteEvent::Status::Failed);
-        VG_CHECK_EQ(f.media.creates, 1);
+        {
+            auto writer = f.video();
+            VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Failed);
+            VG_CHECK_EQ(f.media.creates, 1);
+            VG_CHECK_EQ(f.media.finishes, 0);
+        }
         VG_CHECK_EQ(f.media.finishes, 0);
-        VG_CHECK_EQ(f.ctx.media_writers_active.load(), size_t { 0 }); // leaked before 2026-10-19
+        VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 }); // leaked before 2026-10-19
     }
     // Missing callbacks fail the same way.
     {
         Fixture f(/* with_callbacks = */ false);
         VG_CHECK_THROWS(f.video());
         VG_CHECK(f.event->status.load() == WriteEvent::Status::Failed);
-        VG_CHECK_EQ(f.ctx.media_writers_active.load(), size_t { 0 });
+        VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
     }
     // A frame write failure finishes the sink and fails the task; the destructor does not finish again.
     {
@@ -365,7 +367,7 @@ VG_TEST_CASE(video_writer_failures_keep_the_activity_count_balanced)
             VG_CHECK_EQ(f.media.finishes, 1);
         }
         VG_CHECK_EQ(f.media.finishes, 1);
-        VG_CHECK_EQ(f.ctx.media_writers_active.load(), size_t { 0 });
+        VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
     }
     // A finish failure fails the task, and the sink is not finished a second time.
     {
@@ -390,7 +392,6 @@ VG_TEST_CASE(image_writer_captures_once_and_reports_every_failure)
         Fixture f;
         auto writer = f.image();
         VG_CHECK(f.event->status.load() == WriteEvent::Status::Writing);
-        VG_CHECK_EQ(f.ctx.media_writers_active.load(), size_t { 0 }); // image capture is not counted (Phase 2B)
         VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Completed);
         VG_CHECK_EQ(f.media.captures, 1);
         VG_CHECK_EQ(f.media.last_format, "JPG");
@@ -405,7 +406,7 @@ VG_TEST_CASE(image_writer_captures_once_and_reports_every_failure)
     }
     {
         Fixture f; // paused media: nothing is captured, and Canceled keeps the missing file unpublished
-        f.ctx.media_paused.store(true);
+        f.ctx.media_barrier.pause(false);
         auto writer = f.image();
         VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Canceled);
         VG_CHECK_EQ(f.media.captures, 0);
@@ -414,6 +415,51 @@ VG_TEST_CASE(image_writer_captures_once_and_reports_every_failure)
         Fixture f(/* with_callbacks = */ false);
         VG_CHECK_THROWS(f.image());
         VG_CHECK(f.event->status.load() == WriteEvent::Status::Failed);
+    }
+}
+
+VG_TEST_CASE(writers_hold_one_media_operation_from_construction_to_destruction)
+{
+    // Image capture is covered (it was not before 2026-10-19), and so is the adapter's destructor, where a
+    // Slot publishes the file and generates its thumbnail: the operation leaves after it.
+    {
+        Fixture f;
+        {
+            auto writer = f.image();
+            VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Completed);
+            VG_CHECK_EQ(f.media.active_while_capturing, size_t { 1 });
+        }
+        VG_CHECK_EQ(f.media.active_at_destruction, size_t { 1 });
+        VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
+    }
+    // Media paused before construction: admission is refused, no sink is created, the task is Canceled.
+    {
+        Fixture f;
+        f.push(true);
+        f.ctx.media_barrier.pause(false);
+        {
+            auto writer = f.video();
+            VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
+            VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Canceled);
+            VG_CHECK_EQ(f.media.creates, 0);
+        }
+        VG_CHECK_EQ(f.media.finishes, 0);
+        VG_CHECK_EQ(f.media.queue.size(), size_t { 1 }); // nothing was consumed
+    }
+    // Media paused after admission (here from inside the create callback): the task is interrupted at its next
+    // check, the sink it created is finished, and the operation is counted until the writer is destroyed.
+    {
+        Fixture f;
+        f.media.pause_on_create = true;
+        {
+            auto writer = f.video();
+            VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Interrupted);
+            VG_CHECK_EQ(f.media.creates, 1);
+            VG_CHECK_EQ(f.media.video_frames, 0);
+            VG_CHECK_EQ(f.media.finishes, 1);
+            VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 1 });
+        }
+        VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
     }
 }
 

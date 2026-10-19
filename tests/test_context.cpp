@@ -2,11 +2,14 @@
 // creation/reporting, and the owner identity that the C event projection is built from
 // (docs/PLAN.md sections 5.1, 6.1, 6.2; matrix R1 and W1). Everything here is today's behavior.
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
+#include <thread>
 
 #include "vigil/configs.hpp"
 #include "vigil/constants.hpp"
@@ -368,15 +371,60 @@ VG_TEST_CASE(always_on_waits_for_the_current_event_and_for_media)
         VG_CHECK(rule(f.ctx) != nullptr);
     }
     {
-        f.ctx.media_paused.store(true);
+        f.ctx.media_barrier.pause(false);
         const AlwaysOnRule rule(AlwaysOnRuleConfig {}, f.ctx);
         VG_CHECK(rule(f.ctx) == nullptr);
-        f.ctx.media_paused.store(false);
-        f.ctx.media_writers_active.store(1);
-        VG_CHECK(rule(f.ctx) == nullptr);
-        f.ctx.media_writers_active.store(0);
+        f.ctx.media_barrier.resume();
+        {
+            const Context::MediaBarrier::Operation operation(f.ctx.media_barrier); // a media operation in flight
+            VG_CHECK(rule(f.ctx) == nullptr);
+        }
         VG_CHECK(rule(f.ctx) != nullptr);
     }
+}
+
+VG_TEST_CASE(media_barrier_refuses_admission_while_paused_and_a_waiting_pause_drains)
+{
+    Fixture f;
+    auto &barrier = f.ctx.media_barrier;
+    VG_CHECK(!barrier.isPaused());
+    VG_CHECK_EQ(barrier.activeOperations(), size_t { 0 });
+
+    // Admission is refused while paused; an operation admitted earlier stays counted until it leaves.
+    std::optional<Context::MediaBarrier::Operation> admitted;
+    admitted.emplace(barrier);
+    VG_CHECK(static_cast<bool>(*admitted));
+    VG_CHECK_EQ(barrier.activeOperations(), size_t { 1 });
+    barrier.pause(false);
+    VG_CHECK(barrier.isPaused());
+    VG_CHECK_EQ(barrier.activeOperations(), size_t { 1 }); // a non-waiting pause does not drain
+    {
+        const Context::MediaBarrier::Operation refused(barrier);
+        VG_CHECK(!refused);
+        VG_CHECK_EQ(barrier.activeOperations(), size_t { 1 }); // a refused operation is not counted
+    }
+    barrier.resume();
+    VG_CHECK(!barrier.isPaused());
+
+    // A waiting pause closes admission first and returns only once the admitted operation has left.
+    std::atomic<bool> drained = false;
+    std::thread pauser([&] {
+        barrier.pause(true);
+        drained.store(true);
+    });
+    while (!barrier.isPaused())
+        std::this_thread::yield();
+    VG_CHECK(!drained.load()); // cannot have returned: the operation admitted above is still active
+    {
+        const Context::MediaBarrier::Operation refused(barrier);
+        VG_CHECK(!refused); // admission is closed before the drain completes
+    }
+    admitted.reset();
+    pauser.join();
+    VG_CHECK(drained.load());
+    VG_CHECK_EQ(barrier.activeOperations(), size_t { 0 });
+    barrier.resume();
+    VG_CHECK(static_cast<bool>(Context::MediaBarrier::Operation(barrier)));
 }
 
 VG_TEST_CASE(owners_carry_an_event_time_and_a_dispatch_time)

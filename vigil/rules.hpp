@@ -939,8 +939,7 @@ public:
 
     std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
-        if (ctx.media_paused.load(std::memory_order_relaxed)
-            || ctx.media_writers_active.load(std::memory_order_relaxed) > 0)
+        if (ctx.media_barrier.isPaused() || ctx.media_barrier.activeOperations() > 0)
             return nullptr;
 
         const auto now = ctx.shared_time.steadyTime();
