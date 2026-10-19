@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +24,9 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "async_task.hpp"
 #include "configs.hpp"
@@ -67,6 +71,8 @@ public:
 
     ~ConfigStore() = default;
 
+    // Returns 0 with the stored document in `j`, ENOENT when nothing is stored yet, EINVAL when the file
+    // exists but is not JSON, or another errno value when it cannot be read.
     vg_sta_e loadFromFile(nlohmann::json &j) const noexcept
     {
         try
@@ -74,8 +80,8 @@ public:
             const std::unique_lock lock(_mutex);
             std::error_code ec;
             const auto file_path = _dir_path / _name;
-            if (!std::filesystem::is_regular_file(file_path, ec))
-                return ec ? EIO : ENOENT;
+            if (std::filesystem::status(file_path, ec).type() == std::filesystem::file_type::not_found)
+                return ENOENT;
 
             std::ifstream file(file_path);
             if (!file.is_open())
@@ -107,76 +113,40 @@ public:
         return 0;
     }
 
+    // Writes the document to a temporary file next to the configuration file, fsyncs it, and renames it
+    // into place, so that the configuration file holds either the old or the new document after a crash.
+    // Returns 0 or an errno value; on failure the old file is untouched.
     vg_sta_e saveToFile(const nlohmann::json &j) noexcept
     {
-        std::filesystem::path tmp_path;
-        const auto cleanup = [&tmp_path]() noexcept {
-            if (!tmp_path.empty())
-            {
-                std::error_code ec;
-                std::filesystem::remove(tmp_path, ec);
-            }
-        };
-
-        const auto write_file = [this, &j](const std::filesystem::path &path) -> bool {
-            std::ofstream file(path, std::ios::trunc);
-            if (!file.is_open())
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open temporary file ", path,
-                    " for writing, code: ", errno);
-                return false;
-            }
-
-            file << std::setw(4) << j;
-            file.flush();
-            if (file.fail())
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "I/O error occurred while writing temporary file ", path,
-                    ", code: ", errno);
-                return false;
-            }
-
-            file.close();
-            if (file.fail())
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "I/O error occurred while closing temporary file ", path,
-                    ", code: ", errno);
-                return false;
-            }
-            return true;
-        };
-
         try
         {
-            tmp_path = _dir_path / (std::string(".") + std::string(_name));
-            const std::unique_lock lock(_mutex);
-            if (!write_file(tmp_path))
-            {
-                cleanup();
-                return EIO;
-            }
-
-            std::error_code ec;
+            const std::string text = j.dump(4);
             const auto file_path = _dir_path / _name;
-            std::filesystem::rename(tmp_path, file_path, ec);
-            if (ec)
+            const auto tmp_path = _dir_path / (std::string(".") + std::string(_name));
+            const std::unique_lock lock(_mutex);
+            std::error_code ec;
+            vg_sta_e ret = WriteAndSync(tmp_path, text);
+            if (ret == 0)
             {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to rename temporary file ", tmp_path, " to ", file_path,
-                    ": ", ec.message());
-                cleanup();
-                return EIO;
+                std::filesystem::rename(tmp_path, file_path, ec);
+                if (ec)
+                {
+                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to rename temporary file ", tmp_path, " to ",
+                        file_path, ": ", ec.message());
+                    ret = EIO;
+                }
             }
-            return 0;
+            if (ret != 0)
+                std::filesystem::remove(tmp_path, ec);
+            return ret;
         }
         catch (const std::bad_alloc &)
         {
-            cleanup();
             return ENOMEM;
         }
         catch (const std::exception &e)
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to store config file '", _name, "': ", e.what());
-            cleanup();
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to save config file '", _name, "': ", e.what());
             return EIO;
         }
     }
@@ -225,6 +195,40 @@ public:
     }
 
 private:
+    // Writes `text` to `path` (created or truncated) and fsyncs it. Returns 0 or an errno value.
+    vg_sta_e WriteAndSync(const std::filesystem::path &path, const std::string &text) const noexcept
+    {
+        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (fd < 0)
+        {
+            const auto err = errno;
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open temporary file ", path,
+                " for writing: ", strerror(err));
+            return err != 0 ? err : EIO;
+        }
+        vg_sta_e ret = 0;
+        for (size_t offset = 0; offset < text.size();)
+        {
+            const ssize_t n = ::write(fd, text.data() + offset, text.size() - offset);
+            if (n < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                ret = errno != 0 ? errno : EIO;
+                break;
+            }
+            offset += static_cast<size_t>(n);
+        }
+        if (ret == 0 && ::fsync(fd) != 0)
+            ret = errno != 0 ? errno : EIO;
+        if (::close(fd) != 0 && ret == 0)
+            ret = errno != 0 ? errno : EIO;
+        if (ret != 0)
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "I/O error while writing temporary file ", path, ": ", strerror(ret));
+        return ret;
+    }
+
+private:
     Context &_ctx;
     std::string_view _name;
     std::filesystem::path _dir_path;
@@ -252,24 +256,43 @@ public:
         if (!_ctx)
             throw Exception("Context pointer cannot be null in RuleEndpoint");
 
+        // Startup (docs/PLAN.md section 4.3): a missing file keeps the defaults. A file that exists but cannot
+        // be loaded or applied is left untouched and keeps rules disabled until a valid record configuration
+        // is posted, so that neither the default ALWAYS_ON rule nor the default open schedule runs in its
+        // place.
+        bool fail_closed = false;
+        const auto load = [&fail_closed](ConfigStore &store, const auto &apply) {
+            nlohmann::json j;
+            if (const auto ret = store.loadFromFile(j); ret != ENOENT)
+                fail_closed |= ret != 0 || apply(j) != 0;
+        };
+        const auto code = [](const nlohmann::json &res_j) { return res_j.at("code").get<int>(); };
         {
             _record_config_store = std::make_unique<ConfigStore>(*_ctx, kRecordConfigName);
-            if (nlohmann::json j; _record_config_store->loadFromFile(j) == 0)
-                updateRecordConfig(j, false);
+            load(*_record_config_store, [&](const nlohmann::json &j) { return code(updateRecordConfig(j, false)); });
         }
         {
             _schedule_rule_config = std::make_unique<ScheduleRuleConfig>();
             _schedule_rule_config_store = std::make_unique<ConfigStore>(*_ctx, kScheduleRuleConfigName);
-            if (nlohmann::json j; _schedule_rule_config_store->loadFromFile(j) == 0)
-                updateScheduleRuleConfig(j, false);
+            load(*_schedule_rule_config_store,
+                [&](const nlohmann::json &j) { return code(updateScheduleRuleConfig(j, false)); });
         }
         {
             _record_rule_config_store = std::make_unique<ConfigStore>(*_ctx, kRecordRuleConfigName);
             _record_rule_config = nlohmann::json::object();
             if (!swapTypedRecordRule<AlwaysOnRule>(AlwaysOnRuleConfig(), []() noexcept { return true; }))
                 throw Exception("Failed to initialize default record rule");
-            if (nlohmann::json j; _record_rule_config_store->loadFromFile(j) == 0)
-                updateRecordRuleConfig(j, false);
+            load(*_record_rule_config_store,
+                [&](const nlohmann::json &j) { return code(updateRecordRuleConfig(j, false)); });
+        }
+        if (fail_closed)
+        {
+            VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR,
+                "A configuration file could not be applied and was left untouched; rules stay disabled until a "
+                "valid record configuration is posted");
+            const std::unique_lock lock(_record_config_mutex);
+            _record_config.rule_enabled = false;
+            _ctx->record_rule_enabled.store(false, std::memory_order_release);
         }
 
         if (!run_rule_thread)
@@ -302,17 +325,20 @@ public:
 
         try
         {
+            RecordConfig record_config(j, *_ctx);
             const std::unique_lock lock(_record_config_mutex);
-            const auto record_config = RecordConfig(j, *_ctx);
 
-            if (store) // Store first
+            if (store) // Store the canonical document first, so that a persistence failure changes nothing
             {
-                if (ret = _record_config_store->saveToFile(j); ret != 0)
+                nlohmann::json canonical;
+                record_config.to(canonical, *_ctx);
+                if (ret = _record_config_store->saveToFile(canonical); ret != 0)
                     throw Exception("Failed to store record config to file");
             }
 
             if (ret = record_config.sync(*_ctx); ret != 0)
                 throw Exception("Try again to sync record config to context");
+            _record_config = std::move(record_config);
         }
         catch (const std::exception &e)
         {
@@ -332,9 +358,8 @@ public:
 
         try
         {
-            const auto record_config = RecordConfig::from(*_ctx);
-
-            record_config.to(res_j, *_ctx);
+            const std::unique_lock lock(_record_config_mutex);
+            _record_config.to(res_j, *_ctx);
         }
         catch (const std::exception &e)
         {
@@ -844,6 +869,7 @@ private:
     std::unique_ptr<std::thread> _rule_thread;
 
     mutable std::mutex _record_config_mutex;
+    RecordConfig _record_config;
     mutable std::shared_mutex _schedule_rule_mutex;
     std::unique_ptr<ScheduleRuleConfig> _schedule_rule_config;
     std::unique_ptr<BaseRule> _schedule_rule;

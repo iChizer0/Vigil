@@ -2,6 +2,7 @@
 // creation/reporting, and the owner identity that the C event projection is built from
 // (docs/PLAN.md sections 5.1, 6.1, 6.2; matrix R1 and W1). Everything here is today's behavior.
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>

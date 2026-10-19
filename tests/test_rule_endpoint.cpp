@@ -74,12 +74,20 @@ std::string ReadFile(const std::filesystem::path &path)
 
 struct Fixture
 {
-    std::string dir; // outlives ctx: the C configuration borrows its buffer
+    std::string root; // temporary directory, removed afterwards
+    std::string dir;  // configuration directory; outlives ctx, which borrows its buffer
     std::shared_ptr<Context> ctx;
     std::unique_ptr<RuleEndpoint> endpoint;
 
-    Fixture() : dir(MakeTempDir()), ctx(std::make_shared<Context>(MakeFakeConfig(dir.c_str())))
+    // With `unwritable_store` the configuration "directory" is a regular file, so nothing can be stored.
+    explicit Fixture(bool unwritable_store = false) : root(MakeTempDir()), dir(root)
     {
+        if (unwritable_store)
+        {
+            dir = root + "/blocker";
+            WriteFile(dir, "x");
+        }
+        ctx = std::make_shared<Context>(MakeFakeConfig(dir.c_str()));
         RuleEventRecorder::clear();
     }
 
@@ -88,7 +96,7 @@ struct Fixture
         endpoint.reset();
         ctx.reset();
         std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
+        std::filesystem::remove_all(root, ec);
     }
 
     void start()
@@ -127,12 +135,20 @@ struct Fixture
     }
 };
 
+// The complete version-2 document (the shape GET returns) with at most one enabled file action: "MP4" enables
+// video, "JPG"/"RAW" enable photo, nullptr enables nothing. Every other field holds its default.
 nlohmann::json RecordJson(bool enabled, const char *format, long interval_ms)
 {
+    const bool video = format && std::string(format) == "MP4";
+    const bool photo = format && !video;
     nlohmann::json j;
+    j["iSchemaVersion"] = 2;
     j["bRuleEnabled"] = enabled;
-    j["dWriterConfig"]["sFormat"] = format;
-    j["dWriterConfig"]["iIntervalMs"] = interval_ms;
+    j["bContinuousRecordEnabled"] = false;
+    j["dActions"]["dPhoto"] = { { "bEnabled", photo }, { "sFormat", photo ? format : "JPG" },
+        { "iIntervalMs", photo ? interval_ms : 5000L } };
+    j["dActions"]["dVideo"] = { { "bEnabled", video }, { "iIntervalMs", video ? interval_ms : 5000L } };
+    j["dActions"]["dSound"] = { { "bEnabled", false } };
     return j;
 }
 
@@ -199,7 +215,7 @@ VG_TEST_CASE(startup_without_files_uses_defaults_and_writes_nothing)
     Fixture f;
     f.start();
     VG_CHECK(!f.ctx->record_rule_enabled.load());
-    VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, "MP4", 5000));
+    VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, nullptr, 0));
     VG_CHECK_EQ(f.endpoint->getScheduleRuleConfig(),
         nlohmann::json::parse(
             R"({"bEnabled":false,"lActiveWeekdays":[{"sStart":"Mon 00:00:00","sEnd":"Sun 24:00:00"}]})"));
@@ -224,7 +240,7 @@ VG_TEST_CASE(startup_without_files_uses_defaults_and_writes_nothing)
 VG_TEST_CASE(startup_reloads_persisted_configuration_without_rewriting_files)
 {
     Fixture f;
-    const std::string record = R"({"bRuleEnabled":true,"dWriterConfig":{"sFormat":"JPG","iIntervalMs":777}})";
+    const std::string record = RecordJson(true, "JPG", 777).dump(); // compact, unlike the stored form
     const std::string rule = R"({"sCurrentSelected":"TIMER","dTimer":{"iIntervalSeconds":0}})";
     const std::string schedule
         = R"({"bEnabled":true,"lActiveWeekdays":[{"sStart":"Sun 00:00:00","sEnd":"Sat 24:00:00"}]})";
@@ -234,7 +250,7 @@ VG_TEST_CASE(startup_reloads_persisted_configuration_without_rewriting_files)
 
     f.start();
     VG_CHECK(f.ctx->record_rule_enabled.load());
-    VG_CHECK_EQ(f.endpoint->getRecordConfig(), nlohmann::json::parse(record));
+    VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(true, "JPG", 777));
     VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), nlohmann::json::parse(rule));
     VG_CHECK_EQ(f.endpoint->getScheduleRuleConfig(), nlohmann::json::parse(schedule));
     VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->interval.count(), 777L);
@@ -250,51 +266,53 @@ VG_TEST_CASE(startup_reloads_persisted_configuration_without_rewriting_files)
     VG_CHECK(events[0].writer_created);
 }
 
-VG_TEST_CASE(startup_keeps_defaults_and_leaves_invalid_files_untouched)
+VG_TEST_CASE(startup_leaves_unusable_files_untouched_and_keeps_rules_disabled)
 {
+    // A record configuration file that cannot be applied keeps the first-start defaults.
+    for (const std::string &text: { std::string("{ this is not json"), RecordJson(true, "MP4", 0).dump(),
+             std::string(R"({"bRuleEnabled":true,"dWriterConfig":{"sFormat":"MP4","iIntervalMs":777}})") })
     {
         Fixture f;
-        const std::string corrupt = "{ this is not json";
-        WriteFile(f.file("record_config.json"), corrupt);
+        WriteFile(f.file("record_config.json"), text);
         f.start();
         VG_CHECK(!f.ctx->record_rule_enabled.load());
-        VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, "MP4", 5000));
-        VG_CHECK_EQ(ReadFile(f.file("record_config.json")), corrupt);
-    }
-    {
-        Fixture f;
-        const std::string invalid = R"({"bRuleEnabled":true,"dWriterConfig":{"sFormat":"MP4","iIntervalMs":0}})";
-        WriteFile(f.file("record_config.json"), invalid); // well-formed JSON, rejected content
-        f.start();
-        VG_CHECK(!f.ctx->record_rule_enabled.load());
-        VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, "MP4", 5000));
-        VG_CHECK_EQ(ReadFile(f.file("record_config.json")), invalid);
-    }
-    {
-        // Today an invalid selected-rule file leaves the default ALWAYS_ON rule live when the record
-        // configuration enables rules. Phase 1C changes this to fail closed (docs/PLAN.md section 4.3) and
-        // flips the two checks after evaluate().
-        Fixture f;
-        WriteFile(f.file("record_config.json"), RecordJson(true, "MP4", 5000).dump());
-        const std::string invalid_rule = R"({"sCurrentSelected":"TIMER","dTimer":{"iIntervalSeconds":-5}})";
-        WriteFile(f.file("record_rule_config.json"), invalid_rule);
-        f.start();
-        VG_CHECK_EQ(ReadFile(f.file("record_rule_config.json")), invalid_rule);
-        VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON"));
+        VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, nullptr, 0));
+        VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->interval.count(), 5000L);
+        VG_CHECK_EQ(ReadFile(f.file("record_config.json")), text);
         f.evaluate();
-        const auto events = RuleEventRecorder::take();
-        VG_REQUIRE(events.size() == size_t { 1 });
-        VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_ALWAYS_ON);
+        VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
     }
+
+    // A valid record configuration next to a rule or schedule file that cannot be applied: the file is left
+    // untouched and rules stay disabled, so that neither the default ALWAYS_ON rule nor the default open
+    // schedule runs in its place. Valid POSTs, ending with the record configuration, recover.
+    struct Case
     {
-        // Likewise an invalid schedule file keeps the default (disabled, therefore open) gate today.
+        const char *name;
+        std::string text;
+    };
+    for (const auto &c:
+        { Case { "record_rule_config.json", R"({"sCurrentSelected":"TIMER","dTimer":{"iIntervalSeconds":-5}})" },
+            Case { "record_rule_config.json", "[ nope" }, Case { "schedule_rule_config.json", R"({"bEnabled":true})" },
+            Case { "schedule_rule_config.json", "{ nope" } })
+    {
         Fixture f;
         WriteFile(f.file("record_config.json"), RecordJson(true, "MP4", 5000).dump());
-        const std::string invalid_schedule = R"({"bEnabled":true})";
-        WriteFile(f.file("schedule_rule_config.json"), invalid_schedule);
+        WriteFile(f.file(c.name), c.text);
         f.start();
-        VG_CHECK_EQ(ReadFile(f.file("schedule_rule_config.json")), invalid_schedule);
+        VG_CHECK(!f.ctx->record_rule_enabled.load());
+        VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, "MP4", 5000)); // reported as disabled
+        VG_CHECK_EQ(ReadFile(f.file(c.name)), c.text);
+        VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON"));
         VG_CHECK_EQ(f.endpoint->getScheduleRuleConfig().at("bEnabled").get<bool>(), false);
+        f.evaluate();
+        VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+        VG_CHECK_EQ(f.activateHTTP(), kEndpointErrorBase + EPERM);
+
+        VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0);
+        f.evaluate();
+        VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 }); // still disabled
+        VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
         f.evaluate();
         VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 1 });
     }
@@ -467,7 +485,7 @@ VG_TEST_CASE(record_rule_config_switches_rules_persists_and_rolls_back_failures)
     VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_ALWAYS_ON);
 }
 
-VG_TEST_CASE(record_config_post_persists_only_valid_payloads)
+VG_TEST_CASE(record_config_post_persists_only_valid_payloads_in_canonical_form)
 {
     Fixture f;
     f.start();
@@ -475,24 +493,57 @@ VG_TEST_CASE(record_config_post_persists_only_valid_payloads)
     VG_CHECK_EQ(f.postRecordConfig(valid), 0);
     VG_CHECK_EQ(f.endpoint->getRecordConfig(), valid);
     VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_config.json"))), valid);
+    VG_CHECK(!std::filesystem::exists(f.file(".record_config.json")));
     VG_CHECK(f.ctx->record_rule_enabled.load());
     VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->interval.count(), 1234L);
+    const auto revision = f.ctx->shared_writer_settings.getRevision();
 
-    // A rejected payload changes neither the runtime nor the file.
+    // Rejected payloads change neither the runtime nor the file.
     const auto res = f.endpoint->updateRecordConfig(RecordJson(true, "MP4", 0));
     VG_CHECK_EQ(res.at("code").get<int>(), kEndpointErrorBase + EINVAL);
     VG_CHECK(res.contains("message"));
+    auto both = RecordJson(true, "MP4", 5000);
+    both["dActions"]["dPhoto"]["bEnabled"] = true;
+    VG_CHECK_EQ(f.postRecordConfig(both), kEndpointErrorBase + EINVAL);
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, nullptr, 0)), kEndpointErrorBase + EINVAL); // rules on, no action
     VG_CHECK_EQ(f.endpoint->getRecordConfig(), valid);
     VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_config.json"))), valid);
-    VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->interval.count(), 1234L);
+    VG_CHECK(f.ctx->record_rule_enabled.load());
+    VG_CHECK_EQ(f.ctx->shared_writer_settings.getRevision(), revision);
+    VG_CHECK(!std::filesystem::exists(f.file(".record_config.json")));
 
-    // The file holds the posted document verbatim (unknown fields included); GET returns the known fields.
+    // Unknown fields are dropped: the file holds the canonical document.
     auto extra = RecordJson(false, "JPG", 2000);
-    extra["sNote"] = "kept";
+    extra["sNote"] = "dropped";
     VG_CHECK_EQ(f.postRecordConfig(extra), 0);
-    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_config.json"))), extra);
+    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_config.json"))), RecordJson(false, "JPG", 2000));
     VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, "JPG", 2000));
     VG_CHECK(!f.ctx->record_rule_enabled.load());
+    VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->format, "JPG");
+
+    // Rules off with no file action is a valid state; the writer settings simply stay as they were.
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(false, nullptr, 0)), 0);
+    VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, nullptr, 0));
+    VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->format, "JPG");
+    VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->interval.count(), 2000L);
+}
+
+VG_TEST_CASE(record_config_post_fails_closed_when_the_store_is_unwritable)
+{
+    Fixture f(/* unwritable_store = */ true);
+    f.start();
+    VG_CHECK(!f.ctx->record_rule_enabled.load());
+    VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, nullptr, 0));
+
+    const auto res = f.endpoint->updateRecordConfig(RecordJson(true, "MP4", 1234));
+    VG_CHECK(res.at("code").get<int>() != 0);
+    VG_CHECK(res.contains("message"));
+    // Nothing was applied because nothing could be persisted.
+    VG_CHECK(!f.ctx->record_rule_enabled.load());
+    VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, nullptr, 0));
+    VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->interval.count(), 5000L);
+    f.evaluate();
+    VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
 }
 
 VG_TEST_CASE(http_activation_reports_busy_and_gate_errors)
@@ -537,6 +588,26 @@ VG_TEST_CASE(http_activation_reports_busy_and_gate_errors)
     RuleEventRecorder::clear();
     f.evaluate();
     VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+}
+
+VG_TEST_CASE(config_store_reports_missing_and_invalid_files_and_saves_atomically)
+{
+    Fixture f;
+    ConfigStore store(*f.ctx, "store_test.json");
+    const auto file = f.file("store_test.json");
+
+    nlohmann::json loaded;
+    VG_CHECK_EQ(store.loadFromFile(loaded), ENOENT);
+    WriteFile(file, "{ not json");
+    VG_CHECK_EQ(store.loadFromFile(loaded), EINVAL);
+
+    // The document is written to a temporary file and renamed into place; nothing else is left behind.
+    const nlohmann::json doc = { { "a", 1 } };
+    VG_CHECK_EQ(store.saveToFile(doc), 0);
+    VG_CHECK_EQ(ReadFile(file), doc.dump(4));
+    VG_CHECK(!std::filesystem::exists(f.file(".store_test.json")));
+    VG_CHECK_EQ(store.loadFromFile(loaded), 0);
+    VG_CHECK_EQ(loaded, doc);
 }
 
 // Last on purpose: UIDs are process-global and only ever increase.
