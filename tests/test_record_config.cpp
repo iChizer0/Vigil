@@ -248,9 +248,12 @@ VG_TEST_CASE(watermarks_follow_the_format_table_unless_the_host_estimates)
     VG_CHECK_EQ(mp4.critical_remain_bytes, 2 * 180 * kMiB + kMinFree);
     VG_CHECK_EQ(mp4.high_remain_bytes, 5 * 180 * kMiB + kMinFree);
 
-    // Not asserted: WaterMarks::from with an unknown format reads past the end of its format table instead
-    // of reaching the fallback entry (found 2026-10-19). It is unreachable because every caller validates
-    // the format first; the fix is tracked in docs/TODO.md (SAFE-7).
+    // An unknown format uses the fallback entry (it read past the table before 2026-10-19; latent, since
+    // every caller validates the format first).
+    const auto unknown = WaterMarks::from("AVI", 1, nullptr);
+    VG_CHECK(unknown == WaterMarks::from("", 1, nullptr));
+    VG_CHECK_EQ(unknown.critical_remain_bytes, 3 * kMinFree);
+    VG_CHECK_EQ(unknown.high_remain_bytes, 6 * kMinFree);
 
     vg_config_media_t media {};
     media.max_bytes_estimate_cb = &EstimateOneMiB;
