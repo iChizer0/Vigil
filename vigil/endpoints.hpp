@@ -699,6 +699,9 @@ public:
                     }
                 }
             }
+            // The storage precheck applies only when a file action is enabled (docs/PLAN.md section 5.2). Until
+            // Phase 4D every configuration that enables rules enables one, so it always applies today.
+            if (hasEnabledFileAction())
             {
                 const std::shared_lock lock(_ctx->slot_check_mutex);
                 if (_ctx->slot_check.second)
@@ -735,6 +738,12 @@ public:
 
 private:
     friend struct RuleEndpointTestAccess; // defined by the module tests only
+
+    bool hasEnabledFileAction() const
+    {
+        const std::lock_guard lock(_record_config_mutex);
+        return _record_config.photo.enabled || _record_config.video.enabled;
+    }
 
     void ruleThreadTask() noexcept
     {

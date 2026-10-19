@@ -71,8 +71,8 @@ Get the information about the rule system.
     },
     "dLastRuleEventOwner": { // Object or null: the owner of dLastRuleEvent
         "sRuleType": "TIMER", // String, rule type; "UNKNOWN" for a direct EVENT delivered without a rule
-        "sRuleID": "Hourly Timer", // String, rule ID; empty for rules without a configured ID
-        "sSourceID": "", // String, inference source ID for inference and direct EVENT owners, otherwise empty
+        "sRuleID": "Hourly Timer", // String, the condition: the inference member ID, the GPIO signal (e.g. "RISING"), or the TTY command; empty for other rules
+        "sSourceID": "", // String, the inference source for inference and direct EVENT owners, the pin name for GPIO, the TTY name for TTY, otherwise empty
         "sSourceDelivery": "EVENT", // String, "FRAME" for inference frame owners, "EVENT" for every other owner
         "iTimestamp": 1735574400, // Integer, event time in Unix milliseconds: the input's timestamp for FRAME and EVENT owners, otherwise the time the condition was observed
         "iDispatchTimestamp": 1735574400, // Integer, Unix milliseconds when Vigil created the owner; equals iTimestamp for owners without an input
@@ -217,6 +217,8 @@ Applications whose post-processing does not fit the detection/classification res
 }
 ```
 
+Rule events from a GPIO rule (the rule callback and `dLastRuleEventOwner`) carry the signal as the rule ID and the pin name as the source ID.
+
 #### TTY Rule
 
 ```json
@@ -230,6 +232,8 @@ Applications whose post-processing does not fit the detection/classification res
     "message": "" // String, optional, present only on failure
 }
 ```
+
+Rule events from a TTY rule carry the command as the rule ID and the TTY name as the source ID.
 
 #### HTTP Rule
 

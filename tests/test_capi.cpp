@@ -14,6 +14,7 @@
 #include <system_error>
 #include <thread>
 
+#include "vigil/constants.hpp"
 #include "vigil/json.hpp" // IWYU pragma: keep
 #include "vigil_capi.h"
 #include "vigil_ctypes.h"
@@ -175,6 +176,29 @@ VG_TEST_CASE(a_callback_can_reenter_the_c_api_while_the_runtime_is_built_or_torn
     Reentry::disarm();
     VG_CHECK(Reentry::count.load() > 0);
     VG_CHECK_EQ(Reentry::status.load(), ESRCH);
+}
+
+VG_TEST_CASE(request_bodies_are_bounded_before_parsing)
+{
+    Fixture f;
+    VG_REQUIRE(vg_service_init(&f.config) == 0);
+    std::string body = "{}";
+    body.resize(vigil::constants::kHTTPAPIRequestMaxBytes, ' '); // exactly the limit: parsed and answered
+    vg_http_api_request_t request { .free_cb = nullptr, .payload = body.data(), .payload_len = body.size() };
+    vg_http_api_response_t response {};
+    VG_CHECK_EQ(vg_http_api_rule_http_rule_activate_post(&request, &response), 0);
+    VG_REQUIRE(response.body != nullptr);
+    const auto *text = static_cast<const char *>(response.body);
+    const auto j = nlohmann::json::parse(text, text + response.body_len);
+    VG_CHECK_EQ(j.at("code").get<int>(), vigil::constants::kEndpointErrorBase + EPERM); // rules are disabled
+    response.free_cb(response.body);
+    response = {};
+
+    body.resize(vigil::constants::kHTTPAPIRequestMaxBytes + 1, ' '); // one byte over: refused before parsing
+    request.payload = body.data();
+    request.payload_len = body.size();
+    VG_CHECK_EQ(vg_http_api_rule_http_rule_activate_post(&request, &response), EFAULT);
+    VG_CHECK(response.body == nullptr);
 }
 
 VG_TEST_MAIN()

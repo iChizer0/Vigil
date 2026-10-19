@@ -73,9 +73,12 @@ struct Context
 #endif
     }
 
-    // Tick function to update context state
+    // Tick function to update context state. The clocks advance whether or not rules are enabled, and an
+    // input's timestamp is its owner's event time only: it never replaces the current time (docs/PLAN.md
+    // section 5.1).
     void tick() noexcept
     {
+        shared_time.tick();
         if (!record_rule_enabled.load(std::memory_order_relaxed))
         {
             resetInference();
@@ -83,8 +86,6 @@ struct Context
             shared_rule_event.cancelPending(); // a claimed event is completed by its writer
             return;
         }
-
-        shared_time.tick();
 
         {
             const std::unique_lock lock(inference_mutex);
@@ -94,7 +95,6 @@ struct Context
                 shared_inference_result.reset();
                 return;
             }
-            shared_time.updateUnixTime(it->timestamp_ms); // Update timestamp to that of the inference result
             shared_inference_result = std::move(*it);
             inference_queue.pop_front();
         }
@@ -164,7 +164,7 @@ struct Context
     {
         if (!owner)
             return false;
-        const auto [steady_time, unix_time, _] = shared_time.getAll();
+        const auto steady_time = shared_time.steadyTime();
         bool writer_created = false;
         try
         {
@@ -172,7 +172,9 @@ struct Context
                 const std::unique_lock lock(shared_rule_event.mutex);
                 if (!shared_rule_event.current)
                 {
-                    auto event = std::make_shared<WriteEvent>(steady_time, unix_time, owner->uid);
+                    // The file task carries its owner's event time (the input's timestamp for FRAME and direct
+                    // EVENT owners), not the current time.
+                    auto event = std::make_shared<WriteEvent>(steady_time, owner->timestamp, owner->uid);
                     shared_rule_event.current = std::move(event);
                     shared_rule_event.current_owner = owner;
                     writer_created = true;
@@ -545,12 +547,6 @@ struct Context
             const auto now = std::chrono::system_clock::now();
             _unix_time = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
             _local_time = LocalTime(now);
-        }
-
-        void updateUnixTime(int64_t ts) noexcept
-        {
-            const std::unique_lock lock(mutex);
-            _unix_time = ts;
         }
 
     public:
