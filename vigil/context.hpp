@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -209,9 +210,87 @@ struct Context
     // Sync inference results queue, updated in enqueueInferenceResult()
     std::mutex inference_mutex;
     std::deque<InferenceResult> inference_queue;
-    // Sync video/audio frame buffers, updated in enqueueMediaFrame()
-    alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> media_paused = false;
-    alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> media_writers_active = 0;
+    // Media-operation barrier (docs/PLAN.md section 8.3). Every writer holds one admitted operation from its
+    // construction to its destruction, which spans every media callback it makes (create, write, finish, image
+    // capture) and the thumbnail generated when its file is published. Admission and pause share one mutex, so
+    // nothing is admitted after a pause, and a waiting pause returns only once every operation admitted before
+    // it has left.
+    struct MediaBarrier
+    {
+    public:
+        // One admitted operation, which leaves the barrier when destroyed. Empty when admission was refused.
+        class Operation final
+        {
+        public:
+            explicit Operation(MediaBarrier &barrier) noexcept : _barrier(barrier.enter() ? &barrier : nullptr) { }
+
+            ~Operation() noexcept
+            {
+                if (_barrier)
+                    _barrier->leave();
+            }
+
+            Operation(const Operation &) = delete;
+            Operation &operator=(const Operation &) = delete;
+
+            explicit operator bool() const noexcept
+            {
+                return _barrier != nullptr;
+            }
+
+        private:
+            MediaBarrier *_barrier;
+        };
+
+        // Closes admission; with `wait`, also blocks until every admitted operation has left.
+        void pause(bool wait) noexcept
+        {
+            std::unique_lock lock(_mutex);
+            _paused.store(true, std::memory_order_release);
+            if (wait)
+                _idle.wait(lock, [this] { return _active.load(std::memory_order_acquire) == 0; });
+        }
+
+        void resume() noexcept
+        {
+            const std::lock_guard lock(_mutex);
+            _paused.store(false, std::memory_order_release);
+        }
+
+        bool isPaused() const noexcept
+        {
+            return _paused.load(std::memory_order_acquire);
+        }
+
+        size_t activeOperations() const noexcept
+        {
+            return _active.load(std::memory_order_acquire);
+        }
+
+    private:
+        bool enter() noexcept
+        {
+            const std::lock_guard lock(_mutex);
+            if (_paused.load(std::memory_order_acquire))
+                return false;
+            _active.fetch_add(1, std::memory_order_release);
+            return true;
+        }
+
+        void leave() noexcept
+        {
+            {
+                const std::lock_guard lock(_mutex);
+                _active.fetch_sub(1, std::memory_order_release);
+            }
+            _idle.notify_all();
+        }
+
+        std::mutex _mutex;
+        std::condition_variable _idle;
+        alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _paused = false;
+        alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> _active = 0;
+    } media_barrier;
     // Callback for slot status check (for HTTP rule)
     std::shared_mutex slot_check_mutex;
     std::pair<const void * /* owner */, std::function<bool(const void *)>> slot_check = { nullptr, nullptr };

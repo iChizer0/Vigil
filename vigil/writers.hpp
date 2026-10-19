@@ -43,28 +43,6 @@ namespace detail {
     template<class... Ts>
     Overloaded(Ts...) -> Overloaded<Ts...>;
 
-    // Counts an active media writer for its own lifetime, so a constructor that throws after creating it
-    // leaves the count balanced.
-    class MediaActivityGuard final
-    {
-    public:
-        explicit MediaActivityGuard(Context &ctx) noexcept : _ctx(ctx)
-        {
-            _ctx.media_writers_active.fetch_add(1, std::memory_order_release);
-        }
-
-        ~MediaActivityGuard() noexcept
-        {
-            _ctx.media_writers_active.fetch_sub(1, std::memory_order_release);
-        }
-
-        MediaActivityGuard(const MediaActivityGuard &) = delete;
-        MediaActivityGuard &operator=(const MediaActivityGuard &) = delete;
-
-    private:
-        Context &_ctx;
-    };
-
 } // namespace detail
 
 // - MARK: Adaptable Writer
@@ -75,7 +53,7 @@ class AdaptableWriter
 public:
     AdaptableWriter(Context &ctx, std::shared_ptr<FileWriterSettings> settings, std::shared_ptr<WriteEvent> event)
         : _start_time(std::chrono::steady_clock::now()), _ctx(ctx), _settings(std::move(settings)),
-          _event(std::move(event))
+          _event(std::move(event)), _operation(ctx.media_barrier)
     {
         if (!_settings)
             throw Exception("AdaptableWriter initialized with null settings");
@@ -121,9 +99,11 @@ protected:
         return static_cast<const T *>(this)->shouldFinishWritingImpl();
     }
 
+    // False when media was paused at construction (the operation was refused) or since, or when the adapter's
+    // own gate is closed. Writers check it before creating anything and between frames.
     inline bool shouldContinueWriting() const noexcept
     {
-        return !_ctx.media_paused.load(std::memory_order_relaxed)
+        return static_cast<bool>(_operation) && !_ctx.media_barrier.isPaused()
                && static_cast<const T *>(this)->shouldContinueWritingImpl();
     }
 
@@ -164,6 +144,9 @@ private:
     Context &_ctx;
     std::shared_ptr<FileWriterSettings> _settings;
     std::shared_ptr<WriteEvent> _event;
+    // Held for the whole writer lifetime, so it still covers the publication (thumbnail generation included)
+    // that the adapter's destructor performs before this base is destroyed.
+    Context::MediaBarrier::Operation _operation;
 };
 
 // - MARK: Slot Adapted Writer
@@ -450,7 +433,7 @@ public:
         : T(std::forward<Args>(args)...), _end_time(this->settings().video_clip_length == std::chrono::seconds::max()
                                                         ? std::chrono::steady_clock::time_point::max()
                                                         : this->startTime() + this->settings().video_clip_length),
-          _fd(-1), _is_clip_finish(false), _thumbnail(), _active(this->ctxRef())
+          _fd(-1), _is_clip_finish(false), _thumbnail()
     {
         if (!this->ctxRef().c_api.media.video_file_create_cb || !this->ctxRef().c_api.media.video_file_finish_cb)
         {
@@ -464,8 +447,6 @@ public:
             throw Exception("VideoWriter initialized with audio frame write callback set or without video frame "
                             "write callback set");
         }
-
-        startWrite();
     }
 
     ~VideoWriter() override
@@ -477,16 +458,20 @@ private:
     static inline constexpr const std::chrono::milliseconds kVideoFrameWaitDelay = std::chrono::milliseconds(10);
 
 private:
-    void startWrite()
+    // Creates the sink. Called once the pre-check passed, so a closed gate never leaves an empty file behind.
+    bool startWrite() noexcept
     {
-        if (auto ret = this->ctxRef().c_api.media.video_file_create_cb(&_fd, this->getFilePath().c_str(),
+        int fd = -1;
+        if (const auto ret = this->ctxRef().c_api.media.video_file_create_cb(&fd, this->getFilePath().c_str(),
                 this->settings().format.c_str(), this->ctxRef().c_api.media.user_data);
-            ret != 0 || _fd < 0)
+            ret != 0 || fd < 0) [[unlikely]]
         {
-            this->setEventStatus(WriteEvent::Status::Failed);
-            throw Exception("VideoWriter failed to create video file at path " + this->getFilePath().string() + ": "
-                            + std::to_string(static_cast<int>(ret)));
+            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "VideoWriter failed to create video file at path ",
+                this->getFilePath(), ", code: ", static_cast<int>(ret));
+            return false;
         }
+        _fd = fd;
+        return true;
     }
 
     // Ends the task with `status` after finishing the sink; a finish failure fails the task instead.
@@ -533,7 +518,9 @@ private:
     }
 
         if (!this->shouldContinueWriting()) [[unlikely]]
-            return finishWith(WriteEvent::Status::Canceled); // nothing was written: finished, not published
+            return WriteEvent::Status::Canceled; // no sink was created
+        if (!startWrite()) [[unlikely]]
+            return WriteEvent::Status::Failed;
 
         VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "VideoWriter waiting for starting key frame, fd: ", _fd);
         for (;;)
@@ -646,7 +633,6 @@ private:
     int _fd;
     bool _is_clip_finish;
     MediaFrame::FrameType _thumbnail;
-    detail::MediaActivityGuard _active;
 };
 
 } // namespace vigil::writers

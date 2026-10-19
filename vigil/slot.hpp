@@ -877,7 +877,9 @@ private:
         // today, and only then is the event completed. Returns false when the thread must stop.
         const auto finish_task = [this, &consecutive_error_count](const std::shared_ptr<WriteEvent> &event,
                                      WriteEvent::Status status, std::chrono::steady_clock::time_point end) -> bool {
-            if (status != WriteEvent::Status::Interrupted)
+            // Completed and Failed hold the channel until the interval (plus the failure cooldown) has elapsed.
+            // Canceled and Interrupted (a closed gate) do not: the loop re-checks the gates on its next probe.
+            if (status == WriteEvent::Status::Completed || status == WriteEvent::Status::Failed)
             {
                 if (status == WriteEvent::Status::Failed)
                 {
@@ -942,8 +944,9 @@ private:
                             : watermarks.critical_remain_bytes))
                     goto l_continue_saturated;
 
-                // Check if media is paused
-                if (_ctx.media_paused.load(std::memory_order_acquire))
+                // Check if media is paused (the writer's admission is the linearization point; this is the
+                // cheap pre-check that keeps the event unclaimed)
+                if (_ctx.media_barrier.isPaused())
                     goto l_continue;
 
                 // Claim the pending write event, if any

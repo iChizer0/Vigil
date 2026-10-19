@@ -638,7 +638,7 @@ public:
             }
             {
                 res_j["bVideoClipLengthSeconds"] = kVideoClipLengthDefault.count();
-                res_j["bMediaPaused"] = _ctx->media_paused.load(std::memory_order_relaxed);
+                res_j["bMediaPaused"] = _ctx->media_barrier.isPaused();
                 res_j["bRecordEnabled"] = _ctx->record_rule_enabled.load(std::memory_order_relaxed);
                 {
                     auto get_target_slot_status = [this]() -> std::optional<SlotStatus> {
@@ -1363,7 +1363,7 @@ private:
 
     void captureTaskLoop() noexcept
     {
-        if (_ctx->media_paused.load(std::memory_order_relaxed))
+        if (_ctx->media_barrier.isPaused())
             return;
         auto event = getCaptureEvent();
         try

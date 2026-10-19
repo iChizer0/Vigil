@@ -126,12 +126,7 @@ vg_sta_e vg_media_scoped_suspend_write(bool wait)
     try
     {
         const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
-        {
-            auto &ctx = vigil_instance->context();
-            ctx.media_paused.store(true, std::memory_order_release);
-            while (wait && ctx.media_writers_active.load(std::memory_order_acquire) > 0)
-                std::this_thread::yield(); // Wait for writers to finish
-        }
+        vigil_instance->context().media_barrier.pause(wait);
         ++vigil_instance_scoped_suspend_count;
         return 0;
     }
@@ -155,7 +150,7 @@ vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue)
             vigil_instance->context().shared_writer_settings.sync(vigil_instance->context().c_api.media);
             if (reset_media_queue)
                 vigil_instance->context().clearMediaBuffer();
-            vigil_instance->context().media_paused.store(false, std::memory_order_release);
+            vigil_instance->context().media_barrier.resume();
             vigil_instance_scoped_suspend_count = 0;
             return 0;
         }
