@@ -244,7 +244,10 @@ private:
     static inline constexpr const std::chrono::milliseconds kRuleEvaluationInterval = std::chrono::milliseconds(10);
 
 public:
-    RuleEndpoint(std::shared_ptr<Context> ctx) : _ctx(std::move(ctx)), _rule_stop_token(false)
+    // `run_rule_thread == false` is a test seam: no rule thread is started and the test drives
+    // ruleTaskLoop() through RuleEndpointTestAccess. Production code always runs the thread.
+    RuleEndpoint(std::shared_ptr<Context> ctx, bool run_rule_thread = true)
+        : _ctx(std::move(ctx)), _rule_stop_token(false)
     {
         if (!_ctx)
             throw Exception("Context pointer cannot be null in RuleEndpoint");
@@ -269,6 +272,8 @@ public:
                 updateRecordRuleConfig(j, false);
         }
 
+        if (!run_rule_thread)
+            return;
         _rule_thread = std::make_unique<std::thread>(&RuleEndpoint::ruleThreadTask, this);
         if (!_rule_thread)
             throw Exception("Failed to create rule evaluation thread in RuleEndpoint");
@@ -703,6 +708,8 @@ public:
     }
 
 private:
+    friend struct RuleEndpointTestAccess; // defined by the module tests only
+
     void ruleThreadTask() noexcept
     {
         while (!_rule_stop_token.load(std::memory_order_relaxed))
