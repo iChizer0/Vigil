@@ -32,7 +32,10 @@ vg_sta_e vg_service_init(vg_config_t *config);
  * @brief Shuts down the Vigil runtime and releases any allocated resources (thread-safe).
  *
  * @return vg_sta_e 0 when teardown succeeds; error status otherwise.
- * @note Blocks until all child threads have exited and resources are cleaned up.
+ * @note Blocks until all child threads have exited and resources are cleaned up. The callbacks and user_data given
+ * to vg_service_init must stay valid until this call returns. Neither this function nor vg_service_init may be
+ * called from a callback, since the call would wait for the thread it runs on; a callback that calls another C API
+ * function while the runtime is being built or torn down receives ESRCH.
  */
 vg_sta_e vg_service_deinit();
 
@@ -60,7 +63,8 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
  * @brief Suspends media writing operations, optionally waiting for in-flight writes to complete (thread-safe).
  *
  * @param wait When true, blocks until every admitted media operation (video create/write/finish, image capture,
- * thumbnail generation) has completed; nothing new is admitted until the matching resume.
+ * thumbnail generation) has completed; nothing new is admitted until the matching resume. Must not be true when
+ * called from a media callback, which would wait for itself.
  * @return vg_sta_e 0 on success, otherwise an error status (except EAGAIN when wait is false).
  * @note While suspended, incoming media frames may be dropped if internal buffers fill up. Generally used when the
  * frame settings are being changed to avoid partial writes.

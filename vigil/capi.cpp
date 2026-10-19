@@ -17,7 +17,13 @@
 
 namespace vigil_c_api {
 
-static inline std::shared_mutex vigil_instance_mutex; // Used for HTTP API
+// Lifecycle (docs/PLAN.md section 8.3). `vigil_instance_lifecycle_mutex` serializes init and deinit for their
+// whole duration. `vigil_instance_mutex` only guards the instance pointer: every other call holds it shared
+// while it uses the runtime, and init/deinit take it exclusively just to publish or detach the pointer. The
+// runtime is built and destroyed with no instance lock held, so a callback that reenters the C API meanwhile
+// gets ESRCH instead of a deadlock, and no worker is joined under the entrance lock.
+static inline std::mutex vigil_instance_lifecycle_mutex;
+static inline std::shared_mutex vigil_instance_mutex;
 static inline std::mutex vigil_instance_scoped_suspend_mutex;
 static inline size_t vigil_instance_scoped_suspend_count = 0;
 static inline std::unique_ptr<vigil::Vigil> vigil_instance = nullptr;
@@ -45,33 +51,42 @@ vg_sta_e vg_service_init(vg_config_t *config)
     if (!config)
         return EINVAL;
 
-    const std::unique_lock lock(vigil_instance_mutex);
-    const std::lock_guard lock2(vigil_instance_scoped_suspend_mutex);
-    vigil_instance_scoped_suspend_count = 0; // Reset scoped suspend count on init
-    try
+    const std::lock_guard lifecycle(vigil_instance_lifecycle_mutex);
     {
+        const std::shared_lock lock(vigil_instance_mutex);
         if (vigil_instance)
             return EALREADY;
-        vigil_instance = std::make_unique<vigil::Vigil>(*config);
-        if (!vigil_instance)
-            return ENOMEM;
+    }
+
+    std::unique_ptr<vigil::Vigil> instance;
+    try
+    {
+        instance = std::make_unique<vigil::Vigil>(*config); // a throwing constructor unwinds what it started
     }
     catch (const std::exception &e)
     {
         vg_log_exception(*config, e);
-        vigil_instance.reset();
         return EFAULT;
     }
 
+    {
+        const std::lock_guard lock2(vigil_instance_scoped_suspend_mutex);
+        vigil_instance_scoped_suspend_count = 0; // Reset scoped suspend count on init
+    }
+    const std::unique_lock lock(vigil_instance_mutex);
+    vigil_instance = std::move(instance);
     return 0;
 }
 
 vg_sta_e vg_service_deinit()
 {
-    const std::unique_lock lock(vigil_instance_mutex);
-    if (!vigil_instance)
-        return 0;
-    vigil_instance.reset();
+    const std::lock_guard lifecycle(vigil_instance_lifecycle_mutex);
+    std::unique_ptr<vigil::Vigil> instance;
+    {
+        const std::unique_lock lock(vigil_instance_mutex);
+        instance = std::move(vigil_instance); // every later call returns ESRCH
+    }
+    instance.reset(); // stops and joins the workers with no instance lock held
     return 0;
 }
 
@@ -119,21 +134,20 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame)
 
 vg_sta_e vg_media_scoped_suspend_write(bool wait)
 {
-    const std::shared_lock lock(vigil_instance_mutex);
-    if (!vigil_instance)
-        return ESRCH;
+    std::shared_ptr<vigil::Context> ctx;
+    {
+        const std::shared_lock lock(vigil_instance_mutex);
+        if (!vigil_instance)
+            return ESRCH;
+        ctx = vigil_instance->contextPtr();
+    }
 
-    try
-    {
-        const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
-        vigil_instance->context().media_barrier.pause(wait);
-        ++vigil_instance_scoped_suspend_count;
-        return 0;
-    }
-    catch (const std::exception &e)
-    {
-        return EFAULT;
-    }
+    // Drained with no instance lock held: a media callback may reenter the C API, and deinit may detach the
+    // runtime meanwhile (its workers leave the barrier as they are joined). `ctx` keeps the barrier alive.
+    const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
+    ctx->media_barrier.pause(wait);
+    ++vigil_instance_scoped_suspend_count;
+    return 0;
 }
 
 vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue)
