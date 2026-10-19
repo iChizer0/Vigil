@@ -954,7 +954,7 @@ struct WaterMarks
         const vg_config_media_t *media_capi) noexcept
     {
         size_t i = 0;
-        for (; i < kFormatMaxBytesMap.size(); ++i)
+        for (; i < kFormatMaxBytesMap.size() - 1; ++i) // the last entry is the fallback
         {
             if (kFormatMaxBytesMap[i].first == format)
                 break;
