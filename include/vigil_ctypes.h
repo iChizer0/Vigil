@@ -91,12 +91,15 @@ typedef enum vg_rule_type_e {
 
 typedef struct vg_rule_evt_t
 {
-    vg_rule_type_e type;         /**< Type of the last evaluated rule. */
-    const char *id;              /**< Internal managed string, null terminated, do not free. */
-    int64_t timestamp;           /**< Timestamp of the last evaluation. */
-    uint64_t uid;                /**< Unique identifier for the rule event, can be used for event correlation. */
-    const char *source_id;       /**< Canonical source snapshot, null/empty for non-inference triggers. */
-    const char *source_delivery; /**< FRAME or EVENT, null/empty when unknown. */
+    vg_rule_type_e type; /**< Type of the rule that owns the event; UNKNOWN for a direct EVENT input. */
+    const char *id;      /**< The condition: the inference member ID, the GPIO signal, or the TTY command; empty
+                            otherwise. Internal managed string, null terminated, do not free. */
+    int64_t timestamp;   /**< Event time in Unix milliseconds: the input's timestamp for FRAME and direct EVENT
+                            owners, otherwise when the condition was observed. */
+    uint64_t uid;        /**< Unique identifier for the rule event, can be used for event correlation. */
+    const char *source_id;       /**< The inference source for FRAME and direct EVENT owners, the pin name for GPIO, the
+                                    TTY name for TTY; empty otherwise (never null). */
+    const char *source_delivery; /**< FRAME for inference frame owners, EVENT for every other owner (never empty). */
     bool writer_created;         /**< Indicates whether a new recording writer was created. */
 } vg_rule_evt_t;
 

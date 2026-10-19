@@ -709,15 +709,19 @@ class GPIORule final: public BaseRule
 {
 public:
     GPIORule(const GPIORuleConfig &cfg, const Context &ctx)
-        : BaseRule(VG_RULE_TYPE_GPIO, 10), _pin_number(cfg.pin_number), _state(cfg.state), _level(cfg.level),
-          _event(cfg.event), _acquire_cb(ctx.c_api.gpios.acquire_cb), _release_cb(ctx.c_api.gpios.release_cb)
+        : BaseRule(VG_RULE_TYPE_GPIO, 10), _pin_name(cfg.pin_name), _pin_number(cfg.pin_number), _state(cfg.state),
+          _level(cfg.level), _event(cfg.event), _signal(SignalString(cfg)), _acquire_cb(ctx.c_api.gpios.acquire_cb),
+          _release_cb(ctx.c_api.gpios.release_cb)
     {
         if (!_acquire_cb)
             throw Exception("No GPIO acquire callback provided in C API while initializing GPIO rule");
         if (!_release_cb)
             throw Exception("No GPIO release callback provided in C API while initializing GPIO rule");
-        if (!ctx.c_api.gpios.sync_level_cb && !ctx.c_api.gpios.sync_event_cb)
-            throw Exception("No GPIO sync level or last event callback provided in C API while initializing GPIO rule");
+        // The callback of the selected signal mode must exist; the other mode's callback is not needed
+        // (docs/PLAN.md section 5.2). Before 2026-10-19 either one satisfied this check.
+        if (_event != VG_GPIO_PIN_EVT_NONE ? !ctx.c_api.gpios.sync_event_cb : !ctx.c_api.gpios.sync_level_cb)
+            throw Exception(
+                "No GPIO sync callback for signal '" + _signal + "' provided in C API while initializing GPIO rule");
 
         if (auto ret = _acquire_cb(_pin_number, _state, static_cast<size_t>(cfg.debounce_durations_ms)); ret != 0)
             throw Exception("Failed to acquire GPIO pin number " + std::to_string(_pin_number)
@@ -731,24 +735,38 @@ public:
         _release_cb(_pin_number);
     }
 
+    // The owner names the configured signal and the pin (docs/PLAN.md section 6.1).
     std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
         if (_event != VG_GPIO_PIN_EVT_NONE)
             return ctx.c_api.gpios.sync_event_cb(_pin_number) == _event
-                       ? std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event)
+                       ? std::make_shared<EventOwner>(type(), _signal, _pin_name, EventOwner::SourceDelivery::Event)
                        : nullptr;
         else if (_level != VG_GPIO_PIN_LVL_NONE)
             return ctx.c_api.gpios.sync_level_cb(_pin_number) == _level
-                       ? std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event)
+                       ? std::make_shared<EventOwner>(type(), _signal, _pin_name, EventOwner::SourceDelivery::Event)
                        : nullptr;
         return nullptr;
     }
 
 private:
+    // The configured signal as written in the configuration ("HIGH", "LOW", "RISING", or "FALLING").
+    static std::string SignalString(const GPIORuleConfig &cfg)
+    {
+        if (const auto level_str = GPIOHelpers::LevelToString(cfg.level); level_str.has_value())
+            return std::string(*level_str);
+        if (const auto event_str = GPIOHelpers::EventToString(cfg.event); event_str.has_value())
+            return std::string(*event_str);
+        return {};
+    }
+
+private:
+    std::string _pin_name;
     int _pin_number;
     vg_gpio_pin_mod_e _state;
     vg_gpio_pin_lvl_e _level;
     vg_gpio_pin_evt_e _event;
+    std::string _signal;
 
     vg_sta_e (*_acquire_cb)(int pin, vg_gpio_pin_mod_e mode, size_t debounce_ms);
     void (*_release_cb)(int pin);
@@ -758,8 +776,8 @@ class TTYRule final: public BaseRule
 {
 public:
     TTYRule(const TTYRuleConfig &cfg, const Context &ctx)
-        : BaseRule(VG_RULE_TYPE_TTY, 0), _socket_path(cfg.socket_path), _cmd(cfg.cmd), _cmd_pos(0),
-          _buffer_size(cfg.buffer_size), _buffer(new char[_buffer_size]), _fd(-1), _found(0)
+        : BaseRule(VG_RULE_TYPE_TTY, 0), _name(cfg.name), _socket_path(cfg.socket_path), _cmd(cfg.cmd),
+          _fallback(FallbackTable(_cmd)), _cmd_pos(0), _buffer(cfg.buffer_size), _fd(-1), _found(0)
     {
         if (_cmd.empty())
             throw Exception("TTY rule command cannot be empty while initializing TTY rule");
@@ -775,13 +793,14 @@ public:
         closeSocket();
     }
 
+    // The owner names the configured command and the TTY (docs/PLAN.md section 6.1).
     std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
         if (!isSocketOpen())
             openSocket(ctx);
         while (isSocketOpen())
         {
-            const ssize_t n = ::recv(_fd, _buffer, _buffer_size, 0);
+            const ssize_t n = ::recv(_fd, _buffer.data(), _buffer.size(), 0);
             if (n < 0)
             {
                 if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -802,26 +821,43 @@ public:
 
             for (ssize_t i = 0; i < n; ++i)
             {
+                // Knuth-Morris-Pratt: on a mismatch fall back to the longest command prefix that is also a
+                // suffix of what matched so far, so "AAB" is found in "AAAB" (missed before 2026-10-19).
+                // Occurrences do not overlap, as before.
+                while (_cmd_pos > 0 && _buffer[i] != _cmd[_cmd_pos])
+                    _cmd_pos = _fallback[_cmd_pos];
                 if (_buffer[i] == _cmd[_cmd_pos])
-                {
                     ++_cmd_pos;
-                    if (_cmd_pos == _cmd.size())
-                    {
-                        ++_found;
-                        _cmd_pos = 0;
-                    }
+                if (_cmd_pos == _cmd.size())
+                {
+                    ++_found;
+                    _cmd_pos = 0;
                 }
-                else if (_cmd_pos > 0)
-                    _cmd_pos = (_buffer[i] == _cmd[0]) ? 1 : 0;
             }
         }
 
         const bool found = _found > 0;
         _found -= found;
-        return found ? std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event) : nullptr;
+        return found ? std::make_shared<EventOwner>(type(), _cmd, _name, EventOwner::SourceDelivery::Event) : nullptr;
     }
 
 private:
+    // `table[i]` is the length of the longest proper prefix of the command that is also a suffix of its first
+    // `i` bytes (the Knuth-Morris-Pratt failure function).
+    static std::vector<size_t> FallbackTable(const std::string &cmd)
+    {
+        std::vector<size_t> table(cmd.size() + 1, 0);
+        for (size_t i = 1, k = 0; i < cmd.size(); ++i)
+        {
+            while (k > 0 && cmd[i] != cmd[k])
+                k = table[k];
+            if (cmd[i] == cmd[k])
+                ++k;
+            table[i + 1] = k;
+        }
+        return table;
+    }
+
     inline bool isSocketOpen() const noexcept
     {
         return _fd >= 0;
@@ -870,7 +906,7 @@ private:
             ", flags set to:", flags);
 
         _cmd_pos = 0;
-        std::memset(_buffer, 0, _buffer_size);
+        std::fill(_buffer.begin(), _buffer.end(), 0);
         _found = 0;
     }
 
@@ -884,11 +920,12 @@ private:
     }
 
 private:
+    const std::string _name;
     const std::string _socket_path;
     const std::string _cmd;
+    const std::vector<size_t> _fallback;
     mutable size_t _cmd_pos;
-    const size_t _buffer_size;
-    mutable char *_buffer;
+    mutable std::vector<char> _buffer; // owned; the previous raw buffer was never freed
     mutable int _fd;
     mutable int _found;
 };

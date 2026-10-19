@@ -125,8 +125,10 @@ VG_TEST_CASE(tick_hands_over_one_entry_per_call_in_fifo_order)
     f.ctx.enqueueInferenceResult(Event(3, "cam0"));
 
     const auto before = f.ctx.shared_time.steadyTime();
+    const auto wall_before = EventOwner::NowMs();
     f.ctx.tick();
-    VG_CHECK(f.ctx.shared_time.steadyTime() > before); // the clocks advance on an enabled tick
+    VG_CHECK(f.ctx.shared_time.steadyTime() > before);     // the clocks advance on an enabled tick
+    VG_CHECK(f.ctx.shared_time.unixTime() >= wall_before); // the input's time (1) is not the current time
     VG_REQUIRE(f.ctx.shared_inference_result.has_value());
     VG_CHECK_EQ(f.ctx.shared_inference_result->timestamp_ms, int64_t { 1 });
     VG_CHECK_EQ(f.ctx.shared_inference_result->source_id, "cam0");
@@ -157,7 +159,9 @@ VG_TEST_CASE(tick_while_disabled_resets_input_and_cancels_the_current_event)
     VG_CHECK(f.ctx.shared_rule_event.getCurrent() != nullptr);
 
     f.ctx.record_rule_enabled.store(false);
+    const auto before = f.ctx.shared_time.steadyTime();
     f.ctx.tick();
+    VG_CHECK(f.ctx.shared_time.steadyTime() > before); // the clocks advance on a disabled tick too (since 2026-10-19)
     VG_CHECK_EQ(f.ctx.inference_queue.size(), size_t { 0 });
     VG_CHECK(!f.ctx.shared_inference_result.has_value());
     VG_CHECK(f.ctx.shared_rule_event.getCurrent() == nullptr);
@@ -198,7 +202,7 @@ VG_TEST_CASE(rule_event_is_reported_on_every_dispatch_but_the_writer_event_is_cr
     VG_REQUIRE(current != nullptr);
     VG_CHECK_EQ(current->owner_uid, owner1->uid);
     VG_CHECK(current->status.load() == WriteEvent::Status::Pending);
-    VG_CHECK_EQ(current->timestamp, f.ctx.shared_time.unixTime()); // the context clock, not the owner's time
+    VG_CHECK_EQ(current->timestamp, int64_t { 5000 }); // the owner's event time (the context clock before 2026-10-19)
 
     // A second owner while one event is pending: reported, but no new writer event.
     const auto owner2

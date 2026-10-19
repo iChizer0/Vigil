@@ -32,6 +32,8 @@ static inline constexpr const size_t kMaskHeight = 128;
 
 static inline constexpr const size_t kInferenceQueueSize = 60 * 1;
 
+static inline constexpr const size_t kHTTPAPIRequestMaxBytes = 1024 * 1024; // largest request body the C API parses
+
 static inline constexpr const std::chrono::seconds kVideoClipLengthDefault = std::chrono::seconds(60);
 static inline constexpr const size_t kSlotMediaMuxerBufferPeriod = 10;
 static inline constexpr const size_t kCaptureMediaMuxerBufferPeriod = 10;

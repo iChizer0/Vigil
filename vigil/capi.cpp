@@ -338,6 +338,9 @@ static nlohmann::json vg_http_api_request_2_json(const vg_http_api_request_t &re
 {
     if (!request.payload || request.payload_len == 0)
         return {};
+    if (request.payload_len > vigil::kHTTPAPIRequestMaxBytes) // bounded before parsing (docs/PLAN.md section 5.2)
+        throw vigil::Exception("Request body of " + std::to_string(request.payload_len) + " bytes exceeds the limit of "
+                               + std::to_string(vigil::kHTTPAPIRequestMaxBytes) + " bytes");
     return nlohmann::json::parse(static_cast<const char *>(request.payload),
         static_cast<const char *>(request.payload) + request.payload_len);
 }
