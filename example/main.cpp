@@ -40,7 +40,15 @@ vg_sta_e log_cb(vg_log_level_e level, const char *msg, size_t bytes_len)
 
 void on_rule_event_cb(const vg_rule_evt_t *evt)
 {
-    std::cout << "Rule activated: " << (evt->id ? evt->id : "unknown") << std::endl;
+    std::cout << "Rule activated: " << (evt->id ? evt->id : "unknown") << ", event time " << evt->timestamp
+              << ", dispatched " << evt->dispatch_timestamp << std::endl;
+}
+
+vg_sta_e sound_play_cb(void *user_data)
+{
+    (void)user_data;
+    std::cout << "Sound playback requested" << std::endl;
+    return 0;
 }
 
 vg_sta_e acquire_cb(int pin, vg_gpio_pin_mod_e mode, size_t debounce_time_ms)
@@ -166,6 +174,7 @@ int main()
     config.media.video_file_write_video_frame_cb = video_file_write_video_frame_cb;
     config.media.video_file_write_audio_frame_cb = video_file_write_audio_frame_cb;
     config.media.image_capture_cb = image_capture_cb;
+    config.media.sound_play_cb = sound_play_cb;
 
     // Storage
     config.storage.internal_device_path = "/dev/null";

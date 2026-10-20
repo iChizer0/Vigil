@@ -84,6 +84,7 @@ struct Context
             resetInference();
             shared_inference_result.reset();
             shared_rule_event.cancelPending(); // a claimed event is completed by its writer
+            sound_executor.cancelPending();    // a playing callback finishes on its own
             return;
         }
 
@@ -165,6 +166,7 @@ struct Context
         if (!owner)
             return false;
         const auto steady_time = shared_time.steadyTime();
+        const auto settings = action_settings.get().settings;
         bool writer_created = false;
         try
         {
@@ -180,6 +182,11 @@ struct Context
                     writer_created = true;
                 }
             }
+            // Sound is attempted on its own (docs/PLAN.md section 7.1): a rejected or failed trigger changes
+            // nothing else, and writer_created reports file acceptance only. No configuration enables it before
+            // Phase 4D.
+            if (settings && settings->sound_enabled)
+                sound_executor.tryTrigger();
             if (c_api.basic.on_rule_event_cb)
             {
                 const auto evt = vg_rule_evt_t { .type = owner->type,
@@ -188,7 +195,8 @@ struct Context
                     .uid = owner->uid,
                     .source_id = owner->source_id.c_str(),
                     .source_delivery = EventOwner::SourceDeliveryString(owner->source_delivery),
-                    .writer_created = writer_created };
+                    .writer_created = writer_created,
+                    .dispatch_timestamp = owner->dispatch_timestamp };
                 c_api.basic.on_rule_event_cb(&evt);
             }
         }
@@ -587,8 +595,143 @@ struct Context
     // Shared inference results (not thread-safe)
     std::optional<InferenceResult> shared_inference_result;
 
-    // Constructor
-    Context(const vg_config_t &cfg) : c_api(cfg)
+    // The Sound action executor (docs/PLAN.md section 7.3): one worker, one state, no queue. A trigger is
+    // accepted from Idle only, and only while the host provides `sound_play_cb`, media is not paused, and the
+    // executor is not stopping; a Pending or Playing retrigger is rejected, not queued. The worker claims a
+    // Pending trigger, holds a media operation (section 8.3) while it calls the callback outside every lock, and
+    // returns to Idle whatever the callback returned: a failure is logged, never replayed. Disabling Sound or
+    // rules and stopping cancel a Pending trigger; a Playing callback finishes under its bounded-completion
+    // contract and `stopAndJoin` waits for it. Without a callback there is no worker and Sound is unavailable.
+    struct SoundActionExecutor
+    {
+    public:
+        enum class State { Idle, Pending, Playing, Stopping };
+
+        // `run_worker == false` is a test seam: no thread is started and the test plays pending triggers
+        // through SoundActionExecutorTestAccess. Production code always runs the worker.
+        explicit SoundActionExecutor(Context &ctx, bool run_worker = true)
+            : _ctx(ctx), _available(ctx.c_api.media.sound_play_cb != nullptr)
+        {
+            if (_available && run_worker)
+                _worker = std::thread(&SoundActionExecutor::workerLoop, this);
+        }
+
+        // Explicit stopAndJoin precedes destruction (Vigil::~Vigil); this is the fallback.
+        ~SoundActionExecutor() noexcept
+        {
+            stopAndJoin();
+        }
+
+        SoundActionExecutor(const SoundActionExecutor &) = delete;
+        SoundActionExecutor &operator=(const SoundActionExecutor &) = delete;
+
+        // Whether the host provides the callback. A configured Sound action without it is never accepted.
+        bool available() const noexcept
+        {
+            return _available;
+        }
+
+        // Accepts a trigger from Idle. False when Sound is unavailable or stopping, media is paused, or a trigger
+        // is pending or playing; the caller checks the configuration and the rule gates.
+        bool tryTrigger() noexcept
+        {
+            {
+                const std::lock_guard lock(_mutex);
+                if (!_available || _stop || _state != State::Idle || _ctx.media_barrier.isPaused())
+                    return false;
+                _state = State::Pending;
+            }
+            _wake.notify_all();
+            return true;
+        }
+
+        // Cancels a Pending trigger; a Playing callback is left to finish.
+        void cancelPending() noexcept
+        {
+            const std::lock_guard lock(_mutex);
+            if (_state == State::Pending)
+                _state = State::Idle;
+        }
+
+        State state() const noexcept
+        {
+            const std::lock_guard lock(_mutex);
+            return _state;
+        }
+
+        // Refuses further triggers, cancels a Pending one, lets a Playing callback return, and joins the worker.
+        // Idempotent; the executor stays stopped.
+        void stopAndJoin() noexcept
+        {
+            {
+                const std::lock_guard lock(_mutex);
+                _stop = true;
+                if (_state != State::Playing) // a Playing callback moves to Stopping when it returns
+                    _state = State::Stopping;
+            }
+            _wake.notify_all();
+            if (_worker.joinable())
+                _worker.join();
+        }
+
+    private:
+        friend struct SoundActionExecutorTestAccess; // defined by the module tests only
+
+        void workerLoop() noexcept
+        {
+            for (;;)
+            {
+                {
+                    std::unique_lock lock(_mutex);
+                    _wake.wait(lock, [this] { return _stop || _state == State::Pending; });
+                    if (_stop)
+                        return;
+                }
+                playPending();
+            }
+        }
+
+        // Claims the Pending trigger and plays it; false when nothing is pending. Admission to the media barrier
+        // happens here, so a trigger accepted before a pause is canceled instead of played.
+        bool playPending() noexcept
+        {
+            {
+                const std::lock_guard lock(_mutex);
+                if (_state != State::Pending)
+                    return false;
+                _state = State::Playing;
+            }
+            bool admitted = false;
+            vg_sta_e ret = 0;
+            {
+                const MediaBarrier::Operation operation(_ctx.media_barrier);
+                admitted = static_cast<bool>(operation);
+                if (admitted)
+                    ret = _ctx.c_api.media.sound_play_cb(_ctx.c_api.media.user_data);
+            }
+            if (!admitted)
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Sound trigger canceled, media is paused");
+            else if (ret != 0)
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Sound playback failed, code: ", static_cast<int>(ret));
+            {
+                const std::lock_guard lock(_mutex);
+                _state = _stop ? State::Stopping : State::Idle;
+            }
+            _wake.notify_all();
+            return true;
+        }
+
+        Context &_ctx;
+        const bool _available;
+        mutable std::mutex _mutex;
+        std::condition_variable _wake;
+        State _state = State::Idle;
+        bool _stop = false;
+        std::thread _worker;
+    } mutable sound_executor; // last member: it starts after everything it uses exists, and stops first
+
+    // Constructor. `run_sound_worker` is the test seam of SoundActionExecutor.
+    Context(const vg_config_t &cfg, bool run_sound_worker = true) : c_api(cfg), sound_executor(*this, run_sound_worker)
     {
         action_settings.sync(c_api.media);
     }

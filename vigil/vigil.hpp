@@ -22,14 +22,16 @@ public:
     }
 
     // Stops in dependency order (docs/PLAN.md section 8.3): the rule producer first, so nothing new is
-    // dispatched while the workers drain; then the manual capture worker and the storage slots, whose
-    // destructors interrupt, finish, and publish admitted work before joining; the context, which every
-    // worker and callback uses, goes last. A constructor that throws destroys the members built so far, so a
-    // partial initialization still joins every thread it started.
+    // dispatched while the workers drain; then the pending file task is canceled and the Sound worker is stopped
+    // (a pending trigger is canceled, a playing callback finishes); then the manual capture worker and the
+    // storage slots, whose destructors interrupt, finish, and publish admitted work before joining; the context,
+    // which every worker and callback uses, goes last. A constructor that throws destroys the members built so
+    // far, so a partial initialization still joins every thread it started.
     ~Vigil() noexcept
     {
         _rule_endpoint.reset();
         _context->shared_rule_event.cancelPending();
+        _context->sound_executor.stopAndJoin();
         _capture_endpoint.reset();
         _storage_endpoint.reset();
     }

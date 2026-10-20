@@ -635,6 +635,8 @@ struct RecordConfig
         if (!ctx.action_settings.update(ctx.action_settings.getRevision(), std::move(settings)))
             return EAGAIN;
         ctx.record_rule_enabled.store(rule_enabled, std::memory_order_release);
+        if (!sound.enabled) // disabling Sound cancels a pending trigger; a playing one finishes (section 7.3)
+            ctx.sound_executor.cancelPending();
         return 0;
     }
 

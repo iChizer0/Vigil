@@ -4,7 +4,7 @@
 #ifdef VG_CAPI_VERSION
 #error "Duplicate definition of VG_CAPI_VERSION"
 #else
-#define VG_CAPI_VERSION "2025.11.25"
+#define VG_CAPI_VERSION "2026.10.19"
 #endif
 
 #include "vigil_ctypes.h"
@@ -63,8 +63,8 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
  * @brief Suspends media writing operations, optionally waiting for in-flight writes to complete (thread-safe).
  *
  * @param wait When true, blocks until every admitted media operation (video create/write/finish, image capture,
- * thumbnail generation) has completed; nothing new is admitted until the matching resume. Must not be true when
- * called from a media callback, which would wait for itself.
+ * thumbnail generation, sound playback) has completed; nothing new is admitted until the matching resume. Must
+ * not be true when called from a media callback, which would wait for itself.
  * @return vg_sta_e 0 on success, otherwise an error status (except EAGAIN when wait is false).
  * @note While suspended, incoming media frames may be dropped if internal buffers fill up. Generally used when the
  * frame settings are being changed to avoid partial writes.
