@@ -1024,11 +1024,98 @@ struct FileWriterSettings
         return std::shared_ptr<FileWriterSettings>(new (std::nothrow) FileWriterSettings(type, fmt, itv, fnp, vcl, wm));
     }
 
+    // With the watermarks of one automatic task of this kind (one image, or one clip of `vcl` seconds), as
+    // estimated by the host when it provides `max_bytes_estimate_cb`.
+    static std::shared_ptr<FileWriterSettings> create(CaptureType type, const std::string &fmt,
+        std::chrono::milliseconds itv, std::string_view fnp, std::chrono::seconds vcl,
+        const vg_config_media_t *media_capi) noexcept
+    {
+        return create(type, fmt, itv, fnp, vcl,
+            WaterMarks::from(fmt, type == CaptureType::Video ? vcl.count() : 1, media_capi));
+    }
+
 private:
     FileWriterSettings(CaptureType tp, const std::string &fmt, std::chrono::milliseconds itv, std::string_view fnp,
         std::chrono::seconds vcl, WaterMarks wm) noexcept
         : type(tp), format(fmt), interval(itv), file_name_prefix(fnp), video_clip_length(vcl), watermarks(wm)
     {
+    }
+};
+
+// The immutable action settings snapshot (docs/PLAN.md section 7.1): the Sound and continuous switches, the
+// settings of each enabled file channel, and the effective watermarks the Slot admits new tasks against,
+// published as one object by a configuration commit or a media refresh. Readers load it without the commit
+// lock and keep the reference for as long as they need one consistent view. Rule enablement is not part of
+// it: it stays the `record_rule_enabled` gate every thread reads, published after the snapshot.
+struct ActionSettings
+{
+    const bool continuous_enabled;
+    const bool sound_enabled;
+    const std::shared_ptr<FileWriterSettings> photo; // null when the Photo action is disabled
+    const std::shared_ptr<FileWriterSettings> video; // triggered Video; null when the Video action is disabled
+    const WaterMarks watermarks;
+
+    ~ActionSettings() = default;
+
+    // The effective watermarks are those of the enabled file channel, or of one default clip when none is
+    // enabled, which is the headroom the Slot has at first start. Phase 4C sizes them for one simultaneous
+    // Video plus Photo.
+    static std::shared_ptr<const ActionSettings> create(bool continuous, bool sound,
+        std::shared_ptr<FileWriterSettings> photo, std::shared_ptr<FileWriterSettings> video,
+        const vg_config_media_t *media_capi) noexcept
+    {
+        const auto &channel = photo ? photo : video;
+        const auto watermarks
+            = channel ? channel->watermarks
+                      : WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), media_capi);
+        return std::shared_ptr<const ActionSettings>(
+            new (std::nothrow) ActionSettings(continuous, sound, std::move(photo), std::move(video), watermarks));
+    }
+
+    // The same configuration with every watermark estimated again by the host (a media refresh).
+    std::shared_ptr<const ActionSettings> refreshed(const vg_config_media_t *media_capi) const noexcept
+    {
+        std::shared_ptr<FileWriterSettings> photo_settings, video_settings;
+        if (photo && !(photo_settings = Refreshed(*photo, media_capi)))
+            return nullptr;
+        if (video && !(video_settings = Refreshed(*video, media_capi)))
+            return nullptr;
+        return create(continuous_enabled, sound_enabled, std::move(photo_settings), std::move(video_settings),
+            media_capi);
+    }
+
+    // The single enabled file channel of the single-writer runtime, null when none is enabled. Both cannot be
+    // enabled until Phase 4D; Phase 4C replaces every caller with a worker per channel.
+    const std::shared_ptr<FileWriterSettings> &fileChannel() const noexcept
+    {
+        return photo ? photo : video;
+    }
+
+    static bool SameSettings(const std::shared_ptr<FileWriterSettings> &a,
+        const std::shared_ptr<FileWriterSettings> &b) noexcept
+    {
+        return a == b || (a && b && *a == *b);
+    }
+
+    bool operator==(const ActionSettings &other) const noexcept
+    {
+        return continuous_enabled == other.continuous_enabled && sound_enabled == other.sound_enabled
+               && SameSettings(photo, other.photo) && SameSettings(video, other.video)
+               && watermarks == other.watermarks;
+    }
+
+private:
+    ActionSettings(bool continuous, bool sound, std::shared_ptr<FileWriterSettings> p,
+        std::shared_ptr<FileWriterSettings> v, WaterMarks wm) noexcept
+        : continuous_enabled(continuous), sound_enabled(sound), photo(std::move(p)), video(std::move(v)), watermarks(wm)
+    {
+    }
+
+    static std::shared_ptr<FileWriterSettings> Refreshed(const FileWriterSettings &s,
+        const vg_config_media_t *media_capi) noexcept
+    {
+        return FileWriterSettings::create(s.type, s.format, s.interval, s.file_name_prefix, s.video_clip_length,
+            media_capi);
     }
 };
 

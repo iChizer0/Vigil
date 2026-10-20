@@ -214,6 +214,21 @@ void CompleteCurrent(Context &ctx, WriteEvent::Status status)
     ctx.shared_rule_event.complete(ctx.shared_rule_event.getCurrent(), status);
 }
 
+// The interval of the enabled file channel in the published snapshot, or -1 without one.
+long ChannelIntervalMs(const Context &ctx)
+{
+    const auto settings = ctx.action_settings.get().settings;
+    const auto channel = settings ? settings->fileChannel() : nullptr;
+    return channel ? static_cast<long>(channel->interval.count()) : -1L;
+}
+
+std::string ChannelFormat(const Context &ctx)
+{
+    const auto settings = ctx.action_settings.get().settings;
+    const auto channel = settings ? settings->fileChannel() : nullptr;
+    return channel ? channel->format : std::string();
+}
+
 } // namespace
 
 VG_TEST_CASE(startup_without_files_uses_defaults_and_writes_nothing)
@@ -259,7 +274,7 @@ VG_TEST_CASE(startup_reloads_persisted_configuration_without_rewriting_files)
     VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(true, "JPG", 777));
     VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), nlohmann::json::parse(rule));
     VG_CHECK_EQ(f.endpoint->getScheduleRuleConfig(), nlohmann::json::parse(schedule));
-    VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->interval.count(), 777L);
+    VG_CHECK_EQ(ChannelIntervalMs(*f.ctx), 777L);
     // Files are read at startup, never rewritten.
     VG_CHECK_EQ(ReadFile(f.file("record_config.json")), record);
     VG_CHECK_EQ(ReadFile(f.file("record_rule_config.json")), rule);
@@ -283,7 +298,7 @@ VG_TEST_CASE(startup_leaves_unusable_files_untouched_and_keeps_rules_disabled)
         f.start();
         VG_CHECK(!f.ctx->record_rule_enabled.load());
         VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, nullptr, 0));
-        VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->interval.count(), 5000L);
+        VG_CHECK_EQ(ChannelIntervalMs(*f.ctx), -1L); // no file channel
         VG_CHECK_EQ(ReadFile(f.file("record_config.json")), text);
         f.evaluate();
         VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
@@ -533,8 +548,8 @@ VG_TEST_CASE(record_config_post_persists_only_valid_payloads_in_canonical_form)
     VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_config.json"))), valid);
     VG_CHECK(!std::filesystem::exists(f.file(".record_config.json")));
     VG_CHECK(f.ctx->record_rule_enabled.load());
-    VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->interval.count(), 1234L);
-    const auto revision = f.ctx->shared_writer_settings.getRevision();
+    VG_CHECK_EQ(ChannelIntervalMs(*f.ctx), 1234L);
+    const auto revision = f.ctx->action_settings.getRevision();
 
     // Rejected payloads change neither the runtime nor the file.
     const auto res = f.endpoint->updateRecordConfig(RecordJson(true, "MP4", 0));
@@ -547,7 +562,7 @@ VG_TEST_CASE(record_config_post_persists_only_valid_payloads_in_canonical_form)
     VG_CHECK_EQ(f.endpoint->getRecordConfig(), valid);
     VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_config.json"))), valid);
     VG_CHECK(f.ctx->record_rule_enabled.load());
-    VG_CHECK_EQ(f.ctx->shared_writer_settings.getRevision(), revision);
+    VG_CHECK_EQ(f.ctx->action_settings.getRevision(), revision);
     VG_CHECK(!std::filesystem::exists(f.file(".record_config.json")));
 
     // Unknown fields are dropped: the file holds the canonical document.
@@ -557,13 +572,13 @@ VG_TEST_CASE(record_config_post_persists_only_valid_payloads_in_canonical_form)
     VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_config.json"))), RecordJson(false, "JPG", 2000));
     VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, "JPG", 2000));
     VG_CHECK(!f.ctx->record_rule_enabled.load());
-    VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->format, "JPG");
+    VG_CHECK_EQ(ChannelFormat(*f.ctx), "JPG");
+    VG_CHECK_EQ(ChannelIntervalMs(*f.ctx), 2000L);
 
-    // Rules off with no file action is a valid state; the writer settings simply stay as they were.
+    // Rules off with no file action is a valid state: the snapshot has no file channel.
     VG_CHECK_EQ(f.postRecordConfig(RecordJson(false, nullptr, 0)), 0);
     VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, nullptr, 0));
-    VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->format, "JPG");
-    VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->interval.count(), 2000L);
+    VG_CHECK_EQ(ChannelIntervalMs(*f.ctx), -1L);
 }
 
 VG_TEST_CASE(record_config_post_fails_closed_when_the_store_is_unwritable)
@@ -579,7 +594,7 @@ VG_TEST_CASE(record_config_post_fails_closed_when_the_store_is_unwritable)
     // Nothing was applied because nothing could be persisted.
     VG_CHECK(!f.ctx->record_rule_enabled.load());
     VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, nullptr, 0));
-    VG_CHECK_EQ(f.ctx->shared_writer_settings.get().second->interval.count(), 5000L);
+    VG_CHECK_EQ(ChannelIntervalMs(*f.ctx), -1L); // the defaults: no file channel
     f.evaluate();
     VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
 }

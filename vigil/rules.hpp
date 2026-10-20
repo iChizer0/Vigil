@@ -992,11 +992,13 @@ public:
     }
 
 private:
+    // The interval of the enabled file channel, which ALWAYS_ON paces (docs/PLAN.md section 4.4).
     static std::chrono::steady_clock::duration currentInterval(const Context &ctx) noexcept
     {
-        const auto [_, settings] = ctx.shared_writer_settings.get();
+        const auto settings = ctx.action_settings.get().settings;
+        const auto channel = settings ? settings->fileChannel() : nullptr;
         return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            settings ? settings->interval : kRecordWriterDefaultIntervalMs);
+            channel ? channel->interval : kRecordWriterDefaultIntervalMs);
     }
 
     mutable std::chrono::steady_clock::time_point _last_trigger_time;

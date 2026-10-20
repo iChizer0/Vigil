@@ -608,31 +608,32 @@ struct RecordConfig
         j["dActions"]["dSound"] = { { "bEnabled", sound.enabled } };
     }
 
-    // Writer settings of the single enabled file action, or nullptr when no file action is enabled.
-    std::shared_ptr<FileWriterSettings> createWriterSettings(const Context &ctx) const
+    // The action settings snapshot of this configuration (docs/PLAN.md section 7.1): each enabled file action
+    // with its watermarks, which the host estimates through a media callback, so build it before taking the
+    // commit lock. Null only on allocation failure.
+    std::shared_ptr<const ActionSettings> createActionSettings(const Context &ctx) const noexcept
     {
-        if (photo.enabled)
-            return FileWriterSettings::create(CaptureType::Image, photo.format, photo.interval,
-                kRecordWriterPrefixDefault, kVideoClipLengthDefault,
-                WaterMarks::from(photo.format, 1, &ctx.c_api.media));
-        if (video.enabled)
-            return FileWriterSettings::create(CaptureType::Video, kRecordWriterDefaultFormat, video.interval,
-                kRecordWriterPrefixDefault, kVideoClipLengthDefault,
-                WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), &ctx.c_api.media));
-        return nullptr;
+        const auto *media = &ctx.c_api.media;
+        std::shared_ptr<FileWriterSettings> photo_settings, video_settings;
+        if (photo.enabled
+            && !(photo_settings = FileWriterSettings::create(CaptureType::Image, photo.format, photo.interval,
+                     kRecordWriterPrefixDefault, kVideoClipLengthDefault, media)))
+            return nullptr;
+        if (video.enabled
+            && !(video_settings = FileWriterSettings::create(CaptureType::Video, kRecordWriterDefaultFormat,
+                     video.interval, kRecordWriterPrefixDefault, kVideoClipLengthDefault, media)))
+            return nullptr;
+        return ActionSettings::create(continuous_enabled, sound.enabled, std::move(photo_settings),
+            std::move(video_settings), media);
     }
 
-    // Publishes the configuration to the runtime: the writer settings of the enabled file action, if any,
-    // then the rule flag. Returns EAGAIN, with nothing applied, when the writer settings changed concurrently
-    // (a media refresh); the caller retries.
-    vg_sta_e sync(Context &ctx) const noexcept
+    // Publishes the configuration to the runtime: `settings`, built from it by createActionSettings, under the
+    // revision check, then the rule flag. Returns EAGAIN, with nothing applied, when the snapshot changed
+    // concurrently (a media refresh); the caller retries.
+    vg_sta_e sync(Context &ctx, std::shared_ptr<const ActionSettings> settings) const noexcept
     {
-        if (auto settings = createWriterSettings(ctx); settings)
-        {
-            const auto rev = ctx.shared_writer_settings.get().first;
-            if (!ctx.shared_writer_settings.update(rev, std::move(settings)))
-                return EAGAIN;
-        }
+        if (!ctx.action_settings.update(ctx.action_settings.getRevision(), std::move(settings)))
+            return EAGAIN;
         ctx.record_rule_enabled.store(rule_enabled, std::memory_order_release);
         return 0;
     }

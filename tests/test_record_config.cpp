@@ -1,5 +1,6 @@
 // Characterization tests for the version-2 record action configuration (docs/PLAN.md section 4.1; matrix
-// C1) and for the shared writer settings and watermarks it is mapped onto.
+// C1) and for the action settings snapshot, its revisions, and the watermarks it is mapped onto (section 7.1;
+// matrix A4 and C2).
 
 #include <cstddef>
 #include <cstdint>
@@ -85,6 +86,27 @@ int64_t EstimateNothing(const char *, size_t, void *)
     return 0;
 }
 
+// The host's estimate for the refresh test, changed between calls.
+int64_t g_estimate = 0;
+
+int64_t EstimateFromGlobal(const char *, size_t, void *)
+{
+    return g_estimate;
+}
+
+// The enabled file channel of the published snapshot, null without one.
+std::shared_ptr<FileWriterSettings> Channel(const Context &ctx)
+{
+    const auto settings = ctx.action_settings.get().settings;
+    return settings ? settings->fileChannel() : nullptr;
+}
+
+// The snapshot of the first-start document with `overrides` applied.
+std::shared_ptr<const ActionSettings> Snapshot(const Context &ctx, Overrides overrides = {})
+{
+    return RecordConfig(Document(overrides), ctx).createActionSettings(ctx);
+}
+
 } // namespace
 
 VG_TEST_CASE(defaults_are_the_first_start_document)
@@ -95,7 +117,9 @@ VG_TEST_CASE(defaults_are_the_first_start_document)
     VG_CHECK(!cfg.continuous_enabled);
     VG_CHECK(!cfg.photo.enabled && !cfg.video.enabled && !cfg.sound.enabled);
     VG_CHECK_EQ(Canonical(cfg, f.ctx), Document());
-    VG_CHECK(cfg.createWriterSettings(f.ctx) == nullptr);
+    const auto settings = cfg.createActionSettings(f.ctx);
+    VG_REQUIRE(settings != nullptr);
+    VG_CHECK(!settings->fileChannel() && !settings->continuous_enabled && !settings->sound_enabled);
     VG_CHECK_EQ(Canonical(RecordConfig(Document(), f.ctx), f.ctx), Document()); // and it round-trips
 }
 
@@ -177,60 +201,235 @@ VG_TEST_CASE(rejects_capabilities_the_single_writer_runtime_cannot_run_yet)
     VG_CHECK(!Rejected(Document({ { "/dActions/dVideo/bEnabled", true } }), f.ctx)); // rules off, action armed
 }
 
-VG_TEST_CASE(writer_settings_follow_the_single_enabled_file_action)
+VG_TEST_CASE(action_settings_carry_the_enabled_file_channel_and_the_effective_watermarks)
 {
     Fixture f;
-    const auto photo
-        = RecordConfig(Document({ { "/dActions/dPhoto/bEnabled", true }, { "/dActions/dPhoto/sFormat", "RAW" },
-                           { "/dActions/dPhoto/iIntervalMs", 1500 } }),
-            f.ctx)
-              .createWriterSettings(f.ctx);
-    VG_REQUIRE(photo != nullptr);
-    VG_CHECK(photo->type == CaptureType::Image);
-    VG_CHECK_EQ(photo->format, "RAW");
-    VG_CHECK_EQ(photo->interval.count(), 1500L);
-    VG_CHECK_EQ(photo->file_name_prefix, kRecordWriterPrefixDefault);
-    VG_CHECK_EQ(photo->video_clip_length.count(), kVideoClipLengthDefault.count());
-    VG_CHECK(photo->watermarks == WaterMarks::from("RAW", 1, nullptr));
+    const auto photo = Snapshot(f.ctx, { { "/dActions/dPhoto/bEnabled", true }, { "/dActions/dPhoto/sFormat", "RAW" },
+                                           { "/dActions/dPhoto/iIntervalMs", 1500 } });
+    VG_REQUIRE(photo != nullptr && photo->photo != nullptr);
+    VG_CHECK(photo->video == nullptr);
+    VG_CHECK(photo->fileChannel() == photo->photo);
+    VG_CHECK(photo->photo->type == CaptureType::Image);
+    VG_CHECK_EQ(photo->photo->format, "RAW");
+    VG_CHECK_EQ(photo->photo->interval.count(), 1500L);
+    VG_CHECK_EQ(photo->photo->file_name_prefix, kRecordWriterPrefixDefault);
+    VG_CHECK_EQ(photo->photo->video_clip_length.count(), kVideoClipLengthDefault.count());
+    VG_CHECK(photo->photo->watermarks == WaterMarks::from("RAW", 1, nullptr));
+    VG_CHECK(photo->watermarks == photo->photo->watermarks); // the effective watermarks are the channel's
+    VG_CHECK(!photo->continuous_enabled && !photo->sound_enabled);
 
-    const auto video = RecordConfig(
-        Document({ { "/dActions/dVideo/bEnabled", true }, { "/dActions/dVideo/iIntervalMs", 2500 } }), f.ctx)
-                           .createWriterSettings(f.ctx);
-    VG_REQUIRE(video != nullptr);
-    VG_CHECK(video->type == CaptureType::Video);
-    VG_CHECK_EQ(video->format, "MP4");
-    VG_CHECK_EQ(video->interval.count(), 2500L);
-    VG_CHECK(video->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), nullptr));
+    const auto video
+        = Snapshot(f.ctx, { { "/dActions/dVideo/bEnabled", true }, { "/dActions/dVideo/iIntervalMs", 2500 } });
+    VG_REQUIRE(video != nullptr && video->video != nullptr);
+    VG_CHECK(video->photo == nullptr);
+    VG_CHECK(video->fileChannel() == video->video);
+    VG_CHECK(video->video->type == CaptureType::Video);
+    VG_CHECK_EQ(video->video->format, "MP4");
+    VG_CHECK_EQ(video->video->interval.count(), 2500L);
+    VG_CHECK(video->video->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), nullptr));
+    VG_CHECK(video->watermarks == video->video->watermarks);
+
+    // No file channel: the effective watermarks are those of one default clip, the first-start headroom.
+    const auto none = Snapshot(f.ctx);
+    VG_REQUIRE(none != nullptr);
+    VG_CHECK(!none->fileChannel());
+    VG_CHECK(
+        none->watermarks == WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), nullptr));
+
+    // Snapshots compare by content.
+    VG_CHECK(*none == *Snapshot(f.ctx));
+    VG_CHECK(!(*photo == *video) && !(*video == *none));
 }
 
-VG_TEST_CASE(sync_publishes_the_settings_and_the_rule_flag)
+VG_TEST_CASE(sync_publishes_the_snapshot_and_the_rule_flag)
 {
     Fixture f;
-    const auto rev0 = f.ctx.shared_writer_settings.getRevision();
+    const auto rev0 = f.ctx.action_settings.getRevision();
     const RecordConfig photo(Document({ { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true } }), f.ctx);
-    VG_CHECK_EQ(photo.sync(f.ctx), 0);
+    VG_CHECK_EQ(photo.sync(f.ctx, photo.createActionSettings(f.ctx)), 0);
     VG_CHECK(f.ctx.record_rule_enabled.load());
-    VG_CHECK_EQ(f.ctx.shared_writer_settings.get().second->format, "JPG");
-    VG_CHECK_EQ(f.ctx.shared_writer_settings.getRevision(), rev0 + 1);
+    VG_REQUIRE(Channel(f.ctx) != nullptr);
+    VG_CHECK_EQ(Channel(f.ctx)->format, "JPG");
+    VG_CHECK_EQ(f.ctx.action_settings.getRevision(), rev0 + 1);
 
-    // No enabled file action: the flag is published and the writer settings stay as they were.
-    VG_CHECK_EQ(RecordConfig(Document(), f.ctx).sync(f.ctx), 0);
+    // No enabled file action: the flag is published and the snapshot has no file channel.
+    const RecordConfig none(Document(), f.ctx);
+    VG_CHECK_EQ(none.sync(f.ctx, none.createActionSettings(f.ctx)), 0);
     VG_CHECK(!f.ctx.record_rule_enabled.load());
-    VG_CHECK_EQ(f.ctx.shared_writer_settings.get().second->format, "JPG");
-    VG_CHECK_EQ(f.ctx.shared_writer_settings.getRevision(), rev0 + 1);
+    VG_CHECK(Channel(f.ctx) == nullptr);
+    VG_CHECK_EQ(f.ctx.action_settings.getRevision(), rev0 + 2);
+
+    // The same document again publishes nothing.
+    VG_CHECK_EQ(none.sync(f.ctx, none.createActionSettings(f.ctx)), 0);
+    VG_CHECK_EQ(f.ctx.action_settings.getRevision(), rev0 + 2);
 }
 
-VG_TEST_CASE(default_writer_settings_exist_before_any_configuration)
+VG_TEST_CASE(default_action_settings_exist_before_any_configuration)
 {
     Fixture f;
-    const auto settings = f.ctx.shared_writer_settings.get().second;
-    VG_REQUIRE(settings != nullptr);
-    VG_CHECK(settings->type == CaptureType::Video);
-    VG_CHECK_EQ(settings->format, kRecordWriterDefaultFormat);
-    VG_CHECK_EQ(settings->interval.count(), kRecordWriterDefaultIntervalMs.count());
-    VG_CHECK_EQ(settings->video_clip_length.count(), kVideoClipLengthDefault.count());
-    VG_CHECK_EQ(settings->file_name_prefix, kRecordWriterPrefixDefault);
+    const auto loaded = f.ctx.action_settings.get();
+    VG_REQUIRE(loaded.settings != nullptr);
+    VG_CHECK(!loaded.settings->fileChannel());
+    VG_CHECK(!loaded.settings->continuous_enabled && !loaded.settings->sound_enabled);
+    VG_CHECK(loaded.settings->watermarks
+             == WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), nullptr));
     VG_CHECK(!f.ctx.record_rule_enabled.load());
+}
+
+VG_TEST_CASE(publishing_bumps_only_the_revisions_of_the_channels_that_changed)
+{
+    Fixture f;
+    auto &shared = f.ctx.action_settings;
+    const auto publish = [&](std::shared_ptr<const ActionSettings> next) {
+        VG_REQUIRE(next != nullptr);
+        return shared.update(shared.getRevision(), std::move(next));
+    };
+    const auto video = [&](int interval_ms) {
+        return Snapshot(f.ctx,
+            { { "/dActions/dVideo/bEnabled", true }, { "/dActions/dVideo/iIntervalMs", interval_ms } });
+    };
+    const auto photo = [&](int interval_ms) {
+        return Snapshot(f.ctx,
+            { { "/dActions/dPhoto/bEnabled", true }, { "/dActions/dPhoto/iIntervalMs", interval_ms } });
+    };
+
+    // Enabling Video moves the Video revision; the Photo channel was and stays disabled.
+    auto before = shared.get();
+    VG_CHECK(publish(video(2500)));
+    auto after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision + 1);
+    VG_CHECK_EQ(after.video_revision, before.video_revision + 1);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision);
+    VG_CHECK_EQ(shared.channelRevision(CaptureType::Video), after.video_revision);
+    VG_CHECK_EQ(shared.channelRevision(CaptureType::Image), after.photo_revision);
+
+    // An equal snapshot publishes nothing, so a re-posted configuration stops no writer.
+    before = after;
+    VG_CHECK(publish(video(2500)));
+    after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision);
+    VG_CHECK_EQ(after.video_revision, before.video_revision);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision);
+
+    // A Video interval change moves the Video revision only.
+    before = after;
+    VG_CHECK(publish(video(3000)));
+    after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision + 1);
+    VG_CHECK_EQ(after.video_revision, before.video_revision + 1);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision);
+
+    // A Sound switch leaves both file channels alone (built directly: the parser rejects it until Phase 4D).
+    before = after;
+    VG_CHECK(publish(
+        ActionSettings::create(false, true, before.settings->photo, before.settings->video, &f.ctx.c_api.media)));
+    after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision + 1);
+    VG_CHECK(after.settings->sound_enabled);
+    VG_CHECK_EQ(after.video_revision, before.video_revision);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision);
+
+    // Switching the file action from Video to Photo changes both channels.
+    before = after;
+    VG_CHECK(publish(photo(1500)));
+    after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision + 1);
+    VG_CHECK_EQ(after.video_revision, before.video_revision + 1);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision + 1);
+
+    // A Photo interval change moves the Photo revision only.
+    before = after;
+    VG_CHECK(publish(photo(2000)));
+    after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision + 1);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision + 1);
+    VG_CHECK_EQ(after.video_revision, before.video_revision);
+
+    // Disabling every action retires the Photo channel.
+    before = after;
+    VG_CHECK(publish(Snapshot(f.ctx)));
+    after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision + 1);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision + 1);
+    VG_CHECK_EQ(after.video_revision, before.video_revision);
+    VG_CHECK(!after.settings->fileChannel());
+}
+
+VG_TEST_CASE(a_stale_revision_is_refused_and_applies_nothing)
+{
+    Fixture f;
+    auto &shared = f.ctx.action_settings;
+    const auto base = shared.get();
+    const auto video = Snapshot(f.ctx, { { "/dActions/dVideo/bEnabled", true } });
+    const auto photo = Snapshot(f.ctx, { { "/dActions/dPhoto/bEnabled", true } });
+    VG_REQUIRE(video != nullptr && photo != nullptr);
+
+    // A commit that read the revision before another commit (or a media refresh) landed is refused with
+    // nothing applied; RecordConfig::sync reports it as EAGAIN and the client posts again.
+    VG_CHECK(shared.update(base.revision, video));
+    VG_CHECK(!shared.update(base.revision, photo));
+    const auto current = shared.get();
+    VG_CHECK_EQ(current.revision, base.revision + 1);
+    VG_CHECK(current.settings->video != nullptr && current.settings->photo == nullptr);
+    VG_CHECK_EQ(current.photo_revision, base.photo_revision);
+    VG_CHECK(!shared.update(current.revision + 1, photo)); // a revision from the future is no better
+    VG_CHECK_EQ(shared.get().revision, current.revision);
+
+    // Retrying from the current revision succeeds.
+    VG_CHECK(shared.update(current.revision, photo));
+    VG_CHECK(shared.get().settings->photo != nullptr);
+    VG_CHECK_EQ(shared.get().revision, current.revision + 1);
+}
+
+VG_TEST_CASE(a_media_refresh_re_estimates_every_channel_coherently)
+{
+    auto cfg = MakeFakeConfig();
+    cfg.media.max_bytes_estimate_cb = &EstimateFromGlobal;
+    g_estimate = 0; // the table values apply
+    Context ctx(cfg);
+    auto &shared = ctx.action_settings;
+    const auto *media = &ctx.c_api.media;
+
+    const RecordConfig video(
+        Document({ { "/dActions/dVideo/bEnabled", true }, { "/dActions/dVideo/iIntervalMs", 2500 } }), ctx);
+    VG_CHECK_EQ(video.sync(ctx, video.createActionSettings(ctx)), 0);
+    const auto before = shared.get();
+    VG_REQUIRE(before.settings != nullptr && before.settings->video != nullptr);
+    VG_CHECK(before.settings->video->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), nullptr));
+
+    // The host now estimates one clip at 1 MiB: the channel's and the effective watermarks change together in
+    // one snapshot, the Video revision moves, and the disabled Photo channel is untouched.
+    g_estimate = 1024 * 1024;
+    shared.sync(*media);
+    const auto after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision + 1);
+    VG_CHECK_EQ(after.video_revision, before.video_revision + 1);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision);
+    VG_REQUIRE(after.settings->video != nullptr);
+    VG_CHECK(after.settings->video->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), media));
+    VG_CHECK(!(after.settings->video->watermarks == before.settings->video->watermarks));
+    VG_CHECK(after.settings->watermarks == after.settings->video->watermarks);
+    VG_CHECK_EQ(after.settings->video->interval.count(), 2500L); // everything else is kept
+    VG_CHECK(after.settings->photo == nullptr);
+
+    // The same estimate again changes nothing.
+    shared.sync(*media);
+    VG_CHECK_EQ(shared.get().revision, after.revision);
+    VG_CHECK_EQ(shared.get().video_revision, after.video_revision);
+
+    // Without a file channel the refresh re-estimates the default clip's watermarks; no channel revision moves.
+    const RecordConfig none(Document(), ctx);
+    VG_CHECK_EQ(none.sync(ctx, none.createActionSettings(ctx)), 0);
+    const auto idle = shared.get();
+    g_estimate = 2 * 1024 * 1024;
+    shared.sync(*media);
+    const auto refreshed = shared.get();
+    VG_CHECK_EQ(refreshed.revision, idle.revision + 1);
+    VG_CHECK_EQ(refreshed.photo_revision, idle.photo_revision);
+    VG_CHECK_EQ(refreshed.video_revision, idle.video_revision);
+    VG_CHECK(refreshed.settings->watermarks
+             == WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), media));
+    VG_CHECK(!(refreshed.settings->watermarks == idle.settings->watermarks));
 }
 
 VG_TEST_CASE(watermarks_follow_the_format_table_unless_the_host_estimates)

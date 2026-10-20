@@ -199,10 +199,13 @@ protected:
         return false;
     }
 
+    // The writer stops when rules are disabled, when its own file channel's settings change (a change to the
+    // other channel or to Sound does not stop it; docs/PLAN.md section 7.1), or when the Slot stops being ready.
     inline bool shouldContinueWritingImpl() const noexcept
     {
         return this->ctxRef().record_rule_enabled.load(std::memory_order_relaxed)
-               && this->ctxRef().shared_writer_settings.getRevision() == _settings_revision && _slot.isReadyToWrite();
+               && this->ctxRef().action_settings.channelRevision(this->settings().type) == _settings_revision
+               && _slot.isReadyToWrite();
     }
 
     inline void onThumbnailFrameImpl(const MediaFrame::FrameType &frame) noexcept
@@ -245,7 +248,7 @@ private:
 
 private:
     T &_slot;
-    size_t _settings_revision;
+    size_t _settings_revision; // of the writer's own file channel, loaded together with its settings
     CacheFileInfo _cache_file_info;
 };
 
