@@ -86,6 +86,13 @@ public:
         return _start_time + _settings->interval;
     }
 
+    // The closing key frame a completed video clip left in the queue for the next clip (docs/PLAN.md section
+    // 8.2), by its time stamp; empty when the clip ended without one, or for an image.
+    inline std::optional<std::chrono::steady_clock::time_point> boundaryKeyFrame() const noexcept
+    {
+        return _boundary_key_frame;
+    }
+
 protected:
     inline std::mutex &mediaMutex() const noexcept
     {
@@ -125,6 +132,11 @@ protected:
         _event->status.store(status, std::memory_order_release);
     }
 
+    inline void setBoundaryKeyFrame(std::chrono::steady_clock::time_point time_stamp) noexcept
+    {
+        _boundary_key_frame = time_stamp;
+    }
+
     virtual WriteEvent::Status waitUntilWriteFinish() noexcept = 0;
 
     inline const std::shared_ptr<WriteEvent> &event() const noexcept
@@ -147,6 +159,7 @@ private:
     Context &_ctx;
     std::shared_ptr<FileWriterSettings> _settings;
     std::shared_ptr<WriteEvent> _event;
+    std::optional<std::chrono::steady_clock::time_point> _boundary_key_frame;
     // Held for the whole writer lifetime, so it still covers the publication (thumbnail generation included)
     // that the adapter's destructor performs before this base is destroyed.
     Context::MediaBarrier::Operation _operation;
@@ -159,9 +172,9 @@ class SlotAdaptedWriter: public AdaptableWriter<SlotAdaptedWriter<T>>
 {
 public:
     template<typename... Args>
-    SlotAdaptedWriter(T &slot, size_t settings_revision, Args &&...args)
+    SlotAdaptedWriter(T &slot, size_t settings_revision, FileTask::Kind kind, Args &&...args)
         : AdaptableWriter<SlotAdaptedWriter<T>>(std::forward<Args>(args)...), _slot(slot),
-          _settings_revision(settings_revision), _cache_file_info(this->event())
+          _settings_revision(settings_revision), _kind(kind), _cache_file_info(this->event())
     {
         if (!initPathsAndFileName())
         {
@@ -213,12 +226,13 @@ protected:
         return false;
     }
 
-    // The writer stops when its channel's gate closes (rules disabled, or its own channel's recording settings
-    // changed: a change to the other channel, to Sound, or to the watermarks does not stop it; docs/PLAN.md
-    // sections 7.1 and 9) or when the Slot can no longer carry its task.
+    // The writer stops when its channel's gate closes for its task's kind (rules disabled for a triggered task,
+    // the schedule closed for a continuous clip, or its own channel's recording settings changed, a mode switch
+    // included: a change to the other channel, to Sound, or to the watermarks does not stop it; docs/PLAN.md
+    // sections 7.1, 8.2, and 9) or when the Slot can no longer carry its task.
     inline bool shouldContinueWritingImpl() const noexcept
     {
-        return this->ctxRef().file_channels.of(this->settings().type).isOpenFor(_settings_revision)
+        return this->ctxRef().file_channels.of(this->settings().type).isOpenFor(_kind, _settings_revision)
                && _slot.canContinue(this->settings().watermarks);
     }
 
@@ -263,6 +277,7 @@ private:
 private:
     T &_slot;
     size_t _settings_revision; // of the writer's own file channel, loaded together with its settings
+    FileTask::Kind _kind;      // which gate the task runs under (docs/PLAN.md section 8.2)
     CacheFileInfo _cache_file_info;
 };
 
@@ -603,9 +618,10 @@ private:
     // none within the key frame wait, or whose gate closes or clip ends before one arrives, records nothing and
     // is Canceled rather than left as an empty file. From the first key frame the sink is created and frames
     // are written until the clip is finished (its length elapsed, or the adapter asks), when it ends on the next
-    // key frame, which stays in the queue for the next clip, or at the key frame wait without one. No frame at
-    // all for the input-loss wait ends a started clip as Interrupted, with what was written. Every wait checks
-    // the gate, so a mode change, a pause, or a stop breaks it.
+    // key frame, which stays in the queue for the next clip and is reported as the boundary key frame, or at
+    // the key frame wait without one. No frame at all for the input-loss wait ends a started clip as
+    // Interrupted, with what was written. The gate is checked inside every wait and after every frame, so a
+    // mode change, a pause, or a stop breaks a wait and stops the clip at the next frame.
     WriteEvent::Status waitUntilWriteFinish() noexcept override
     {
         MediaFrame frame;
@@ -639,7 +655,7 @@ private:
 
         VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "VideoWriter started writing frames, fd: ", _fd);
         std::optional<Clock::time_point> closing_deadline; // the key frame wait, once the clip is finished
-        do
+        while (this->shouldContinueWriting())              // the gate, after the first frame as after every other
         {
             ctx_media_mutex.lock();
             const auto it = ctx_media_queue.begin();
@@ -649,8 +665,11 @@ private:
             {
                 if (!closing_deadline)
                     closing_deadline = now + _waits.key_frame;
-                if ((!empty && it->isKeyFrame()) || now >= *closing_deadline)
+                const bool closing = !empty && it->isKeyFrame();
+                if (closing || now >= *closing_deadline)
                 {
+                    if (closing)
+                        this->setBoundaryKeyFrame(it->time_stamp); // left in the queue for the next clip
                     ctx_media_mutex.unlock();
                     return finishWith(WriteEvent::Status::Completed); // the clip ends on the next key frame
                 }
@@ -676,7 +695,6 @@ private:
                 return failedWrite();
             last_frame_time = Clock::now();
         }
-        while (this->shouldContinueWriting());
 
         return finishWith(WriteEvent::Status::Interrupted);
     }

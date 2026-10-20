@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <ios>
@@ -914,6 +915,27 @@ struct MediaFrame
             return a.time_stamp > b.time_stamp;
         }
     };
+
+    // Keeps `queue` from the key frame stamped `boundary`, when there is one, and empties it otherwise: what a
+    // continuous clip does to the backlog before it starts (docs/PLAN.md section 8.2), so that adjacent clips
+    // stay continuous while an entry or a resume starts at a key frame enqueued afterwards. Call with the
+    // queue's lock held.
+    static void KeepFrom(std::deque<MediaFrame> &queue,
+        std::optional<std::chrono::steady_clock::time_point> boundary) noexcept
+    {
+        if (boundary)
+        {
+            for (auto it = queue.begin(); it != queue.end(); ++it)
+            {
+                if (it->isKeyFrame() && it->time_stamp == *boundary)
+                {
+                    queue.erase(queue.begin(), it);
+                    return;
+                }
+            }
+        }
+        queue.clear();
+    }
 };
 
 // A recorded file in a Slot's cache directory on its way to publication: the writer fills it in, and the channel
@@ -1072,39 +1094,51 @@ private:
     }
 };
 
-// The immutable action settings snapshot (docs/PLAN.md section 7.1): the Sound and continuous switches, the
-// settings of each enabled file channel, and the effective watermarks the Slot admits new tasks against,
-// published as one object by a configuration commit or a media refresh. Readers load it without the commit
-// lock and keep the reference for as long as they need one consistent view. Rule enablement is not part of
-// it: it stays the `record_rule_enabled` gate every thread reads, published after the snapshot.
+// The immutable action settings snapshot (docs/PLAN.md section 7.1): the Sound switch, the settings of each
+// configured file action, the continuous Video settings when continuous recording is configured (section
+// 8.2), and the effective watermarks the Slot admits new tasks against, published as one object by a
+// configuration commit or a media refresh. Readers load it without the commit lock and keep the reference for
+// as long as they need one consistent view. Rule enablement is not part of it: it stays the
+// `record_rule_enabled` gate every thread reads, published after the snapshot.
 struct ActionSettings
 {
-    const bool continuous_enabled;
     const bool sound_enabled;
     const std::shared_ptr<FileWriterSettings> photo; // null when the Photo action is disabled
-    const std::shared_ptr<FileWriterSettings> video; // triggered Video; null when the Video action is disabled
+    const std::shared_ptr<FileWriterSettings> video; // triggered Video as configured: null when the Video action
+                                                     // is disabled, suppressed while `continuous` is set
+    // Continuous Video (docs/PLAN.md section 8.2): MP4 clips of the default length with no interval, which is
+    // what tells the two Video recordings apart (a triggered interval is positive); null unless continuous
+    // recording is configured. Nothing but the switch configures it.
+    const std::shared_ptr<FileWriterSettings> continuous;
     const WaterMarks watermarks;
 
     ~ActionSettings() = default;
 
     // The effective watermarks, which admission reads (docs/PLAN.md section 9): the aggregate of one Photo plus
-    // one Video task when both channels are enabled, the enabled channel's when one is, or one default clip's
-    // when none is, which is the headroom the Slot has at first start.
+    // one Video task when both are configured, where the Video task is the continuous clip while continuous
+    // recording is configured (one Video budget slot for either mode), the configured one's when one is, or
+    // one default clip's when none is, which is the headroom the Slot has at first start.
     static std::shared_ptr<const ActionSettings> create(bool continuous, bool sound,
         std::shared_ptr<FileWriterSettings> photo, std::shared_ptr<FileWriterSettings> video,
         const vg_config_media_t *media_capi) noexcept
     {
+        std::shared_ptr<FileWriterSettings> continuous_settings;
+        if (continuous
+            && !(continuous_settings = FileWriterSettings::create(CaptureType::Video, kRecordWriterDefaultFormat,
+                     std::chrono::milliseconds(0), kRecordWriterPrefixDefault, kVideoClipLengthDefault, media_capi)))
+            return nullptr;
+        const auto &recording = continuous_settings ? continuous_settings : video;
         const auto watermarks = [&] {
-            if (photo && video)
-                return WaterMarks::aggregate(photo->watermarks, video->watermarks);
+            if (photo && recording)
+                return WaterMarks::aggregate(photo->watermarks, recording->watermarks);
             if (photo)
                 return photo->watermarks;
-            if (video)
-                return video->watermarks;
+            if (recording)
+                return recording->watermarks;
             return WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), media_capi);
         }();
-        return std::shared_ptr<const ActionSettings>(
-            new (std::nothrow) ActionSettings(continuous, sound, std::move(photo), std::move(video), watermarks));
+        return std::shared_ptr<const ActionSettings>(new (std::nothrow)
+                ActionSettings(sound, std::move(photo), std::move(video), std::move(continuous_settings), watermarks));
     }
 
     // The same configuration with every watermark estimated again by the host (a media refresh).
@@ -1115,23 +1149,41 @@ struct ActionSettings
             return nullptr;
         if (video && !(video_settings = Refreshed(*video, media_capi)))
             return nullptr;
-        return create(continuous_enabled, sound_enabled, std::move(photo_settings), std::move(video_settings),
+        return create(continuous != nullptr, sound_enabled, std::move(photo_settings), std::move(video_settings),
             media_capi);
     }
 
-    // The settings of one file channel (Image is the Photo channel, Video the Video one), null when it is
-    // disabled: what the channel's worker serves (docs/PLAN.md section 7.2).
-    const std::shared_ptr<FileWriterSettings> &channel(CaptureType type) const noexcept
+    // The settings of a file action as configured (Image is Photo, Video the triggered Video), suppressed or
+    // not: what rule info reports as enabled.
+    const std::shared_ptr<FileWriterSettings> &configured(CaptureType type) const noexcept
     {
         return type == CaptureType::Image ? photo : video;
     }
 
-    // The enabled file channel, null when none is enabled: the interval ALWAYS_ON paces on, whose invariant
-    // keeps its configuration to one channel (docs/PLAN.md section 4.4), and what the HTTP precheck tests for an
-    // enabled file action. With both enabled, which another rule may pace, this is the Photo channel.
-    const std::shared_ptr<FileWriterSettings> &fileChannel() const noexcept
+    // The settings a file channel accepts a rule event's task with, null when it accepts none: the Photo
+    // settings, or the triggered Video settings unless continuous recording is configured, which suppresses
+    // triggered Video without rewriting it (docs/PLAN.md section 8.1).
+    std::shared_ptr<FileWriterSettings> channel(CaptureType type) const noexcept
     {
-        return photo ? photo : video;
+        if (type == CaptureType::Image)
+            return photo;
+        return continuous ? std::shared_ptr<FileWriterSettings>() : video;
+    }
+
+    // The recording the Video channel runs, whose change moves the Video revision (docs/PLAN.md section 7.1):
+    // the continuous clip while continuous recording is configured, else triggered Video; null when neither.
+    const std::shared_ptr<FileWriterSettings> &videoRecording() const noexcept
+    {
+        return continuous ? continuous : video;
+    }
+
+    // The enabled triggered file channel, null when none is enabled: the interval ALWAYS_ON paces on, whose
+    // invariant keeps its configuration to one channel (docs/PLAN.md section 4.4), and what the HTTP precheck
+    // tests for an enabled file action. With both enabled, which another rule may pace, this is the Photo
+    // channel; suppressed triggered Video counts as none, since a continuous clip is no rule event.
+    std::shared_ptr<FileWriterSettings> fileChannel() const noexcept
+    {
+        return photo ? photo : channel(CaptureType::Video);
     }
 
     static bool SameSettings(const std::shared_ptr<FileWriterSettings> &a,
@@ -1149,15 +1201,15 @@ struct ActionSettings
 
     bool operator==(const ActionSettings &other) const noexcept
     {
-        return continuous_enabled == other.continuous_enabled && sound_enabled == other.sound_enabled
-               && SameSettings(photo, other.photo) && SameSettings(video, other.video)
+        return sound_enabled == other.sound_enabled && SameSettings(photo, other.photo)
+               && SameSettings(video, other.video) && SameSettings(continuous, other.continuous)
                && watermarks == other.watermarks;
     }
 
 private:
-    ActionSettings(bool continuous, bool sound, std::shared_ptr<FileWriterSettings> p,
-        std::shared_ptr<FileWriterSettings> v, WaterMarks wm) noexcept
-        : continuous_enabled(continuous), sound_enabled(sound), photo(std::move(p)), video(std::move(v)), watermarks(wm)
+    ActionSettings(bool sound, std::shared_ptr<FileWriterSettings> p, std::shared_ptr<FileWriterSettings> v,
+        std::shared_ptr<FileWriterSettings> c, WaterMarks wm) noexcept
+        : sound_enabled(sound), photo(std::move(p)), video(std::move(v)), continuous(std::move(c)), watermarks(wm)
     {
     }
 
@@ -1273,14 +1325,20 @@ private:
     std::unordered_map<FilesystemId, FileSize> _bytes;
 };
 
-// One automatic file task (docs/PLAN.md section 7.2): the owner it serves, the channel settings bound at
-// acceptance with the revision they were published under, its place in the acceptance sequence across both
-// channels, and the WriteEvent that carries its status, which manual capture and CacheFileInfo share.
-// Immutable after acceptance; the status lives on the event.
+// One automatic file task (docs/PLAN.md section 7.2): its kind, the owner it serves (none for a continuous
+// clip, section 8.2), the channel settings bound at acceptance with the revision they were published under,
+// its place in the acceptance sequence across both channels, and the WriteEvent that carries its status,
+// which manual capture and CacheFileInfo share. Immutable after acceptance; the status lives on the event.
 struct FileTask
 {
+    // Triggered: a rule event's task, which runs while rules are enabled. Continuous: a Video clip admitted by
+    // the rule loop while the schedule is open, with no owner and the event UID 0, which counts as no rule
+    // event (docs/PLAN.md section 8.2).
+    enum class Kind { Triggered, Continuous };
+
+    const Kind kind;
     const CaptureType type;
-    const std::shared_ptr<EventOwner> owner;
+    const std::shared_ptr<EventOwner> owner; // null for a continuous clip
     const std::shared_ptr<FileWriterSettings> settings;
     const size_t settings_revision;
     const uint64_t sequence;
@@ -1290,9 +1348,9 @@ struct FileTask
                                               // task is retired unrun
     const std::shared_ptr<WriteEvent> event;
 
-    FileTask(CaptureType tp, std::shared_ptr<EventOwner> o, std::shared_ptr<FileWriterSettings> s, size_t rev,
+    FileTask(Kind k, CaptureType tp, std::shared_ptr<EventOwner> o, std::shared_ptr<FileWriterSettings> s, size_t rev,
         uint64_t seq, uint64_t slot, InFlightBudgets::Reservation r, std::shared_ptr<WriteEvent> e) noexcept
-        : type(tp), owner(std::move(o)), settings(std::move(s)), settings_revision(rev), sequence(seq),
+        : kind(k), type(tp), owner(std::move(o)), settings(std::move(s)), settings_revision(rev), sequence(seq),
           slot_registration(slot), reservation(std::move(r)), event(std::move(e))
     {
     }

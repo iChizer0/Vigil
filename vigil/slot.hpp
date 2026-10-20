@@ -664,21 +664,28 @@ protected:
         return _stats.load(std::memory_order_acquire).free_bytes > criticalRemainBytes(own);
     }
 
-    // The writer of a claimed task, from the settings and the channel revision bound into it; throws when it
-    // cannot be built, which the worker treats as a failed task.
+    // The writer of a claimed task, from the settings, the kind, and the channel revision bound into it; throws
+    // when it cannot be built, which the worker treats as a failed task.
     std::unique_ptr<SlotAdaptedWriter<Slot>> createWriter(const std::shared_ptr<FileTask> &task)
     {
         switch (task->type)
         {
             case CaptureType::Image:
                 return std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), task->settings_revision,
-                    std::ref(_ctx), task->settings, task->event);
+                    task->kind, std::ref(_ctx), task->settings, task->event);
             case CaptureType::Video:
                 return std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), task->settings_revision,
-                    std::ref(_ctx), task->settings, task->event);
+                    task->kind, std::ref(_ctx), task->settings, task->event);
             default:
                 throw Exception("Unsupported writer type");
         }
+    }
+
+    // The media backlog before a continuous clip's writer is built (docs/PLAN.md section 8.2): kept from the
+    // boundary key frame the previous clip left when it is still buffered, dropped otherwise.
+    void prepareContinuousClip(std::optional<std::chrono::steady_clock::time_point> boundary) noexcept
+    {
+        _ctx.slot_media_buffer.keepFrom(boundary);
     }
 
     // Publishes a recorded file: moves it and its thumbnail from the cache directory to their final places,
@@ -772,7 +779,7 @@ protected:
                 .size_bytes = size,
                 .attributes = attributes_str,
                 .timestamp = _ctx.shared_time.unixTime(),
-                .event_uid = cache_file_info.event ? cache_file_info.event->owner_uid : 0,
+                .event_uid = cache_file_info.event ? cache_file_info.event->owner_uid : 0, // 0 for a continuous clip
             };
             _ctx.c_api.basic.on_file_event_cb(&file_evt);
         }

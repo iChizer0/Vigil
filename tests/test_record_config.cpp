@@ -121,7 +121,7 @@ VG_TEST_CASE(defaults_are_the_first_start_document)
     VG_CHECK_EQ(Canonical(cfg, f.ctx), Document());
     const auto settings = cfg.prepare(f.ctx).settings;
     VG_REQUIRE(settings != nullptr);
-    VG_CHECK(!settings->fileChannel() && !settings->continuous_enabled && !settings->sound_enabled);
+    VG_CHECK(!settings->fileChannel() && !settings->continuous && !settings->sound_enabled);
     VG_CHECK_EQ(Canonical(RecordConfig(Document(), f.ctx), f.ctx), Document()); // and it round-trips
 }
 
@@ -211,7 +211,7 @@ VG_TEST_CASE(accepts_every_action_combination_and_still_rejects_continuous_recor
     VG_CHECK_EQ(Canonical(every, f.ctx), all);
     const auto settings = every.prepare(f.ctx).settings;
     VG_REQUIRE(settings != nullptr && settings->photo != nullptr && settings->video != nullptr);
-    VG_CHECK(settings->sound_enabled && !settings->continuous_enabled);
+    VG_CHECK(settings->sound_enabled && !settings->continuous);
     VG_CHECK_EQ(settings->photo->format, "RAW");
     VG_CHECK_EQ(settings->photo->interval.count(), 1500L);
     VG_CHECK_EQ(settings->video->interval.count(), 2500L);
@@ -270,7 +270,7 @@ VG_TEST_CASE(action_settings_carry_the_enabled_file_channel_and_the_effective_wa
     VG_CHECK_EQ(photo->photo->video_clip_length.count(), kVideoClipLengthDefault.count());
     VG_CHECK(photo->photo->watermarks == WaterMarks::from("RAW", 1, nullptr));
     VG_CHECK(photo->watermarks == photo->photo->watermarks); // the effective watermarks are the channel's
-    VG_CHECK(!photo->continuous_enabled && !photo->sound_enabled);
+    VG_CHECK(!photo->continuous && !photo->sound_enabled);
 
     const auto video
         = Snapshot(f.ctx, { { "/dActions/dVideo/bEnabled", true }, { "/dActions/dVideo/iIntervalMs", 2500 } });
@@ -308,6 +308,126 @@ VG_TEST_CASE(action_settings_carry_the_enabled_file_channel_and_the_effective_wa
     // Snapshots compare by content.
     VG_CHECK(*none == *Snapshot(f.ctx));
     VG_CHECK(!(*photo == *video) && !(*video == *none));
+}
+
+VG_TEST_CASE(action_settings_carry_the_continuous_video_settings_as_the_video_recording)
+{
+    // docs/PLAN.md sections 7.1, 8.2, and 9 (Phase 5A-2): a snapshot with continuous recording configured
+    // carries the continuous Video settings (MP4, no interval, the default clip length, one clip's
+    // watermarks), suppresses triggered Video for rule events without rewriting it, and budgets one Video
+    // task for either mode. The parser still rejects the switch, so the snapshot is built directly.
+    Fixture f;
+    const auto photo = Snapshot(f.ctx, { { "/dActions/dPhoto/bEnabled", true } })->photo;
+    const auto video = Snapshot(f.ctx, { { "/dActions/dVideo/bEnabled", true } })->video;
+    VG_REQUIRE(photo != nullptr && video != nullptr);
+
+    const auto both = ActionSettings::create(true, false, photo, video, &f.ctx.c_api.media);
+    VG_REQUIRE(both != nullptr && both->continuous != nullptr);
+    VG_CHECK(both->continuous->type == CaptureType::Video);
+    VG_CHECK_EQ(both->continuous->format, "MP4");
+    VG_CHECK_EQ(both->continuous->interval.count(), 0L);
+    VG_CHECK_EQ(both->continuous->file_name_prefix, kRecordWriterPrefixDefault);
+    VG_CHECK_EQ(both->continuous->video_clip_length.count(), kVideoClipLengthDefault.count());
+    VG_CHECK(both->continuous->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), nullptr));
+    VG_CHECK(both->video == video); // configured, and reported as such
+    VG_CHECK(both->configured(CaptureType::Video) == video);
+    VG_CHECK(both->channel(CaptureType::Video) == nullptr); // suppressed for rule events
+    VG_CHECK(both->channel(CaptureType::Image) == photo);
+    VG_CHECK(both->videoRecording() == both->continuous);
+    VG_CHECK(both->fileChannel() == photo);
+    VG_CHECK(both->watermarks == WaterMarks::aggregate(photo->watermarks, both->continuous->watermarks));
+
+    // Without Photo the continuous clip is the only task budgeted, and a rule event has no file action.
+    const auto alone = ActionSettings::create(true, false, nullptr, video, &f.ctx.c_api.media);
+    VG_REQUIRE(alone != nullptr);
+    VG_CHECK(!alone->fileChannel());
+    VG_CHECK(alone->watermarks == alone->continuous->watermarks);
+    const auto unconfigured = ActionSettings::create(true, false, nullptr, nullptr, &f.ctx.c_api.media);
+    VG_REQUIRE(unconfigured != nullptr);
+    VG_CHECK(!unconfigured->video && unconfigured->videoRecording() == unconfigured->continuous);
+    VG_CHECK(!unconfigured->configured(CaptureType::Video) && !unconfigured->fileChannel());
+
+    // Without continuous recording the triggered Video settings are the recording.
+    const auto triggered = ActionSettings::create(false, false, nullptr, video, &f.ctx.c_api.media);
+    VG_REQUIRE(triggered != nullptr);
+    VG_CHECK(!triggered->continuous && triggered->videoRecording() == video);
+    VG_CHECK(triggered->channel(CaptureType::Video) == video && triggered->fileChannel() == video);
+
+    // Snapshots compare by content, the continuous settings included; a refresh re-estimates them too.
+    VG_CHECK(*both == *ActionSettings::create(true, false, photo, video, &f.ctx.c_api.media));
+    VG_CHECK(!(*both == *ActionSettings::create(false, false, photo, video, &f.ctx.c_api.media)));
+    auto media = f.ctx.c_api.media;
+    media.max_bytes_estimate_cb = &EstimateOneMiB;
+    const auto refreshed = both->refreshed(&media);
+    VG_REQUIRE(refreshed != nullptr && refreshed->continuous != nullptr);
+    VG_CHECK(refreshed->continuous->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), &media));
+    VG_CHECK(!(refreshed->continuous->watermarks == both->continuous->watermarks));
+    VG_CHECK(refreshed->watermarks
+             == WaterMarks::aggregate(refreshed->photo->watermarks, refreshed->continuous->watermarks));
+}
+
+VG_TEST_CASE(the_video_revision_follows_the_video_recording_of_either_mode)
+{
+    // docs/PLAN.md sections 7.1 and 8.2: the Video revision moves when the recording the Video channel runs
+    // changes: a mode switch moves it, a change to the suppressed triggered Video settings does not, and the
+    // Photo revision is unaffected either way. Through RecordConfig::sync, a switch cancels the pending task
+    // of the old mode, and the clip of the new mode is admitted afterwards.
+    Fixture f;
+    auto &shared = f.ctx.action_settings;
+    auto &video = f.ctx.file_channels.video;
+    const auto publish = [&](bool continuous, int video_interval_ms) {
+        const auto settings = Snapshot(f.ctx,
+            { { "/dActions/dVideo/bEnabled", true }, { "/dActions/dVideo/iIntervalMs", video_interval_ms } });
+        VG_REQUIRE(settings != nullptr);
+        VG_REQUIRE(shared.update(shared.getRevision(),
+            ActionSettings::create(continuous, false, settings->photo, settings->video, &f.ctx.c_api.media)));
+    };
+
+    publish(false, 2500);
+    auto before = shared.get();
+    publish(true, 2500); // the switch to continuous: the recording changed
+    auto after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision + 1);
+    VG_CHECK_EQ(after.video_revision, before.video_revision + 1);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision);
+
+    before = after;
+    publish(true, 3000); // the suppressed triggered interval changed: the snapshot moved, the recording did not
+    after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision + 1);
+    VG_CHECK_EQ(after.video_revision, before.video_revision);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision);
+
+    before = after;
+    publish(false, 3000); // the switch back to triggered Video
+    after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision + 1);
+    VG_CHECK_EQ(after.video_revision, before.video_revision + 1);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision);
+
+    // Through sync: the switch to continuous cancels the pending triggered task, the continuous clip is
+    // admitted, the same configuration again keeps it, and the switch back cancels it while pending.
+    RecordConfig triggered;
+    triggered.rule_enabled = true;
+    triggered.video.enabled = true;
+    RecordConfig continuous = triggered;
+    continuous.continuous_enabled = true; // rejected by the parser until Phase 5A-3; prepare builds it anyway
+    VG_CHECK_EQ(triggered.sync(f.ctx, triggered.prepare(f.ctx)), 0);
+    VG_CHECK(f.ctx.dispatchRuleEvent(
+        std::make_shared<EventOwner>(VG_RULE_TYPE_TIMER, "", "", EventOwner::SourceDelivery::Event)));
+    const auto pending = video.current();
+    VG_REQUIRE(pending != nullptr);
+    VG_CHECK(!f.ctx.dispatchContinuous()); // not configured
+    VG_CHECK_EQ(continuous.sync(f.ctx, continuous.prepare(f.ctx)), 0);
+    VG_CHECK(video.current() == nullptr && pending->event->status.load() == WriteEvent::Status::Canceled);
+    VG_CHECK(f.ctx.dispatchContinuous());
+    const auto clip = video.current();
+    VG_REQUIRE(clip != nullptr && clip->kind == FileTask::Kind::Continuous);
+    VG_CHECK_EQ(continuous.sync(f.ctx, continuous.prepare(f.ctx)), 0); // the same configuration: nothing published
+    VG_CHECK(video.current() == clip);
+    VG_CHECK_EQ(triggered.sync(f.ctx, triggered.prepare(f.ctx)), 0); // the switch back
+    VG_CHECK(video.current() == nullptr && clip->event->status.load() == WriteEvent::Status::Canceled);
+    VG_CHECK(!f.ctx.dispatchContinuous());
 }
 
 VG_TEST_CASE(sync_publishes_the_snapshot_and_the_rule_flag)
@@ -377,7 +497,7 @@ VG_TEST_CASE(default_action_settings_exist_before_any_configuration)
     const auto loaded = f.ctx.action_settings.get();
     VG_REQUIRE(loaded.settings != nullptr);
     VG_CHECK(!loaded.settings->fileChannel());
-    VG_CHECK(!loaded.settings->continuous_enabled && !loaded.settings->sound_enabled);
+    VG_CHECK(!loaded.settings->continuous && !loaded.settings->sound_enabled);
     VG_CHECK(loaded.settings->watermarks
              == WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), nullptr));
     VG_CHECK(!f.ctx.record_rule_enabled.load());

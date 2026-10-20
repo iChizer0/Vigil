@@ -140,14 +140,16 @@ struct FakeMedia
 };
 
 // A writer adapter over FakeMedia with the same hooks as SlotAdaptedWriter. With a settings revision it also
-// watches its channel's gate, as SlotAdaptedWriter does; without one (the writer tests) only the knobs decide.
+// watches its channel's gate for its task's kind, as SlotAdaptedWriter does; without one (the writer tests)
+// only the knobs decide.
 class FakeAdapter: public AdaptableWriter<FakeAdapter>
 {
 public:
     FakeAdapter(FakeMedia &media, Context &ctx, std::shared_ptr<FileWriterSettings> settings,
-        std::shared_ptr<WriteEvent> event, std::optional<size_t> settings_revision = std::nullopt)
+        std::shared_ptr<WriteEvent> event, std::optional<size_t> settings_revision = std::nullopt,
+        FileTask::Kind kind = FileTask::Kind::Triggered)
         : AdaptableWriter<FakeAdapter>(ctx, std::move(settings), std::move(event)), _media(media),
-          _settings_revision(settings_revision)
+          _settings_revision(settings_revision), _kind(kind)
     {
     }
 
@@ -196,7 +198,7 @@ protected:
     bool shouldContinueWritingImpl() const noexcept
     {
         if (_settings_revision
-            && !this->ctxRef().file_channels.of(this->settings().type).isOpenFor(*_settings_revision))
+            && !this->ctxRef().file_channels.of(this->settings().type).isOpenFor(_kind, *_settings_revision))
             return false;
         const std::lock_guard lock(_media.records);
         return ++_media.continue_checks <= _media.stop_after_continue_checks
@@ -211,6 +213,7 @@ protected:
 private:
     FakeMedia &_media;
     std::optional<size_t> _settings_revision;
+    FileTask::Kind _kind;
 };
 
 } // namespace vigil::tests
