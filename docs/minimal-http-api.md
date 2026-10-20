@@ -72,7 +72,7 @@ Get the information about the rule system.
 {
     "bReadyForNewEvent": true, // Boolean, whether a new recording event can be started (false while a file channel holds a task: pending, writing, or finished but still within its interval and failure cooldown)
     "dLastRuleEvent": { // Object or null: the most recently accepted file task: the held one while a file channel holds a task (the one accepted last when both do), otherwise the last retired one
-        "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED" (a gate, pause, stop, or settings change stopped a task that had started; its file is kept), "CANCELED" (nothing was recorded: retired before a writer claimed it, or the gate was already closed when the writer started), "UNKNOWN"
+        "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED" (a gate, pause, stop, settings change, or input loss stopped a task that had started; its file is kept), "CANCELED" (nothing was recorded, so no file exists: retired before a writer claimed it, the gate was already closed when the writer started, or no key frame arrived before the clip's key frame wait, gate, or end), "UNKNOWN"
         "iTimestamp": 1735574000, // Integer, Unix timestamp in milliseconds
         "iOwnerUID": 1735574400123 // Integer, UID of the owner that created the event (exact 64-bit value)
     },
@@ -572,7 +572,7 @@ Get the current capture status.
         "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
         "sFormat": "MP4", // String, capture format ("MP4", "JPG", "RAW")
         "iVideoLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
-        "sStatus": "WRITING", // String, write event status ("PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", "UNKNOWN")
+        "sStatus": "WRITING", // String, write event status ("PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED" (stopped after it started, by a pause, a stop, or input loss; the file is kept), "CANCELED" (nothing was recorded and no file exists: media was paused, or no key frame arrived within the key frame wait or before the capture was stopped), "UNKNOWN")
         "iTimestamp": 1736870400000, // Integer, Unix timestamp in milliseconds
         "sFileName": "Capture 20260114 143000 123456.mp4" // String, generated file name
     },

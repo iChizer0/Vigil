@@ -79,7 +79,7 @@ We plan to refactor to meet new requirements. First, please familiarize yourself
 - [ ] **GATE-4** Use the single Video worker for triggered/continuous mode handover. Cancel old pending work, finalize the current clip with its original owner, and release its sink before starting the other mode. Never overlap automatic muxers or revive old tasks.
 - [ ] **GATE-5** On schedule closure, finalize the current continuous clip promptly through bounded checks. Preserve the existing admission-only schedule policy for already-started triggered video; rule disable requests triggered-video stop.
 - [ ] **GATE-6** Continuous entry/resume starts at a new post-admission keyframe without historical pre-roll. Normal adjacent continuous clips retain keyframe continuity. Keep the 60-second target, not an exact-duration or gap-free guarantee.
-- [ ] **GATE-7** Bound initial-keyframe wait, end-keyframe wait, and input-loss handling. Define failure/interrupted-clip behavior with bounded per-channel failure backoff.
+- [ ] **GATE-7** Bound initial-keyframe wait, end-keyframe wait, and input-loss handling. Define failure/interrupted-clip behavior with bounded per-channel failure backoff. Progress 2026-10-20 (Phase 5A-1): the three waits are bounded by `kVideoKeyFrameWait` and `kVideoInputLossWait` for both modes, nothing is recorded without a key frame (Canceled, no file), input loss finishes a started clip as Interrupted, and a finished clip ends at the wait without a closing key frame (`video_writer_bounds_its_waits_for_key_frames_and_input`, `tests/test_writers.cpp`); the per-channel failure backoff is in place since Phase 4C-2.
 
 ## 7. Lifecycle, media admission, and storage prerequisites
 

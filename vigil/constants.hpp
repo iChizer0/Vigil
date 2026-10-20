@@ -41,6 +41,11 @@ static inline constexpr const std::chrono::seconds kWriterFailureCooldown = std:
 static inline constexpr const size_t kWriterConsecutiveFailureMax = 10;
 
 static inline constexpr const std::chrono::seconds kVideoClipLengthDefault = std::chrono::seconds(60);
+// The bounds of a video clip's waits on the media stream (docs/PLAN.md sections 8.2 and 13), the buffer period:
+// for a key frame at the start of a clip (nothing is recorded without one) and at its end (the clip ends without
+// one), and for any frame once the clip has started (the clip is finished as interrupted).
+static inline constexpr const std::chrono::seconds kVideoKeyFrameWait = std::chrono::seconds(10);
+static inline constexpr const std::chrono::seconds kVideoInputLossWait = std::chrono::seconds(10);
 static inline constexpr const size_t kSlotMediaMuxerBufferPeriod = 10;
 static inline constexpr const size_t kCaptureMediaMuxerBufferPeriod = 10;
 static inline constexpr const size_t kCaptureWaterMarkBatch = kVideoClipLengthDefault.count();

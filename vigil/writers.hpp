@@ -67,9 +67,9 @@ public:
 
     virtual ~AdaptableWriter() noexcept = default;
 
-    // Runs the task to its terminal status: Canceled when the gate was already closed before anything was
-    // recorded, Completed, Failed, or Interrupted (a gate, pause, stop, or settings change stopped a task that
-    // had started; its file is kept).
+    // Runs the task to its terminal status: Canceled when nothing was recorded (the gate was already closed, or
+    // no key frame arrived before the clip's wait, gate, or end), Completed, Failed, or Interrupted (a gate,
+    // pause, stop, settings change, or input loss stopped a task that had started; its file is kept).
     const std::shared_ptr<WriteEvent> &operator()() noexcept
     {
         setEventStatus(waitUntilWriteFinish());
@@ -329,6 +329,11 @@ public:
                 std::filesystem::remove_all(_output_cache_path, ec);
             }
         }
+        else if (this->event()->status.load(std::memory_order_acquire) == WriteEvent::Status::Canceled)
+        {
+            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_INFO,
+                "CaptureAdaptedWriter recorded nothing, no file at path: ", _output_file_path);
+        }
         else
         {
             VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
@@ -481,12 +486,21 @@ template<typename T>
 class VideoWriter final: public T
 {
 public:
+    // The bounds of the waits on the media stream (docs/PLAN.md section 8.2): for a key frame, at the start of
+    // a clip and at its end, and for any frame once the clip has started. Production uses the constants of
+    // section 13; the tests inject shorter ones through setWaitBounds.
+    struct WaitBounds
+    {
+        std::chrono::steady_clock::duration key_frame = kVideoKeyFrameWait;
+        std::chrono::steady_clock::duration input_loss = kVideoInputLossWait;
+    };
+
     template<typename... Args>
     VideoWriter(Args &&...args)
         : T(std::forward<Args>(args)...), _end_time(this->settings().video_clip_length == std::chrono::seconds::max()
                                                         ? std::chrono::steady_clock::time_point::max()
                                                         : this->startTime() + this->settings().video_clip_length),
-          _fd(-1), _is_clip_finish(false), _thumbnail()
+          _fd(-1), _is_clip_finish(false), _thumbnail(), _waits()
     {
         if (!this->ctxRef().c_api.media.video_file_create_cb || !this->ctxRef().c_api.media.video_file_finish_cb)
         {
@@ -507,11 +521,20 @@ public:
         endWrite(); // fallback: the normal paths finish the sink before returning
     }
 
+    // Test seam: shorter bounds than the production constants. Call before the task runs.
+    void setWaitBounds(WaitBounds bounds) noexcept
+    {
+        _waits = bounds;
+    }
+
 private:
+    using Clock = std::chrono::steady_clock;
+
     static inline constexpr const std::chrono::milliseconds kVideoFrameWaitDelay = std::chrono::milliseconds(10);
 
 private:
-    // Creates the sink. Called once the pre-check passed, so a closed gate never leaves an empty file behind.
+    // Creates the sink. Called with the first key frame in hand, so a clip that records nothing never leaves an
+    // empty file behind.
     bool startWrite() noexcept
     {
         int fd = -1;
@@ -552,88 +575,108 @@ private:
         return WriteEvent::Status::Completed;
     }
 
+    WriteEvent::Status failedWrite() noexcept
+    {
+        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "VideoWriter failed to write media frame to file at path ",
+            this->getFilePath());
+        return finishWith(WriteEvent::Status::Failed);
+    }
+
+    // Takes the first key frame out of the queue, dropping the frames before it; false when there is none yet.
+    static bool TakeFirstKeyFrame(std::mutex &mutex, std::deque<MediaFrame> &queue, MediaFrame &frame) noexcept
+    {
+        const std::lock_guard lock(mutex);
+        auto e = queue.begin();
+        for (; e != queue.end() && !e->isKeyFrame(); ++e)
+            ;
+        if (e == queue.end())
+        {
+            queue.clear();
+            return false;
+        }
+        e->transferTo(frame);
+        queue.erase(queue.begin(), std::next(e));
+        return true;
+    }
+
+    // Runs the clip (docs/PLAN.md section 8.2). Nothing is created before the first key frame: a clip that sees
+    // none within the key frame wait, or whose gate closes or clip ends before one arrives, records nothing and
+    // is Canceled rather than left as an empty file. From the first key frame the sink is created and frames
+    // are written until the clip is finished (its length elapsed, or the adapter asks), when it ends on the next
+    // key frame, which stays in the queue for the next clip, or at the key frame wait without one. No frame at
+    // all for the input-loss wait ends a started clip as Interrupted, with what was written. Every wait checks
+    // the gate, so a mode change, a pause, or a stop breaks it.
     WriteEvent::Status waitUntilWriteFinish() noexcept override
     {
         MediaFrame frame;
         auto &ctx_media_mutex = this->mediaMutex();
         auto &ctx_media_queue = this->mediaQueue();
 
-#ifdef __VIGIL_WRITER_WRITE_FRAME_INTERNAL__
-#warning "__VIGIL_WRITER_WRITE_FRAME_INTERNAL__ is already defined, undefining to avoid conflicts"
-#undef __VIGIL_WRITER_WRITE_FRAME_INTERNAL__
-#endif
-#define __VIGIL_WRITER_WRITE_FRAME_INTERNAL__                                                                          \
-    if (!writeMediaFrame(frame)) [[unlikely]]                                                                          \
-    {                                                                                                                  \
-        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR, "VideoWriter failed to write media frame to file at path ",     \
-            this->getFilePath());                                                                                      \
-        return finishWith(WriteEvent::Status::Failed);                                                                 \
-    }
-
         if (!this->shouldContinueWriting()) [[unlikely]]
             return WriteEvent::Status::Canceled; // no sink was created
+
+        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "VideoWriter waiting for the starting key frame");
+        for (const auto deadline = Clock::now() + _waits.key_frame;;)
+        {
+            if (TakeFirstKeyFrame(ctx_media_mutex, ctx_media_queue, frame))
+                break;
+            if (isClipFinished() || !this->shouldContinueWriting()) [[unlikely]]
+                return WriteEvent::Status::Canceled; // nothing was recorded
+            if (Clock::now() >= deadline) [[unlikely]]
+            {
+                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_WARN,
+                    "VideoWriter saw no key frame within the key frame wait, nothing was recorded");
+                return WriteEvent::Status::Canceled;
+            }
+            std::this_thread::sleep_for(kVideoFrameWaitDelay);
+        }
         if (!startWrite()) [[unlikely]]
             return WriteEvent::Status::Failed;
-
-        VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "VideoWriter waiting for starting key frame, fd: ", _fd);
-        for (;;)
-        {
-            if (isClipFinished()) [[unlikely]]
-                return finishWith(WriteEvent::Status::Completed);
-
-            ctx_media_mutex.lock();
-            auto s = ctx_media_queue.begin();
-            auto e = s;
-            for (; e != ctx_media_queue.end(); ++e)
-            {
-                if (e->isKeyFrame())
-                    break;
-            }
-            if (e == ctx_media_queue.end())
-            {
-                ctx_media_queue.erase(s, e);
-                ctx_media_mutex.unlock();
-                if (!this->shouldContinueWriting()) [[unlikely]]
-                    return finishWith(WriteEvent::Status::Interrupted);
-                std::this_thread::sleep_for(kVideoFrameWaitDelay);
-                continue;
-            }
-            e->transferTo(frame);
-            ctx_media_queue.erase(s, std::next(e, 1));
-            ctx_media_mutex.unlock();
-
-            __VIGIL_WRITER_WRITE_FRAME_INTERNAL__;
-
-            _thumbnail = frame.frame;
-
-            break;
-        }
+        if (!writeMediaFrame(frame)) [[unlikely]]
+            return failedWrite();
+        _thumbnail = frame.frame;
+        auto last_frame_time = Clock::now();
 
         VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "VideoWriter started writing frames, fd: ", _fd);
+        std::optional<Clock::time_point> closing_deadline; // the key frame wait, once the clip is finished
         do
         {
             ctx_media_mutex.lock();
-            auto it = ctx_media_queue.begin();
-            if (it == ctx_media_queue.end())
+            const auto it = ctx_media_queue.begin();
+            const bool empty = it == ctx_media_queue.end();
+            const auto now = Clock::now();
+            if (isClipFinished()) [[unlikely]]
+            {
+                if (!closing_deadline)
+                    closing_deadline = now + _waits.key_frame;
+                if ((!empty && it->isKeyFrame()) || now >= *closing_deadline)
+                {
+                    ctx_media_mutex.unlock();
+                    return finishWith(WriteEvent::Status::Completed); // the clip ends on the next key frame
+                }
+            }
+            if (empty)
             {
                 ctx_media_mutex.unlock();
+                // A finished clip waits for its closing key frame or the key frame wait, not for input.
+                if (!closing_deadline && now - last_frame_time >= _waits.input_loss) [[unlikely]]
+                {
+                    VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_WARN,
+                        "VideoWriter received no frame within the input-loss wait, finishing the clip");
+                    return finishWith(WriteEvent::Status::Interrupted);
+                }
                 std::this_thread::sleep_for(kVideoFrameWaitDelay);
                 continue;
-            }
-            if (isClipFinished() && it->isKeyFrame()) [[unlikely]]
-            {
-                ctx_media_mutex.unlock();
-                return finishWith(WriteEvent::Status::Completed); // the clip ends on the next key frame
             }
             it->transferTo(frame);
             ctx_media_queue.erase(it);
             ctx_media_mutex.unlock();
 
-            __VIGIL_WRITER_WRITE_FRAME_INTERNAL__;
+            if (!writeMediaFrame(frame)) [[unlikely]]
+                return failedWrite();
+            last_frame_time = Clock::now();
         }
         while (this->shouldContinueWriting());
-
-#undef __VIGIL_WRITER_WRITE_FRAME_INTERNAL__
 
         return finishWith(WriteEvent::Status::Interrupted);
     }
@@ -686,6 +729,7 @@ private:
     int _fd;
     bool _is_clip_finish;
     MediaFrame::FrameType _thumbnail;
+    WaitBounds _waits;
 };
 
 } // namespace vigil::writers
