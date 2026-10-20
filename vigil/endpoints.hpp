@@ -326,6 +326,14 @@ public:
         try
         {
             RecordConfig record_config(j, *_ctx);
+            // The snapshot is built before the lock: the host's size estimate is a media callback, which must not
+            // run under the commit lock (docs/PLAN.md section 4.3).
+            auto action_settings = record_config.createActionSettings(*_ctx);
+            if (!action_settings)
+            {
+                ret = ENOMEM;
+                throw Exception("Failed to create the action settings of the record config");
+            }
             const std::unique_lock lock(_record_config_mutex);
 
             if (store) // Store the canonical document first, so that a persistence failure changes nothing
@@ -336,7 +344,7 @@ public:
                     throw Exception("Failed to store record config to file");
             }
 
-            if (ret = record_config.sync(*_ctx); ret != 0)
+            if (ret = record_config.sync(*_ctx, std::move(action_settings)); ret != 0)
                 throw Exception("Try again to sync record config to context");
             _record_config = std::move(record_config);
         }
@@ -739,10 +747,11 @@ public:
 private:
     friend struct RuleEndpointTestAccess; // defined by the module tests only
 
-    bool hasEnabledFileAction() const
+    // Reads the published snapshot, not the stored configuration, so it takes no lock.
+    bool hasEnabledFileAction() const noexcept
     {
-        const std::lock_guard lock(_record_config_mutex);
-        return _record_config.photo.enabled || _record_config.video.enabled;
+        const auto settings = _ctx->action_settings.get().settings;
+        return settings && settings->fileChannel();
     }
 
     void ruleThreadTask() noexcept

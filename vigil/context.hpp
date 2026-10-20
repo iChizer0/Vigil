@@ -370,75 +370,84 @@ struct Context
 
     } mutable shared_rule_event;
 
-    // Shared writer settings
-    struct SharedWriterSettings
+    // The published action settings snapshot and its revisions (docs/PLAN.md section 7.1). The global revision
+    // detects configuration-commit conflicts: `update` publishes only for a caller that saw the current one, so
+    // a commit and a media refresh cannot interleave. Each file channel has its own revision, bumped only when
+    // that channel's settings change, which is what its writer watches: a change to the other channel or to
+    // Sound does not stop it.
+    struct SharedActionSettings
     {
-    private:
-        mutable std::shared_mutex mutex;
-        alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> revision = 0;
-        std::shared_ptr<FileWriterSettings> settings;
-
     public:
-        bool update(size_t rev, std::shared_ptr<FileWriterSettings> new_settings) noexcept
+        struct Loaded
         {
-            if (!new_settings) [[unlikely]]
+            size_t revision;
+            size_t photo_revision;
+            size_t video_revision;
+            std::shared_ptr<const ActionSettings> settings; // null only if the first allocation failed
+        };
+
+        // Publishes `next` if `rev` is still the current revision; an equal snapshot publishes nothing. Returns
+        // false, with nothing applied, on a conflict.
+        bool update(size_t rev, std::shared_ptr<const ActionSettings> next) noexcept
+        {
+            if (!next) [[unlikely]]
                 return false;
             const std::unique_lock lock(mutex);
-            if (const auto cur = revision.load(std::memory_order_acquire); rev == cur)
-            {
-                if (!settings || *settings != *new_settings)
-                {
-                    settings = std::move(new_settings);
-                    revision.store(cur + 1, std::memory_order_release);
-                }
+            const auto cur = revision.load(std::memory_order_acquire);
+            if (rev != cur)
+                return false;
+            if (settings && *settings == *next)
                 return true;
-            }
-            return false;
+            if (!settings || !ActionSettings::SameSettings(settings->photo, next->photo))
+                photo_revision.fetch_add(1, std::memory_order_release);
+            if (!settings || !ActionSettings::SameSettings(settings->video, next->video))
+                video_revision.fetch_add(1, std::memory_order_release);
+            settings = std::move(next);
+            revision.store(cur + 1, std::memory_order_release);
+            return true;
         }
 
+        // A media refresh: the current configuration with its watermarks estimated again, as one snapshot.
+        // Publishes the defaults (no file channel) when nothing was published yet.
         void sync(const vg_config_media_t &media_capi) noexcept
         {
             for (;;)
             {
-                auto [rev, old] = get();
-                if (!old)
-                {
-                    const auto t = CaptureTypeFrom(kRecordWriterDefaultFormat);
-                    if (t == CaptureType::Unknown)
-                        return; // Invalid default format, cannot sync
-                    if (old = FileWriterSettings::create(t, kRecordWriterDefaultFormat, kRecordWriterDefaultIntervalMs,
-                            kRecordWriterPrefixDefault, kVideoClipLengthDefault,
-                            WaterMarks::from(kRecordWriterDefaultFormat,
-                                t == CaptureType::Video ? kVideoClipLengthDefault.count() : 1, &media_capi));
-                        !old)
-                        return; // Failed to create default settings, cannot sync
-                }
-
-                auto new_settings = FileWriterSettings::create(old->type, old->format, old->interval,
-                    old->file_name_prefix, old->video_clip_length,
-                    WaterMarks::from(old->format, old->type == CaptureType::Video ? old->video_clip_length.count() : 1,
-                        &media_capi));
-                if (!new_settings)
-                {
-                    std::this_thread::yield();
-                    continue;
-                }
-                if (update(rev, std::move(new_settings)))
+                const auto loaded = get();
+                auto next = loaded.settings ? loaded.settings->refreshed(&media_capi)
+                                            : ActionSettings::create(false, false, nullptr, nullptr, &media_capi);
+                if (!next) [[unlikely]]
+                    return; // allocation failure: nothing to publish
+                if (update(loaded.revision, std::move(next)))
                     return;
             }
         }
 
-        std::pair<size_t, std::shared_ptr<FileWriterSettings>> get() const noexcept
+        Loaded get() const noexcept
         {
             const std::shared_lock lock(mutex);
-            return { revision.load(std::memory_order_acquire), settings };
+            return { revision.load(std::memory_order_acquire), photo_revision.load(std::memory_order_acquire),
+                video_revision.load(std::memory_order_acquire), settings };
         }
 
         size_t getRevision() const noexcept
         {
             return revision.load(std::memory_order_acquire);
         }
-    } shared_writer_settings;
+
+        // The revision of the file channel that writes `type`: Image is the Photo channel, Video the Video one.
+        size_t channelRevision(CaptureType type) const noexcept
+        {
+            return (type == CaptureType::Image ? photo_revision : video_revision).load(std::memory_order_acquire);
+        }
+
+    private:
+        mutable std::shared_mutex mutex;
+        alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> revision = 0;
+        alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> photo_revision = 0;
+        alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> video_revision = 0;
+        std::shared_ptr<const ActionSettings> settings;
+    } action_settings;
 
     // Shared video/audio frame buffers
     template<size_t PeriodLimit>
@@ -581,7 +590,7 @@ struct Context
     // Constructor
     Context(const vg_config_t &cfg) : c_api(cfg)
     {
-        shared_writer_settings.sync(c_api.media);
+        action_settings.sync(c_api.media);
     }
 
     // Destructor

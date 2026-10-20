@@ -217,7 +217,7 @@ public:
             .state = state,
             .stats = _stats.load(std::memory_order_acquire),
             .quota_minimum_recommend_bytes = [this]() -> FileSize {
-                const auto [_, s] = _ctx.shared_writer_settings.get();
+                const auto s = _ctx.action_settings.get().settings;
                 return std::max(s ? (s->watermarks.high_remain_bytes + s->watermarks.recycle_bytes) : 0,
                     static_cast<FileSize>(kStorageMinSupportedFileSystemBytes));
             }(),
@@ -865,7 +865,7 @@ private:
 
                 case SlotState::Ready:
                 case SlotState::Saturated:
-                    if (const auto [_, s] = _ctx.shared_writer_settings.get(); doStats() && s) [[likely]]
+                    if (const auto s = _ctx.action_settings.get().settings; doStats() && s) [[likely]]
                     {
                         const auto idx_mgr = _index_manager.load(std::memory_order_acquire);
                         const auto idx_res = idx_mgr ? idx_mgr->size() : IndexManager::IndexResult { false, 0 };
@@ -933,17 +933,27 @@ private:
         while (!_stop_token.load(std::memory_order_acquire))
         {
             const auto start = std::chrono::steady_clock::now();
-            const auto [rev, settings] = _ctx.shared_writer_settings.get();
-            if (!settings)
+            const auto loaded = _ctx.action_settings.get();
+            if (!loaded.settings)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
-                    "FileWriterSettings is null in storage slot writer thread for device path ", _dev_path,
+                    "ActionSettings is null in storage slot writer thread for device path ", _dev_path,
                     ", cannot start new writer task");
                 goto l_continue;
             }
 
             {
-                const auto watermarks = settings->watermarks;
+                const auto watermarks = loaded.settings->watermarks;
+                // The single enabled file channel and its revision, loaded together (docs/PLAN.md section 7.1):
+                // the writer stops when its own channel's settings change, not when the other channel or Sound
+                // changes. Phase 4C gives each channel its own worker.
+                const auto channel = loaded.settings->fileChannel();
+                const auto channel_revision = loaded.settings->photo ? loaded.photo_revision : loaded.video_revision;
+
+                // Nothing to write without an enabled file channel; a pending event is retired by the rule loop,
+                // since rules cannot stay enabled without a file action (docs/PLAN.md section 4.1)
+                if (!channel)
+                    goto l_continue;
 
                 // Check if slot status is ready to write
                 if (!isReadyToWrite())
@@ -988,15 +998,15 @@ private:
                 try
                 {
                     std::unique_ptr<SlotAdaptedWriter<Slot>> writer;
-                    switch (settings->type)
+                    switch (channel->type)
                     {
                         case CaptureType::Image:
-                            writer = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), rev,
-                                std::ref(_ctx), settings, event);
+                            writer = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
+                                channel_revision, std::ref(_ctx), channel, event);
                             break;
                         case CaptureType::Video:
-                            writer = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), rev,
-                                std::ref(_ctx), settings, event);
+                            writer = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
+                                channel_revision, std::ref(_ctx), channel, event);
                             break;
                         default:
                             throw Exception("Unsupported writer type");
@@ -1008,7 +1018,7 @@ private:
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Writer task failed for storage slot with device path ",
                         _dev_path, ": ", e.what());
                 }
-                if (!finish_task(event, status, start + settings->interval))
+                if (!finish_task(event, status, start + channel->interval))
                     return;
                 continue;
             }
@@ -1729,7 +1739,7 @@ private:
     {
         for (; !_stop_token.load(std::memory_order_acquire); std::this_thread::sleep_for(kIndexSyncInterval))
         {
-            const auto [_, s] = _ctx.shared_writer_settings.get();
+            const auto s = _ctx.action_settings.get().settings;
             if (!s) [[unlikely]]
                 break;
             const auto idx_mgr = _index_manager.load(std::memory_order_acquire);

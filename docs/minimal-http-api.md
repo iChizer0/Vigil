@@ -48,7 +48,7 @@ and post it). Until multi-action support lands, at most one of `dPhoto` and `dVi
 requires one of them, and `dSound` and `bContinuousRecordEnabled` are rejected when enabled. A missing field, a field of
 the wrong type, a non-positive or non-integer interval, an unknown photo format, and any other `iSchemaVersion` are
 rejected with `EINVAL` (`30022`); a rejected payload changes neither the runtime nor the stored file. Unknown fields are
-ignored and dropped from the stored document. `EAGAIN` (`30011`) means a media refresh changed the writer settings while
+ignored and dropped from the stored document. `EAGAIN` (`30011`) means a media refresh changed the action settings while
 the document was being applied; post it again. A first start without `record_config.json` reports every action disabled.
 
 ### Rule Info
