@@ -178,15 +178,16 @@ typedef struct vg_config_basic_t
     void (*on_rule_event_cb)(const vg_rule_evt_t *evt); /**< Optional. Called once per dispatched rule event, on the
                          thread that dispatched it (the rule thread, or the HTTP request thread for an HTTP
                          activation), after the event's file tasks were accepted or refused, with no Vigil lock
-                         held. Reporting is best-effort, not an ordered stream: a file callback for the same event
-                         may arrive before this one, and an event is followed by zero, one, or two file callbacks
-                         (Photo and Video), none announced in advance. Return promptly, and do not call
-                         vg_service_deinit from it. */
+                         held, so it may call the C API, also inside an HTTP activation, which invokes it on the
+                         activation's thread. Reporting is best-effort, not an ordered stream: a file callback for
+                         the same event may arrive before this one, and an event is followed by zero, one, or two
+                         file callbacks (Photo and Video), none announced in advance. Return promptly, and do not
+                         call vg_service_init or vg_service_deinit from it. */
     void (*on_file_event_cb)(const vg_file_evt_t *evt); /**< Optional. Called once per file a recording Slot
                          publishes (manual capture files are not reported), from the worker that published it,
-                         after it released its media operation and the publication lock;
-                         a slot's Photo and Video workers publish independently, so two calls may overlap. Return
-                         promptly, and do not call vg_service_deinit from it. */
+                         after it released its media operation and the publication lock; a slot's Photo and Video
+                         workers publish independently, so two calls may overlap. Return promptly, and do not call
+                         vg_service_init or vg_service_deinit from it. */
     const char *config_directory;                       /**< Required (EINVAL when null): the configuration root,
                                                            read during vg_service_init. */
 } vg_config_basic_t;
@@ -243,7 +244,8 @@ typedef struct vg_config_gpio_pins_t
  * can be selected; a GPIO rule also needs acquire_cb, release_cb, and the sync callback of its signal mode.
  * They run on the rule thread, on the thread of a record rule configuration POST or a rule info GET, and on the
  * vg_service_init and vg_service_deinit threads for a stored rule; sync_level_cb may be called from the rule
- * thread and a rule info GET at the same time.
+ * thread and a rule info GET at the same time. Do not call the C API from them: a record rule POST and the rule
+ * thread hold the rule lock while they run.
  */
 typedef struct vg_config_gpios_t
 {
