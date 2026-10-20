@@ -77,6 +77,61 @@ std::string ReadFile(const std::filesystem::path &path)
     return oss.str();
 }
 
+// One fake pin for a GPIO rule, acquired at most once at a time, as a real pin is.
+struct FakeGPIO
+{
+    static inline vg_config_gpio_pin_t pins[1] = { { .num = 7,
+        .name = "GPIO_07",
+        .state = VG_GPIO_PIN_MODE_INP_FLOATING,
+        .capabilities = static_cast<vg_gpio_pin_mod_e>(VG_GPIO_PIN_MODE_INP_FLOATING | VG_GPIO_PIN_MODE_INP_PULLUP) } };
+    static inline int acquired = 0;
+    static inline int released = 0;
+    static inline bool held = false;
+    static inline vg_gpio_pin_evt_e event = VG_GPIO_PIN_EVT_NONE;
+
+    static void reset()
+    {
+        acquired = released = 0;
+        held = false;
+        event = VG_GPIO_PIN_EVT_NONE;
+    }
+
+    static vg_sta_e Available(vg_config_gpio_pins_t *out)
+    {
+        out->free_cb = nullptr;
+        out->pins = pins;
+        out->len = 1;
+        return 0;
+    }
+
+    static vg_sta_e Acquire(int, vg_gpio_pin_mod_e, size_t)
+    {
+        if (held)
+            return EBUSY;
+        held = true;
+        ++acquired;
+        return 0;
+    }
+
+    static void Release(int)
+    {
+        held = false;
+        ++released;
+    }
+
+    static vg_gpio_pin_lvl_e SyncLevel(int)
+    {
+        return VG_GPIO_PIN_LVL_LOW;
+    }
+
+    static vg_gpio_pin_evt_e SyncEvent(int)
+    {
+        const auto e = event;
+        event = VG_GPIO_PIN_EVT_NONE;
+        return e;
+    }
+};
+
 struct Fixture
 {
     std::string root; // temporary directory, removed afterwards
@@ -88,8 +143,9 @@ struct Fixture
 
     // With `unwritable_store` the configuration "directory" is a regular file, so nothing can be stored. With
     // `with_sound` the host provides a playback callback, so Sound is available; its worker is not started,
-    // so a trigger stays Pending for rule info to report.
-    explicit Fixture(bool unwritable_store = false, bool with_sound = false) : root(MakeTempDir()), dir(root)
+    // so a trigger stays Pending for rule info to report. With `with_gpio` the host provides the fake pin.
+    explicit Fixture(bool unwritable_store = false, bool with_sound = false, bool with_gpio = false)
+        : root(MakeTempDir()), dir(root)
     {
         if (unwritable_store)
         {
@@ -99,6 +155,15 @@ struct Fixture
         auto cfg = MakeFakeConfig(dir.c_str());
         if (with_sound)
             cfg.media.sound_play_cb = [](void *) -> vg_sta_e { return 0; };
+        if (with_gpio)
+        {
+            cfg.gpios.available_cb = &FakeGPIO::Available;
+            cfg.gpios.acquire_cb = &FakeGPIO::Acquire;
+            cfg.gpios.release_cb = &FakeGPIO::Release;
+            cfg.gpios.sync_level_cb = &FakeGPIO::SyncLevel;
+            cfg.gpios.sync_event_cb = &FakeGPIO::SyncEvent;
+            FakeGPIO::reset();
+        }
         cfg.media.user_data = &media;
         cfg.media.video_file_create_cb = &FakeMedia::Create;
         cfg.media.video_file_finish_cb = &FakeMedia::Finish;
@@ -1131,6 +1196,46 @@ VG_TEST_CASE(record_rule_config_switches_rules_persists_and_rolls_back_failures)
     const auto events = RuleEventRecorder::take();
     VG_REQUIRE(events.size() == size_t { 1 });
     VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_ALWAYS_ON);
+}
+
+VG_TEST_CASE(a_failed_rule_switch_releases_the_new_rule_before_the_committed_one_is_rebuilt)
+{
+    // A record rule POST whose store fails after the new rule was built rolls back to the committed rule. The
+    // failed rule is destroyed first, so a resource both need, here the same GPIO pin, is free again when the
+    // committed rule is rebuilt. Before 2026-10-20 the committed rule was rebuilt first: a host that refused
+    // the second acquisition made the rollback drop the rule, and one that granted it left the rule on a pin
+    // the failed rule then released.
+    Fixture f(false, false, /* with_gpio = */ true);
+    f.start();
+    nlohmann::json rising = SelectedRuleJson("GPIO");
+    rising["dGPIO"]
+        = { { "sName", "GPIO_07" }, { "sState", "PULL_UP" }, { "sSignal", "RISING" }, { "iDebounceDurationMs", 100 } };
+    VG_CHECK_EQ(f.postRecordRuleConfig(rising), 0);
+    VG_CHECK_EQ(FakeGPIO::acquired, 1);
+    VG_CHECK_EQ(FakeGPIO::released, 0);
+    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_rule_config.json"))), rising);
+
+    // The store's temporary file cannot be written, so the next save fails once the new rule exists (the store
+    // removes the blocker when the save fails, so only this one does).
+    std::filesystem::create_directory(f.file(".record_rule_config.json"));
+    auto falling = rising;
+    falling["dGPIO"]["sSignal"] = "FALLING";
+    VG_CHECK(f.postRecordRuleConfig(falling) != 0);
+    VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), rising);
+    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_rule_config.json"))), rising);
+    VG_CHECK_EQ(FakeGPIO::acquired, 3); // the committed rule released, the failed one acquired and released,
+    VG_CHECK_EQ(FakeGPIO::released, 2); // the committed one acquired again
+    VG_CHECK(FakeGPIO::held);
+
+    // The committed rule is live on its pin.
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
+    FakeGPIO::event = VG_GPIO_PIN_EVT_RISING;
+    f.evaluate();
+    const auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_GPIO);
+    VG_CHECK_EQ(events[0].id, "RISING");
+    VG_CHECK_EQ(events[0].source_id, "GPIO_07");
 }
 
 VG_TEST_CASE(record_config_post_persists_only_valid_payloads_in_canonical_form)

@@ -71,6 +71,10 @@ A triggered video recording starts from the oldest key frame still buffered, so 
 in Rule Info) has elapsed since it started, or at the key frame wait without one; a continuous clip starts at a key
 frame enqueued after it is admitted instead, so nothing before its admission is recorded.
 
+The C API reports these events best-effort through its rule and file callbacks: the event objects are borrowed for the
+callback, a file callback may precede the rule callback of its event, and a rule event is followed by zero, one, or two
+file callbacks; the contract is stated in `include/vigil_ctypes.h`.
+
 ### Rule Info
 
 Get the information about the rule system.

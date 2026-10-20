@@ -526,8 +526,7 @@ public:
             || !this->ctxRef().c_api.media.video_file_write_video_frame_cb)
         {
             this->setEventStatus(WriteEvent::Status::Failed);
-            throw Exception("VideoWriter initialized with audio frame write callback set or without video frame "
-                            "write callback set");
+            throw Exception("VideoWriter initialized without the video or the audio frame write callback set");
         }
     }
 

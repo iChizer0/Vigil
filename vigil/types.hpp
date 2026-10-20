@@ -759,12 +759,15 @@ struct BaseFrame: public NonCopyable<BaseFrame>
     void *data;
     size_t bytes_len;
 
-    BaseFrame(int64_t pts_, void *data_, size_t bytes_len_) : pts(pts_), data(data_), bytes_len(bytes_len_)
+    // Owns a copy of the payload, never the host's buffer: a frame without one (the C API refuses it) stays
+    // empty. Before 2026-10-20 a non-null buffer of zero length was kept and later freed as if it were ours.
+    BaseFrame(int64_t pts_, void *data_, size_t bytes_len_) : pts(pts_), data(nullptr), bytes_len(0)
     {
         if (data_ && bytes_len_ > 0)
         {
-            if (data = new uint8_t[bytes_len_]; data)
-                std::memcpy(data, data_, bytes_len_);
+            data = new uint8_t[bytes_len_]; // throws on exhaustion, which the C API reports as EFAULT
+            std::memcpy(data, data_, bytes_len_);
+            bytes_len = bytes_len_;
         }
     }
 

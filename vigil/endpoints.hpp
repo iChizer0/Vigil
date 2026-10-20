@@ -691,21 +691,16 @@ public:
                 auto gpios_obj = nlohmann::json::object();
                 if (_ctx->c_api.gpios.available_cb)
                 {
-                    vg_config_gpio_pins_t available_pins;
-                    if (_ctx->c_api.gpios.available_cb(&available_pins) == 0 && available_pins.pins
-                        && available_pins.len > 0)
+                    const AvailableGPIOPins available(*_ctx); // freed when this scope ends, also on a throw
+                    if (available.status == 0 && available.pins.pins && available.pins.len > 0)
                     {
-                        for (size_t i = 0; i < available_pins.len; ++i)
+                        for (size_t i = 0; i < available.pins.len; ++i)
                         {
-                            const auto &pin = available_pins.pins[i];
+                            const auto &pin = available.pins.pins[i];
                             GPIOPinStatus gpio_status(pin);
                             gpio_status.to(gpios_obj[gpio_status.pin.name], *_ctx);
                         }
                     }
-                    if (available_pins.free_cb)
-                        available_pins.free_cb(available_pins.pins);
-                    else
-                        VG_LOG(_ctx->log, VG_LOG_LEVEL_DEBUG, "No free_cb provided for available GPIO pins");
                 }
                 res_j["dAvailableGPIOs"] = gpios_obj;
             }
@@ -979,6 +974,11 @@ private:
 
     void rollbackRecordRule()
     {
+        // The rule that failed to commit goes first: it may hold what the committed one needs back, such as a
+        // GPIO pin or a socket (before 2026-10-20 the committed rule was rebuilt first, so a GPIO rule on the
+        // same pin was either refused by the host, which dropped the rule, or left on a pin the failed rule
+        // then released).
+        _record_rule.reset();
         _record_rule = std::visit(
             [&](auto &cfg) -> std::unique_ptr<BaseRule> {
                 using ConfigType = std::decay_t<decltype(cfg)>;

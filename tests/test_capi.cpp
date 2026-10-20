@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
@@ -356,6 +357,47 @@ VG_TEST_CASE(the_selected_slot_starts_its_manager_and_both_channel_workers_and_d
     VG_REQUIRE(vg_service_init(&f.config) == 0); // the selection was stored: the Slot is enabled again
     slot = WaitForInternalSlot(f, true);
     VG_CHECK(slot.at("bSelected").get<bool>());
+    VG_CHECK_EQ(vg_service_deinit(), 0);
+}
+
+VG_TEST_CASE(init_validates_the_configuration_and_the_api_refuses_empty_frames_and_unreleased_responses)
+{
+    // The C API boundary (docs/PLAN.md section 10): a configuration without its directory is refused before
+    // anything is built, a frame without a payload is refused instead of being kept by reference, a response
+    // structure must be zero-initialized or released (the release macro clears it completely since
+    // 2026-10-20, so it can be reused), and a GPIO query that fails without writing its list lists nothing.
+    Fixture f;
+    auto no_directory = f.config;
+    no_directory.basic.config_directory = nullptr;
+    VG_CHECK_EQ(vg_service_init(&no_directory), EINVAL);
+    VG_CHECK_EQ(vg_service_init(nullptr), EINVAL);
+    f.config.gpios.available_cb = [](vg_config_gpio_pins_t *) -> vg_sta_e { return -1; }; // the list untouched
+    VG_REQUIRE(vg_service_init(&f.config) == 0);
+
+    uint8_t payload[4] = { 1, 2, 3, 4 };
+    vg_video_frame_t video { .pts = 1, .data = nullptr, .bytes_len = sizeof payload, .key_frame = 1 };
+    VG_CHECK_EQ(vg_media_enqueue_video_frame(&video), EINVAL);
+    video.data = payload;
+    video.bytes_len = 0;
+    VG_CHECK_EQ(vg_media_enqueue_video_frame(&video), EINVAL);
+    video.bytes_len = sizeof payload;
+    VG_CHECK_EQ(vg_media_enqueue_video_frame(&video), 0);
+    VG_CHECK_EQ(vg_media_enqueue_video_frame(nullptr), EINVAL);
+    vg_audio_frame_t audio { .pts = 1, .data = payload, .bytes_len = 0 };
+    VG_CHECK_EQ(vg_media_enqueue_audio_frame(&audio), EINVAL);
+    audio.bytes_len = sizeof payload;
+    VG_CHECK_EQ(vg_media_enqueue_audio_frame(&audio), 0);
+
+    vg_http_api_response_t response {};
+    VG_CHECK_EQ(vg_http_api_rule_info_get(&response), 0);
+    VG_REQUIRE(response.free_cb != nullptr && response.body != nullptr);
+    VG_CHECK_EQ(vg_http_api_rule_info_get(&response), EINVAL); // still holding a body
+    const auto *text = static_cast<const char *>(response.body);
+    VG_CHECK(nlohmann::json::parse(text, text + response.body_len).at("dAvailableGPIOs").empty());
+    VG_HTTP_API_SAFE_RELEASE_RESPONSE(&response);
+    VG_CHECK(response.free_cb == nullptr && response.body == nullptr && response.body_len == size_t { 0 });
+    VG_CHECK_EQ(vg_http_api_rule_info_get(&response), 0); // reusable once released
+    VG_HTTP_API_SAFE_RELEASE_RESPONSE(&response);
     VG_CHECK_EQ(vg_service_deinit(), 0);
 }
 
