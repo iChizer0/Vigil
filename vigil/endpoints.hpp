@@ -260,7 +260,8 @@ public:
         // Startup (docs/PLAN.md section 4.3): a missing file keeps the defaults. A file that exists but cannot
         // be loaded or applied is left untouched and keeps rules disabled until a valid record configuration
         // is posted, so that neither the default ALWAYS_ON rule nor the default open schedule runs in its
-        // place.
+        // place. The loaded pair is validated against the ALWAYS_ON invariant once both files are in (section
+        // 4.4), and a violation fails closed the same way, with both files left in place and both reported.
         bool fail_closed = false;
         const auto load = [&fail_closed](ConfigStore &store, const auto &apply) {
             nlohmann::json j;
@@ -286,11 +287,18 @@ public:
             load(*_record_rule_config_store,
                 [&](const nlohmann::json &j) { return code(updateRecordRuleConfig(j, false)); });
         }
+        if (selectedRuleIsAlwaysOn() && !committedRecordConfigSatisfiesAlwaysOnInvariant())
+        {
+            VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR,
+                "The stored record configuration enables actions the selected ALWAYS_ON rule cannot pace");
+            fail_closed = true;
+        }
         if (fail_closed)
         {
             VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR,
-                "A configuration file could not be applied and was left untouched; rules stay disabled until a "
-                "valid record configuration is posted");
+                "A stored configuration could not be applied (an unusable file, or a pair the selected ALWAYS_ON "
+                "rule cannot pace); the files are left untouched and rules stay disabled until a valid record "
+                "configuration is posted");
             const std::unique_lock lock(_record_config_mutex);
             _record_config.rule_enabled = false;
             _ctx->record_rule_enabled.store(false, std::memory_order_release);
@@ -319,6 +327,8 @@ public:
         }
     }
 
+    // `store == false` is the startup load: the document is applied without being written back, and without
+    // the invariant check, which the constructor runs on the pair once both files are loaded.
     nlohmann::json updateRecordConfig(const nlohmann::json &j, bool store = true)
     {
         vg_sta_e ret = 0;
@@ -336,6 +346,14 @@ public:
                 ret = ENOMEM;
                 throw Exception("Failed to create the action settings of the record config");
             }
+            // The commit mutex (docs/PLAN.md section 4.4) serializes the two configuration POSTs from here to
+            // the publish, so the invariant is checked against the committed selection and no ordering of the
+            // two POSTs bypasses it.
+            const std::unique_lock commit(_commit_mutex);
+            if (store && selectedRuleIsAlwaysOn() && !record_config.satisfiesAlwaysOnInvariant())
+                throw Exception("The selected ALWAYS_ON rule paces one file action: at most one of dActions.dPhoto "
+                                "and dActions.dVideo may be enabled, exactly one while bRuleEnabled is true, with "
+                                "dActions.dSound disabled; select another record rule first");
             const std::unique_lock lock(_record_config_mutex);
             if (_ctx->action_settings.getRevision() != prepared.base_revision)
             {
@@ -444,6 +462,7 @@ public:
         return res_j;
     }
 
+    // `store == false` is the startup load, as for updateRecordConfig.
     nlohmann::json updateRecordRuleConfig(const nlohmann::json &j, bool store = true)
     {
         vg_sta_e ret = 0;
@@ -455,6 +474,15 @@ public:
         {
             auto new_record_rule_config = j;
             const auto rule_type_str = j.at("sCurrentSelected").get<std::string>();
+            // The commit mutex (docs/PLAN.md section 4.4): ALWAYS_ON is selected only over a committed record
+            // configuration it can pace, and the record configuration POST holds the same mutex while it checks
+            // the selection and commits. Not at startup, where the pair is validated after both loads.
+            const std::unique_lock commit(_commit_mutex);
+            if (store && BaseRule::TypeFromString(rule_type_str) == VG_RULE_TYPE_ALWAYS_ON
+                && !committedRecordConfigSatisfiesAlwaysOnInvariant())
+                throw Exception("ALWAYS_ON paces one file action, and the current record configuration enables "
+                                "dActions.dSound, both of dActions.dPhoto and dActions.dVideo, or neither with "
+                                "bRuleEnabled true; simplify dActions first");
             const std::unique_lock lock(_record_rule_mutex);
             if (rule_type_str.empty())
             {
@@ -717,8 +745,8 @@ public:
                 ret = EPERM;
                 throw Exception("Activating HTTP rule required schedule rule to be ready in current configuration");
             }
-            // The storage precheck applies only when a file action is enabled (docs/PLAN.md section 5.2). Until
-            // Phase 4D every configuration that enables rules enables one, so it always applies today.
+            // The storage precheck applies only when a file action is enabled (docs/PLAN.md section 5.2): a
+            // rule-only or Sound-only activation needs no storage.
             if (hasEnabledFileAction() && !_ctx->slot_admission.isReadyToWrite())
             {
                 ret = EBUSY;
@@ -757,6 +785,21 @@ private:
     {
         const auto settings = _ctx->action_settings.get().settings;
         return settings && settings->fileChannel();
+    }
+
+    // The two sides of the ALWAYS_ON invariant (docs/PLAN.md section 4.4), each read under its own mutex. The
+    // caller holds the commit mutex (or is the constructor, before any other thread exists), so neither side
+    // changes between the read and the commit.
+    bool selectedRuleIsAlwaysOn() const noexcept
+    {
+        const std::shared_lock lock(_record_rule_mutex);
+        return _record_rule && _record_rule->type() == VG_RULE_TYPE_ALWAYS_ON;
+    }
+
+    bool committedRecordConfigSatisfiesAlwaysOnInvariant() const noexcept
+    {
+        const std::unique_lock lock(_record_config_mutex);
+        return _record_config.satisfiesAlwaysOnInvariant();
     }
 
     void ruleThreadTask() noexcept
@@ -900,6 +943,11 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _rule_stop_token;
     std::unique_ptr<std::thread> _rule_thread;
 
+    // The commit mutex (docs/PLAN.md section 4.4): both configuration POSTs hold it from after parsing to the
+    // publish, so the ALWAYS_ON invariant is checked against the other configuration's committed state and the
+    // two POSTs cannot interleave around it. Lock order: the commit mutex, then one configuration mutex at a
+    // time; the configuration mutexes are never nested in one another.
+    mutable std::mutex _commit_mutex;
     mutable std::mutex _record_config_mutex;
     RecordConfig _record_config;
     mutable std::shared_mutex _schedule_rule_mutex;

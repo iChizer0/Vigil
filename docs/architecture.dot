@@ -54,7 +54,7 @@ digraph G {
       label="RuleEndpoint";
       style="rounded,dashed";
       color=gray50;
-      rule_ep [label="Rule Config\niSchemaVersion 2\nbRuleEnabled\ndActions", shape=box];
+      rule_ep [label="Rule Config\niSchemaVersion 2\nbRuleEnabled\ndActions\nALWAYS_ON invariant (commit mutex)", shape=box];
       schedule_ep [label="Schedule Config\nTimeRange per Weekday", shape=box];
       record_ep [label="Record Config\nsCurrentSelected\nRule Type Variants", shape=box];
       rule_info_ep [label="Rule Info\nEvent Status\nGPIO/TTY Availability\nMedia Pause / Record Enabled\nSelected Record Slot", shape=box];

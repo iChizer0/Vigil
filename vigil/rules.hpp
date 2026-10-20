@@ -942,7 +942,8 @@ public:
         return Activate(_ctx);
     }
 
-    // Dispatches one HTTP owner: EBUSY when no file channel accepted a task (docs/PLAN.md section 5.2). Needs no
+    // Dispatches one HTTP owner: EBUSY when a file action is enabled and no file channel accepted a task; 0 for
+    // a rule-only or Sound-only configuration once the owner is dispatched (docs/PLAN.md section 5.2). Needs no
     // rule instance, so the endpoint calls it with no rule lock held (the dispatch runs the RULE callback).
     static vg_sta_e Activate(const Context &ctx) noexcept
     {

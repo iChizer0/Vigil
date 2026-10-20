@@ -16,6 +16,8 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <thread>
+#include <vector>
 
 #include "vigil/configs.hpp"
 #include "vigil/constants.hpp"
@@ -153,6 +155,15 @@ nlohmann::json RecordJson(bool enabled, const char *format, long interval_ms)
         { "iIntervalMs", photo ? interval_ms : 5000L } };
     j["dActions"]["dVideo"] = { { "bEnabled", video }, { "iIntervalMs", video ? interval_ms : 5000L } };
     j["dActions"]["dSound"] = { { "bEnabled", false } };
+    return j;
+}
+
+// `j` with the three actions switched as given: a multi-action document (Phase 4D).
+nlohmann::json WithActions(nlohmann::json j, bool photo, bool video, bool sound)
+{
+    j["dActions"]["dPhoto"]["bEnabled"] = photo;
+    j["dActions"]["dVideo"]["bEnabled"] = video;
+    j["dActions"]["dSound"]["bEnabled"] = sound;
     return j;
 }
 
@@ -652,7 +663,8 @@ VG_TEST_CASE(record_config_post_persists_only_valid_payloads_in_canonical_form)
     VG_CHECK_EQ(ChannelIntervalMs(*f.ctx), 1234L);
     const auto revision = f.ctx->action_settings.getRevision();
 
-    // Rejected payloads change neither the runtime nor the file.
+    // Rejected payloads change neither the runtime nor the file: an invalid interval, and two actions that
+    // ALWAYS_ON, the default rule, cannot pace (docs/PLAN.md section 4.4; the invariant has its own cases).
     const auto res = f.endpoint->updateRecordConfig(RecordJson(true, "MP4", 0));
     VG_CHECK_EQ(res.at("code").get<int>(), kEndpointErrorBase + EINVAL);
     VG_CHECK(res.contains("message"));
@@ -698,6 +710,210 @@ VG_TEST_CASE(record_config_post_fails_closed_when_the_store_is_unwritable)
     VG_CHECK_EQ(ChannelIntervalMs(*f.ctx), -1L); // the defaults: no file channel
     f.evaluate();
     VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+}
+
+VG_TEST_CASE(the_always_on_invariant_is_enforced_by_both_posts_in_either_order)
+{
+    // docs/PLAN.md section 4.4: with ALWAYS_ON selected, a record configuration it cannot pace is rejected,
+    // and ALWAYS_ON cannot be selected over one; to run several actions, select another rule first, and to
+    // return to ALWAYS_ON, simplify the actions first. A rejected POST changes neither the runtime nor a file.
+    Fixture f;
+    f.start();
+    VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON")); // the default selection
+    const auto photo_video = WithActions(RecordJson(true, "MP4", 5000), true, true, false);
+    const auto everything = WithActions(RecordJson(true, "MP4", 5000), true, true, true);
+    const auto sound_only = WithActions(RecordJson(false, nullptr, 0), false, false, true);
+    const auto rule_only = RecordJson(true, nullptr, 0);
+    for (const auto &doc: { photo_video, everything, sound_only, rule_only })
+    {
+        const auto res = f.endpoint->updateRecordConfig(doc);
+        VG_CHECK_EQ(res.at("code").get<int>(), kEndpointErrorBase + EINVAL);
+        VG_CHECK(res.contains("message"));
+    }
+    VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, nullptr, 0));
+    VG_CHECK(!std::filesystem::exists(f.file("record_config.json")));
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "JPG", 1000)), 0); // one channel: what ALWAYS_ON paces
+
+    // Another rule first, then every action: both channels accept, and the RULE report is file acceptance.
+    VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0);
+    VG_CHECK_EQ(f.postRecordConfig(everything), 0);
+    VG_CHECK_EQ(f.endpoint->getRecordConfig(), everything);
+    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_config.json"))), everything);
+    {
+        const auto settings = f.ctx->action_settings.get().settings;
+        VG_REQUIRE(settings != nullptr);
+        VG_CHECK(settings->photo && settings->video && settings->sound_enabled);
+    }
+    f.evaluate();
+    auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_TIMER);
+    VG_CHECK(events[0].writer_created);
+    VG_CHECK(f.ctx->file_channels.photo.holdsTask() && f.ctx->file_channels.video.holdsTask());
+
+    // ALWAYS_ON cannot be selected over it: the selection, its file, and the rule instance are unchanged.
+    const auto always = SelectedRuleJson("ALWAYS_ON");
+    const auto res = f.endpoint->updateRecordRuleConfig(always);
+    VG_CHECK_EQ(res.at("code").get<int>(), kEndpointErrorBase + EINVAL);
+    VG_CHECK(res.contains("message"));
+    VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), TimerRuleJson(0));
+    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_rule_config.json"))), TimerRuleJson(0));
+    CompleteCurrent(*f.ctx, WriteEvent::Status::Completed);
+    CompleteCurrent(*f.ctx, WriteEvent::Status::Completed);
+    f.evaluate();
+    events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_TIMER);
+
+    // Simplify the actions first, then ALWAYS_ON; from there the limit applies to the record configuration.
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
+    VG_CHECK_EQ(f.postRecordRuleConfig(always), 0);
+    VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), always);
+    VG_CHECK_EQ(f.postRecordConfig(photo_video), kEndpointErrorBase + EINVAL);
+    VG_CHECK_EQ(f.postRecordConfig(WithActions(RecordJson(true, "MP4", 5000), false, true, true)),
+        kEndpointErrorBase + EINVAL); // Sound
+    VG_CHECK_EQ(f.postRecordConfig(rule_only), kEndpointErrorBase + EINVAL);
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(false, "MP4", 5000)), 0); // rules off, one channel armed
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(false, nullptr, 0)), 0);  // the first-start state
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "RAW", 2000)), 0);
+    VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(true, "RAW", 2000));
+
+    // No rule selected: no limit; selecting ALWAYS_ON afterwards is checked against what was committed.
+    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("")), 0);
+    VG_CHECK_EQ(f.postRecordConfig(sound_only), 0);
+    VG_CHECK_EQ(f.postRecordRuleConfig(always), kEndpointErrorBase + EINVAL);
+    VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson(""));
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(false, nullptr, 0)), 0);
+    VG_CHECK_EQ(f.postRecordRuleConfig(always), 0);
+}
+
+VG_TEST_CASE(startup_fails_closed_when_the_stored_pair_violates_the_always_on_invariant)
+{
+    // docs/PLAN.md section 4.4: the pair is validated once both files are loaded. A violation keeps rules
+    // disabled like an unusable file, with both files left in place and both documents reported; a supporting
+    // rule, then the record configuration, recovers.
+    const auto everything = WithActions(RecordJson(true, "MP4", 5000), true, true, true);
+    {
+        Fixture f; // no rule file: the default ALWAYS_ON is selected
+        const std::string record = everything.dump();
+        WriteFile(f.file("record_config.json"), record);
+        f.start();
+        VG_CHECK(!f.ctx->record_rule_enabled.load());
+        VG_CHECK_EQ(f.endpoint->getRecordConfig(), WithActions(RecordJson(false, "MP4", 5000), true, true, true));
+        VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON"));
+        VG_CHECK_EQ(ReadFile(f.file("record_config.json")), record);
+        VG_CHECK(!std::filesystem::exists(f.file("record_rule_config.json")));
+        f.evaluate();
+        VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+        VG_CHECK_EQ(f.postRecordConfig(everything), kEndpointErrorBase + EINVAL); // ALWAYS_ON is still selected
+        VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0);
+        f.evaluate();
+        VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 }); // rules are still disabled
+        VG_CHECK_EQ(f.postRecordConfig(everything), 0);
+        f.evaluate();
+        VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 1 });
+    }
+    {
+        Fixture f; // an explicit ALWAYS_ON selection over the same actions
+        const std::string record = everything.dump();
+        const std::string rule = SelectedRuleJson("ALWAYS_ON").dump();
+        WriteFile(f.file("record_config.json"), record);
+        WriteFile(f.file("record_rule_config.json"), rule);
+        f.start();
+        VG_CHECK(!f.ctx->record_rule_enabled.load());
+        VG_CHECK_EQ(ReadFile(f.file("record_config.json")), record);
+        VG_CHECK_EQ(ReadFile(f.file("record_rule_config.json")), rule);
+        VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON"));
+    }
+    {
+        Fixture f; // a supporting rule stored with the same actions: the pair is valid and runs
+        WriteFile(f.file("record_config.json"), everything.dump());
+        WriteFile(f.file("record_rule_config.json"), TimerRuleJson(0).dump());
+        f.start();
+        VG_CHECK(f.ctx->record_rule_enabled.load());
+        VG_CHECK_EQ(f.endpoint->getRecordConfig(), everything);
+        f.evaluate();
+        const auto events = RuleEventRecorder::take();
+        VG_REQUIRE(events.size() == size_t { 1 });
+        VG_CHECK(events[0].writer_created);
+        VG_CHECK(f.ctx->file_channels.photo.holdsTask() && f.ctx->file_channels.video.holdsTask());
+    }
+}
+
+VG_TEST_CASE(concurrent_posts_cannot_bypass_the_always_on_invariant)
+{
+    // Matrix C3: one thread alternates the actions between one channel and two, the other alternates the
+    // selection between TIMER and ALWAYS_ON. Every POST is applied or rejected whole under the commit mutex,
+    // so the committed pair satisfies the invariant whenever ALWAYS_ON is selected, and each stored file is the
+    // committed document. The codes are collected per thread: the harness is not for two threads.
+    Fixture f;
+    f.start();
+    const auto one = RecordJson(true, "MP4", 5000);
+    const auto two = WithActions(one, true, true, false);
+    VG_CHECK_EQ(f.postRecordConfig(one), 0);
+    constexpr int kRounds = 100;
+    std::vector<int> action_codes, selection_codes;
+    std::thread actions([&] {
+        for (int i = 0; i < kRounds; ++i)
+            action_codes.push_back(f.postRecordConfig(i % 2 ? one : two));
+    });
+    std::thread selection([&] {
+        for (int i = 0; i < kRounds; ++i)
+            selection_codes.push_back(f.postRecordRuleConfig(i % 2 ? TimerRuleJson(0) : SelectedRuleJson("ALWAYS_ON")));
+    });
+    actions.join();
+    selection.join();
+    for (const auto &codes: { action_codes, selection_codes })
+    {
+        VG_CHECK_EQ(codes.size(), size_t { kRounds });
+        for (const int code: codes)
+            VG_CHECK(code == 0 || code == kEndpointErrorBase + EINVAL);
+    }
+    const auto record = f.endpoint->getRecordConfig();
+    const auto rule = f.endpoint->getRecordRuleConfig();
+    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_config.json"))), record);
+    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_rule_config.json"))), rule);
+    if (rule == SelectedRuleJson("ALWAYS_ON"))
+        VG_CHECK(RecordConfig(record, *f.ctx).satisfiesAlwaysOnInvariant());
+    else
+        VG_CHECK_EQ(rule, TimerRuleJson(0));
+}
+
+VG_TEST_CASE(activation_without_a_file_action_needs_no_storage_and_reports_the_owner)
+{
+    // Rule-only and Sound-only configurations (docs/PLAN.md section 5.2): the storage precheck applies only
+    // while a file action is enabled, the dispatch reports the owner without file acceptance, and nothing is
+    // left pending. Sound has no callback in this fixture, so its trigger is unavailable.
+    Fixture f;
+    f.start();
+    f.slot->close(); // no Slot at all
+    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0);
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, nullptr, 0)), 0); // rule-only
+    VG_CHECK_EQ(f.activateHTTP(), 0);
+    auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_HTTP);
+    VG_CHECK(!events[0].writer_created);
+    VG_CHECK_EQ(f.activateHTTP(), 0); // nothing is pending: the next activation proceeds
+    VG_CHECK_EQ(RuleEventRecorder::take().size(), size_t { 1 });
+    const auto info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), true);
+    VG_CHECK(info.at("dLastRuleEvent").is_null());
+
+    VG_CHECK_EQ(f.postRecordConfig(WithActions(RecordJson(true, nullptr, 0), false, false, true)), 0); // Sound-only
+    VG_CHECK_EQ(f.activateHTTP(), 0);
+    events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(!events[0].writer_created);
+    VG_CHECK(f.ctx->sound_executor.state() == Context::SoundActionExecutor::State::Idle); // unavailable
+
+    // A file action makes storage a precondition again.
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
+    VG_CHECK_EQ(f.activateHTTP(), kEndpointErrorBase + EBUSY);
+    VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+    f.slot->open();
+    VG_CHECK_EQ(f.activateHTTP(), 0);
+    VG_CHECK_EQ(RuleEventRecorder::take().size(), size_t { 1 });
 }
 
 VG_TEST_CASE(http_activation_reports_busy_and_gate_errors)

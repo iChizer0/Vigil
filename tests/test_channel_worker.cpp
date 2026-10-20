@@ -156,7 +156,7 @@ struct Fixture
         publish(video ? nullptr : settings, video ? settings : nullptr);
     }
 
-    // Publishes a snapshot with both channels enabled, which no configuration can do before Phase 4D.
+    // Publishes a snapshot with both channels enabled, as a multi-action configuration does.
     void enableBoth(std::chrono::milliseconds photo_interval, std::chrono::milliseconds video_interval)
     {
         publish(settingsOf(CaptureType::Image, photo_interval), settingsOf(CaptureType::Video, video_interval));
@@ -632,6 +632,10 @@ VG_TEST_CASE(each_worker_serves_only_its_own_channel_with_its_own_budget_and_fai
     VG_CHECK_EQ(f.slot.publications[2].in_flight, photo_bytes);
     VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
     VG_CHECK_EQ(f.slot.failure_marks.load(), 0);
+    // Two FILE publications for one RULE owner, each carrying its UID (docs/PLAN.md section 6.2).
+    VG_CHECK(photo_task->owner == video_task->owner);
+    VG_CHECK_EQ(f.slot.publications[1].event->owner_uid, video_task->owner->uid);
+    VG_CHECK_EQ(f.slot.publications[2].event->owner_uid, video_task->owner->uid);
 
     // A failing capture reaches the Photo worker's limit; the Video worker's count is its own, so it goes on.
     f.media.capture_result = EIO;
