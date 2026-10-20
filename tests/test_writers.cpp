@@ -127,19 +127,22 @@ VG_TEST_CASE(video_writer_writes_from_the_first_key_frame_and_finishes_on_the_ne
 
 VG_TEST_CASE(video_writer_interruption_finishes_the_sink_exactly_once)
 {
-    // Interrupted while waiting for the first key frame (rules disabled, settings changed, or the Slot
-    // stopping): the sink is finished before the task reports, not left to the destructor.
+    // The gate closes while the writer waits for the first key frame (rules disabled, settings changed, or the
+    // Slot stopping): nothing was recorded, so no sink was created and the task is Canceled, not an empty file
+    // (Interrupted with an empty sink until 2026-10-20, Phase 5A-1).
     {
         Fixture f;
         f.push(false);
         f.media.stop_after_continue_checks = 1;
         {
             auto writer = f.video();
-            VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Interrupted);
+            VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Canceled);
+            VG_CHECK_EQ(f.media.creates, 0);
             VG_CHECK_EQ(f.media.video_frames, 0);
-            VG_CHECK_EQ(f.media.finishes, 1);
+            VG_CHECK_EQ(f.media.finishes, 0);
+            VG_CHECK(f.media.queue.empty()); // the frames before a key frame are dropped as they are seen
         }
-        VG_CHECK_EQ(f.media.finishes, 1);
+        VG_CHECK_EQ(f.media.finishes, 0);
         VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
     }
     // The gate is already closed when the task starts: no sink is created, and Canceled publishes nothing.
@@ -186,11 +189,103 @@ VG_TEST_CASE(video_writer_interruption_finishes_the_sink_exactly_once)
     }
 }
 
+VG_TEST_CASE(video_writer_bounds_its_waits_for_key_frames_and_input)
+{
+    // docs/PLAN.md section 8.2 (Phase 5A-1): the waits for the first key frame, for the closing key frame, and
+    // for any frame once the clip started are bounded (section 13: kVideoKeyFrameWait, kVideoInputLossWait;
+    // injected here), and each outcome is defined.
+    const VideoWriter<FakeAdapter>::WaitBounds bounds { std::chrono::milliseconds(60), std::chrono::milliseconds(60) };
+    // No key frame within the wait: nothing is recorded, the task is Canceled, and no file exists.
+    {
+        Fixture f;
+        f.push(false);
+        f.push(false);
+        auto writer = f.video();
+        writer->setWaitBounds(bounds);
+        const auto before = std::chrono::steady_clock::now();
+        VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Canceled);
+        VG_CHECK(std::chrono::steady_clock::now() - before >= bounds.key_frame);
+        VG_CHECK_EQ(f.media.creates, 0);
+        VG_CHECK_EQ(f.media.finishes, 0);
+        VG_CHECK(f.media.queue.empty());
+    }
+    // The clip ends (here the adapter asks) before any key frame: Canceled, no empty file (Completed with an
+    // empty file until 2026-10-20).
+    {
+        Fixture f;
+        f.push(false);
+        f.media.finish_after_frames = 0;
+        auto writer = f.video();
+        writer->setWaitBounds(bounds);
+        VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Canceled);
+        VG_CHECK_EQ(f.media.creates, 0);
+    }
+    // Input loss after the start: the clip is finished with what was written, as Interrupted.
+    {
+        Fixture f;
+        f.push(true);
+        auto writer = f.video();
+        writer->setWaitBounds(bounds);
+        const auto before = std::chrono::steady_clock::now();
+        VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Interrupted);
+        VG_CHECK(std::chrono::steady_clock::now() - before >= bounds.input_loss);
+        VG_CHECK_EQ(f.media.creates, 1);
+        VG_CHECK_EQ(f.media.video_frames, 1);
+        VG_CHECK_EQ(f.media.finishes, 1);
+        VG_CHECK_EQ(f.media.thumbnails, 1);
+    }
+    // The clip is finished but no closing key frame arrives: it ends at the wait, Completed, with the frames
+    // written meanwhile; the next frame stays queued.
+    {
+        Fixture f;
+        f.push(true);
+        f.push(false);
+        f.push(false);
+        f.media.finish_after_frames = 1;
+        auto writer = f.video();
+        writer->setWaitBounds(bounds);
+        const auto before = std::chrono::steady_clock::now();
+        VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Completed);
+        VG_CHECK(std::chrono::steady_clock::now() - before >= bounds.key_frame);
+        VG_CHECK_EQ(f.media.video_frames, 3);
+        VG_CHECK_EQ(f.media.finishes, 1);
+        VG_CHECK(f.media.queue.empty());
+    }
+    // The closing key frame arrives: the clip ends on it at once and leaves it queued for the next clip.
+    {
+        Fixture f;
+        f.push(true);
+        f.push(false);
+        f.push(true);
+        f.media.finish_after_frames = 1;
+        auto writer = f.video();
+        writer->setWaitBounds(bounds);
+        const auto before = std::chrono::steady_clock::now();
+        VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Completed);
+        VG_CHECK(std::chrono::steady_clock::now() - before < bounds.key_frame);
+        VG_CHECK_EQ(f.media.video_frames, 2);
+        VG_REQUIRE(f.media.queue.size() == size_t { 1 });
+        VG_CHECK(f.media.queue.front().isKeyFrame());
+    }
+    // The gate breaks a wait before its bound: the production bounds stay in place here.
+    {
+        Fixture f;
+        f.push(false);
+        f.media.stop_after_continue_checks = 3;
+        auto writer = f.video();
+        const auto before = std::chrono::steady_clock::now();
+        VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Canceled);
+        VG_CHECK(std::chrono::steady_clock::now() - before < std::chrono::seconds(1));
+        VG_CHECK_EQ(f.media.creates, 0);
+    }
+}
+
 VG_TEST_CASE(video_writer_failures_keep_the_activity_count_balanced)
 {
     // The sink cannot be created: the task is Failed, nothing is finished, nothing stays counted.
     {
         Fixture f;
+        f.push(true);
         f.media.create_result = EIO;
         {
             auto writer = f.video();
@@ -300,16 +395,18 @@ VG_TEST_CASE(writers_hold_one_media_operation_from_construction_to_destruction)
         VG_CHECK_EQ(f.media.finishes, 0);
         VG_CHECK_EQ(f.media.queue.size(), size_t { 1 }); // nothing was consumed
     }
-    // Media paused after admission (here from inside the create callback): the task is interrupted at its next
-    // check, the sink it created is finished, and the operation is counted until the writer is destroyed.
+    // Media paused after admission (here from inside the create callback, which runs with the first key frame in
+    // hand): the task is interrupted at its next check, the sink it created is finished, and the operation is
+    // counted until the writer is destroyed.
     {
         Fixture f;
+        f.push(true);
         f.media.pause_on_create = true;
         {
             auto writer = f.video();
             VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Interrupted);
             VG_CHECK_EQ(f.media.creates, 1);
-            VG_CHECK_EQ(f.media.video_frames, 0);
+            VG_CHECK_EQ(f.media.video_frames, 1);
             VG_CHECK_EQ(f.media.finishes, 1);
             VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 1 });
         }
