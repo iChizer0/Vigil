@@ -75,6 +75,20 @@ The C API reports these events best-effort through its rule and file callbacks: 
 callback, a file callback may precede the rule callback of its event, and a rule event is followed by zero, one, or two
 file callbacks; the contract is stated in `include/vigil_ctypes.h`.
 
+Capability limits: Vigil owns the rules, the admission, and the file lifecycle, not the devices behind the callbacks.
+A file callback that keeps failing stops recording on the storage slot: each file channel's worker counts its failed
+tasks (a failing create, write, finish, or capture callback, or a writer that could not be built), holds the channel
+through its interval plus a 3-second cooldown after each, and after 10 failed tasks without a completed one in
+between takes the slot to `ERROR` (Storage Status), which stops the other channel and continuous recording too until
+the slot is disabled and enabled again (reselect it through the storage configuration after selecting another, eject
+and reinsert a removable device, or restart the service); a persistently failing Photo callback therefore ends Video
+recording on that slot as well.
+Sound plays only through the host's callback, which must return in bounded time; Vigil queues no playback and retries
+nothing. The timing in this document (the buffer period, the clip length and its key frame and input loss waits, the
+action intervals, and the 10 ms rule evaluation and 50 ms worker probe periods behind them) is the host logic's
+target, verified with fake callbacks on a development host: real-device latency, callback duration, and the gap
+between clips depend on the host's media pipeline and storage and are the integration's to measure.
+
 ### Rule Info
 
 Get the information about the rule system.

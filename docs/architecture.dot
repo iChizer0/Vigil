@@ -99,7 +99,7 @@ digraph G {
       label="HAL Callbacks (vg_config_t)";
       style=rounded;
       color=gray50;
-      hal_media [label="Media HAL\nVideo/Audio File I/O\nImage Capture", shape=box];
+      hal_media [label="Media HAL\nVideo/Audio File I/O\nImage Capture\nSound Playback\nmax_bytes_estimate_cb", shape=box];
       hal_gpio [label="GPIO HAL\nPin Discovery\nAcquire/Release\nLevel/Event Sync", shape=box];
       hal_storage [label="Storage HAL\nMount/Unmount Events\nDevice Filtering", shape=box];
       hal_basic [label="Basic HAL\nLogging\nRule/File Events\nConfig Directory", shape=box];
@@ -133,7 +133,7 @@ digraph G {
     style=rounded;
     color=brown;
 
-    ctx [label="Context\nC API Config Reference\ntick() State Update", shape=box, style=filled, fillcolor=lightyellow];
+    ctx [label="Context\nC API Config Copy (strings borrowed)\ntick() State Update\ndispatchRuleEvent() / dispatchContinuous()", shape=box, style=filled, fillcolor=lightyellow];
 
     subgraph cluster_ctx_control {
       label="Control Flags (Atomic)";
@@ -150,7 +150,7 @@ digraph G {
       label="Queues & Buffers";
       style="rounded,dashed";
       color=gray60;
-      infer_q [label="Inference Queue\nstd::queue<InferenceResult>\nBounded Pop-on-Full", shape=note];
+      infer_q [label="Inference Queue\nstd::deque<InferenceResult>\nCapacity 60, Oldest Dropped\nCleared While Rules Disabled", shape=note];
       slot_media_buf [label="Slot Media Buffer\nRule-Based + Continuous Recording\nSorted by PTS\nKeyframe-Aware Drop\nkeepFrom(boundary)", shape=note];
       capture_media_buf [label="Capture Media Buffer\nManual Capture\nSorted by PTS\nKeyframe-Aware Drop", shape=note];
     }
@@ -164,6 +164,8 @@ digraph G {
       shared_rule_evt [label="FileChannels\nPhoto / Video FileChannel\nCurrent / Last FileTask\n(Kind, Owner, Settings, Revision, Sequence)\nTriggered / Continuous (UID 0)", shape=note];
       shared_writer_cfg [label="SharedActionSettings\nGlobal + Per-Channel Revisions\nshared_ptr<const ActionSettings>\n(Immutable, Factory Created)\nWaterMarks", shape=note];
       slot_admission [label="SlotAdmissionRegistry\nEnabled Slot: Ready / tryAdmit\nRegistration (Task Identity)", shape=note];
+      last_owner [label="LastDispatchedOwner\nshared_ptr<EventOwner>\nSet on Every dispatchRuleEvent()", shape=note];
+      budgets [label="InFlightBudgets\nPer-Filesystem Reservations\nAutomatic + Manual Capture", shape=note];
     }
   }
 
@@ -175,7 +177,7 @@ digraph G {
     style=rounded;
     color=purple;
 
-    rule_thread [label="Rule Thread (10ms eval)\nContext tick() Invocation\nSchedule Filter Gate\nPrecedence-Ordered Evaluation\nWrite Event Generation", shape=box, style=filled, fillcolor=plum];
+    rule_thread [label="Rule Thread (10ms eval)\nContext tick() Invocation\nSchedule Gate Publish\nContinuous Admission (every tick)\nSelected Rule or Direct EVENT\ndispatchRuleEvent()", shape=box, style=filled, fillcolor=plum];
 
     subgraph cluster_rule_base {
       label="BaseRule Framework";
@@ -193,8 +195,10 @@ digraph G {
       rule_infer_set [label="InferenceRuleSet (P=0)\nMulti-Rule Container\nFirst-Match Activation", shape=box];
       rule_timer [label="TimerRule (P=20)\nInterval-Based Trigger", shape=box];
       rule_gpio [label="GPIORule (P=10)\nLevel/Event Detection\nDebounce Support", shape=box];
-      rule_tty [label="TTYRule (P=0)\nUnix Socket Listener\nBoyer-Moore Search\nCommand Pattern Match", shape=box];
-      rule_http [label="HTTPRule (P=0)\nManual API Activation\ntryActivate() Method", shape=box];
+      rule_tty [label="TTYRule (P=0)\nUnix Socket Client (non-blocking)\nKnuth-Morris-Pratt Stream Match\nNon-overlapping Occurrences", shape=box];
+      rule_http [label="HTTPRule (P=0)\nManual API Activation\nActivate() on the Request Thread\n(no rule lock held)", shape=box];
+      rule_sed [label="SoundEventRule / SED (P=0)\nAcousticsLab UDS Client (poll thread)\nHead / Class / Confidence Filter\nConsecutive Window\nLatched Activation\nReconnect Backoff 100ms→5s", shape=box];
+      rule_always_on [label="AlwaysOnRule (P=0)\nPaces the Enabled File Channel\nby its iIntervalMs\nWaits on the Channel Hold\nIdle While Paused / Any Media Operation Active", shape=box];
       rule_schedule [label="ScheduleRule (P=30)\nWeekday/Time Range\nActive Window Filter\n(Gate, not Trigger)", shape=box];
     }
   }
@@ -212,9 +216,9 @@ digraph G {
       style="rounded,dashed";
       color=gray60;
 
-      writer_base [label="AdaptableWriter<T>\nCRTP Base Class\nshared_ptr<FileWriterSettings>\nshared_ptr<WriteEvent>\nMedia Pause Check", shape=box];
-      slot_adapter [label="SlotAdaptedWriter<T>\nslot_media_buffer Access\nCache Path Generation\nSettings Revision Check\nWriter Count Tracking", shape=box];
-      capture_adapter [label="CaptureAdaptedWriter<T>\ncapture_media_buffer Access\nDirect Output Path\nSpace Check (1min interval)\nCaptureEvent Lifecycle", shape=box];
+      writer_base [label="AdaptableWriter<T>\nCRTP Base Class\nshared_ptr<FileWriterSettings>\nshared_ptr<WriteEvent>\nMedia Operation (barrier)\nPause / Gate Checks", shape=box];
+      slot_adapter [label="SlotAdaptedWriter<T>\nslot_media_buffer Access\nCache Path Generation\nChannel Revision Check\ntakePublication() + Thumbnail\nWriter Count Tracking", shape=box];
+      capture_adapter [label="CaptureAdaptedWriter<T>\ncapture_media_buffer Access\nDirect Output Path\nBudget Reservation + Space Check (60s)\nCaptureEvent Lifecycle", shape=box];
     }
 
     subgraph cluster_writer_impl {
@@ -223,10 +227,12 @@ digraph G {
       color=gray60;
 
       image_writer [label="ImageWriter<T>\nSingle-Shot Capture\nimage_capture_cb", shape=box];
-      video_writer [label="VideoWriter<T>\nKeyframe Clip Boundaries\nClip Length Control\nFrame-by-Frame Write\nvideo_file_*_cb", shape=box];
+      video_writer [label="VideoWriter<T>\nKeyframe Clip Boundaries\nClip Length Control\nBounded Key Frame / Input Loss Waits\nFrame-by-Frame Write\nvideo_file_*_cb", shape=box];
     }
 
-    writer_thread [label="Slot Worker Threads (Photo, Video)\nFileChannelWorker<Slot> per Channel (50ms)\nReady / Pause Probes\nClaim (own Slot), Write, Publish, Hold, Complete", shape=box, style=filled, fillcolor=lightsalmon];
+    writer_thread [label="Slot Worker Threads (Photo, Video)\nFileChannelWorker<Slot> per Channel (50ms)\nReady / Pause Probes\nClaim (own Slot), Write, Publish, Hold, Complete\n3s Failure Cooldown, 10 Without a Completed Task → markFailed()", shape=box, style=filled, fillcolor=lightsalmon];
+
+    sound_thread [label="Sound Worker Thread\nSoundActionExecutor\nIdle / Pending / Playing / Stopping\nNo Queue, No Retry\nGate Recheck under a Media Operation", shape=box, style=filled, fillcolor=lightsalmon];
 
     capture_thread [label="Capture Thread (50ms)\nCaptureEvent Check\nSpace Check\nMedia Pause Check\nDirect File Write", shape=box, style=filled, fillcolor=lightsalmon];
   }
@@ -261,7 +267,7 @@ digraph G {
         entry_index [label="EntryIndex\nLock-Free Atomic Size\nRevision Tracking\nCAS-Based Updates", shape=note];
         write_stats [label="WriteStats\nHourly Bytes/Minute\nEstimated Write Rate", shape=box];
         fsck_util [label="FSCK Utility\nExt/FAT Dirty Probe\nfsck -p Repair\nInterruptible Execute", shape=box];
-        slot_recovery [label="Manager Recovery\nCumulative Error Counter\nMax Attempts→Error\nBackoff Retry", shape=box];
+        slot_recovery [label="Manager Recovery\nCumulative Error Counter\nMax Attempts or markFailed()→Error\nBackoff Retry", shape=box];
         slot_writer [label="Slot::publish\nCache→Target Move\nDirect Filesystem Ops", shape=box];
         relay [label="Relay\nUUID Symlink Export\nTimeout Auto-Disable (5m)\nNginx Integration", shape=box];
       }
@@ -322,6 +328,7 @@ digraph G {
   record_ep -> slot_admission [color=blue, xlabel="HTTP precheck"];
   record_ep -> ctrl_schedule_open [color=blue, xlabel="HTTP precheck"];
   rule_info_ep -> shared_rule_evt [color=blue, xlabel="latest()"];
+  rule_info_ep -> last_owner [color=blue, xlabel="get()"];
   rule_info_ep -> ctrl_rule_enabled [color=blue, xlabel="read"];
   rule_info_ep -> ctrl_media_paused [color=blue, xlabel="read"];
   rule_info_ep -> slot_admission [color=blue, xlabel="record slot status"];
@@ -341,6 +348,7 @@ digraph G {
 
   image_writer -> hal_media [color=green, style=dashed, xlabel="image_capture_cb", minlen=2];
   video_writer -> hal_media [color=green, style=dashed, xlabel="video_file_*_cb"];
+  sound_thread -> hal_media [color=green, style=dashed, xlabel="sound_play_cb"];
   rule_gpio -> hal_gpio [color=green, style=dashed, xlabel="acquire/release", minlen=2];
   storage -> hal_storage [color=green, style=dashed, xlabel="mount/unmount", minlen=2];
   ctx -> hal_basic [color=green, style=dashed, xlabel="log/events"];
@@ -360,6 +368,10 @@ digraph G {
   infer_q -> shared_infer_result [color=orange, style=dashed, xlabel="pop & move", weight=2];
   rule_thread -> ctx [color=blue, xlabel="tick()", weight=3];
   rule_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="dispatchContinuous() / dispatchRuleEvent()"];
+  rule_http -> shared_rule_evt [color=orange, style=dashed, xlabel="dispatchRuleEvent() (request thread)"];
+  // The side effects of every dispatchRuleEvent(), from the rule thread and the request thread alike
+  ctx -> last_owner [color=orange, style=dashed, xlabel="dispatchRuleEvent(): set()"];
+  ctx -> sound_thread [color=orange, style=dashed, xlabel="dispatchRuleEvent(): tryTrigger()"];
 
   // ============================================================
   // EDGES: Rule Framework Relationships
@@ -372,6 +384,8 @@ digraph G {
   rule_base -> rule_tty [color=gray, style=dotted];
   rule_base -> rule_http [color=gray, style=dotted];
   rule_base -> rule_schedule [color=gray, style=dotted];
+  rule_base -> rule_sed [color=gray, style=dotted];
+  rule_base -> rule_always_on [color=gray, style=dotted];
   rule_infer_set -> rule_infer [color=blue, xlabel="contains"];
 
   // Rule thread evaluates rules
@@ -380,11 +394,16 @@ digraph G {
   rule_thread -> rule_timer [color=orange, style=dashed];
   rule_thread -> rule_gpio [color=orange, style=dashed];
   rule_thread -> rule_tty [color=orange, style=dashed];
+  rule_thread -> rule_sed [color=orange, style=dashed, xlabel="latched flag"];
+  rule_thread -> rule_always_on [color=orange, style=dashed];
   rule_thread -> rule_schedule [color=orange, style=dashed, xlabel="filter gate"];
 
   // Rules read shared state
   rule_timer -> shared_time [color=blue, xlabel="steadyTime()"];
   rule_schedule -> shared_time [color=blue, xlabel="localTime()"];
+  rule_always_on -> shared_time [color=blue, xlabel="steadyTime()"];
+  rule_always_on -> shared_writer_cfg [color=blue, xlabel="interval"];
+  rule_always_on -> shared_rule_evt [color=blue, xlabel="holdsTask()"];
   shared_infer_result -> rule_infer [color=orange, style=dashed];
   shared_infer_result -> rule_infer_set [color=orange, style=dashed];
 
@@ -414,8 +433,9 @@ digraph G {
   writer_thread -> image_writer [color=orange, style=dashed];
   writer_thread -> video_writer [color=orange, style=dashed, weight=2];
 
-  // VideoWriter tracks active writers count
-  video_writer -> ctrl_writers_active [color=blue, xlabel="inc/dec", minlen=2];
+  // Every writer and the Sound worker hold one admitted media operation while they call the HAL
+  writer_base -> ctrl_writers_active [color=blue, xlabel="enter/leave", minlen=2];
+  sound_thread -> ctrl_writers_active [color=blue, xlabel="enter/leave"];
 
   // ============================================================
   // EDGES: Capture Endpoint Relationships
@@ -425,6 +445,7 @@ digraph G {
   capture_start_ep -> capture_media_buf [color=blue, xlabel="clearToLastKeyFrame()"];
   capture_start_ep -> capture_thread [color=blue, xlabel="owns"];
   capture_thread -> capture_adapter [color=orange, style=dashed, xlabel="poll & write"];
+  capture_adapter -> budgets [color=blue, xlabel="reserve"];
 
   // ============================================================
   // EDGES: Writer → Slot Flow
@@ -443,6 +464,7 @@ digraph G {
   slot_ops -> slot_quota [color=blue, xlabel="quota check"];
   slot_ops -> fsck_util [color=blue, xlabel="dirty check/repair"];
   slot_ops -> slot_admission [color=blue, xlabel="open/close admission"];
+  slot_ops -> budgets [color=blue, xlabel="tryAdmit reserve"];
   slot_quota -> indexer [color=blue, xlabel="size() query", weight=2];
   slot_quota -> slot_rotating [color=blue, xlabel="set flag"];
   indexer -> write_stats [color=blue, weight=2];
@@ -451,8 +473,9 @@ digraph G {
   fsck_util -> fs [color=blue, xlabel="fsck -p", constraint=false];
   slot_quota -> fs [color=blue, xlabel="remove_all/recycle", constraint=false];
 
-  // Slot owns both worker threads
+  // Slot owns both worker threads; a worker at its failure limit takes the Slot to Error
   slot_ops -> writer_thread [color=blue, xlabel="spawn", weight=2];
+  writer_thread -> slot_recovery [color=blue, xlabel="markFailed()", constraint=false];
   slot_ops -> slot_writer [color=blue, weight=2];
 
   // Storage → Filesystem
