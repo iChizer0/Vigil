@@ -23,6 +23,7 @@ struct RecordedRuleEvent
     vg_rule_type_e type;
     std::string id;
     int64_t timestamp;
+    int64_t dispatch_timestamp;
     uint64_t uid;
     std::string source_id;
     std::string source_delivery;
@@ -44,6 +45,7 @@ public:
             .type = evt->type,
             .id = evt->id ? evt->id : "",
             .timestamp = evt->timestamp,
+            .dispatch_timestamp = evt->dispatch_timestamp,
             .uid = evt->uid,
             .source_id = evt->source_id ? evt->source_id : "",
             .source_delivery = evt->source_delivery ? evt->source_delivery : "",

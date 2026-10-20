@@ -4,7 +4,7 @@
 #ifdef VG_CTYPES_VERSION
 #error "Duplicate definition of VG_CTYPES_VERSION"
 #else
-#define VG_CTYPES_VERSION "2026.09.15"
+#define VG_CTYPES_VERSION "2026.10.19"
 #endif
 
 #include <stdbool.h>
@@ -45,10 +45,14 @@ typedef struct vg_audio_frame_t
 } vg_audio_frame_t;
 
 /**
- * @brief Callback surface for media storage and capture operations.
+ * @brief Callback surface for media storage, capture, and playback operations.
  *
- * Allows the host application to provide file lifecycle hooks and image
- * capture handling for video/audio recording initiated by Vigil.
+ * Allows the host application to provide file lifecycle hooks, image capture handling, and sound playback for
+ * the recordings and actions initiated by Vigil.
+ *
+ * @note Layout: sound_play_cb was appended in 2026.10.19. Growing this structure shifts the fields that follow it
+ * in vg_config_t, and the initialization API has no size or version negotiation, so the library and every caller
+ * must be built against the same headers; an older binary cannot be mixed with the new layout.
  */
 typedef struct vg_config_media_t
 {
@@ -71,7 +75,11 @@ typedef struct vg_config_media_t
     vg_sta_e (*thumbnail_generate_cb)(const void *src_data, size_t src_data_len, const char *src_format,
         const char *thumb_filepath, const char *thumb_format, int max_wh, void *user_data); /**< Generates a thumbnail
                          image from the source image data and writes to file */
-
+    vg_sta_e (*sound_play_cb)(void *user_data); /**< Optional (null means the Sound action is unavailable). Plays the
+                         configured sound once and returns when playback and its cleanup are finished; 0 on success,
+                         otherwise an error that is logged and not retried. Called from Vigil's sound worker, outside
+                         internal locks, at most once at a time. It must complete in bounded time, also while the
+                         host is shutting down: Vigil cannot interrupt it and waits for it before joining. */
 } vg_config_media_t;
 
 // - MARK: Config Enums and Types
@@ -91,16 +99,19 @@ typedef enum vg_rule_type_e {
 
 typedef struct vg_rule_evt_t
 {
-    vg_rule_type_e type; /**< Type of the rule that owns the event; UNKNOWN for a direct EVENT input. */
-    const char *id;      /**< The condition: the inference member ID, the GPIO signal, or the TTY command; empty
-                            otherwise. Internal managed string, null terminated, do not free. */
-    int64_t timestamp;   /**< Event time in Unix milliseconds: the input's timestamp for FRAME and direct EVENT
-                            owners, otherwise when the condition was observed. */
-    uint64_t uid;        /**< Unique identifier for the rule event, can be used for event correlation. */
+    vg_rule_type_e type;         /**< Type of the rule that owns the event; UNKNOWN for a direct EVENT input. */
+    const char *id;              /**< The condition: the inference member ID, the GPIO signal, or the TTY command; empty
+                                    otherwise. Internal managed string, null terminated, do not free. */
+    int64_t timestamp;           /**< Event time in Unix milliseconds: the input's timestamp for FRAME and direct EVENT
+                                    owners, otherwise when the condition was observed. */
+    uint64_t uid;                /**< Unique identifier for the rule event, can be used for event correlation. */
     const char *source_id;       /**< The inference source for FRAME and direct EVENT owners, the pin name for GPIO, the
                                     TTY name for TTY; empty otherwise (never null). */
     const char *source_delivery; /**< FRAME for inference frame owners, EVENT for every other owner (never empty). */
-    bool writer_created;         /**< Indicates whether a new recording writer was created. */
+    bool writer_created;         /**< At least one file task was accepted for this event; not whether a file was
+                                    written, and nothing about Sound. */
+    int64_t dispatch_timestamp;  /**< When Vigil created the event, in Unix milliseconds; equals timestamp for owners
+                                    that observe their condition themselves. Appended in 2026.10.19. */
 } vg_rule_evt_t;
 
 typedef enum vg_file_evt_op_type_e {
