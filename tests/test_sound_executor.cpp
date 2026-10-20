@@ -23,6 +23,7 @@
 
 #include "check.hpp"
 #include "fake_config.hpp"
+#include "fake_slot.hpp"
 
 namespace vigil {
 
@@ -106,8 +107,10 @@ struct Fixture
 {
     FakeSound sound;
     Context ctx;
+    FakeSlotAdmission slot; // registered and ready: the dispatch case needs a usable Slot for its file task
 
-    explicit Fixture(bool with_callback = true, bool run_worker = false) : ctx(Config(sound, with_callback), run_worker)
+    explicit Fixture(bool with_callback = true, bool run_worker = false)
+        : ctx(Config(sound, with_callback), run_worker), slot(ctx)
     {
         sound.ctx = &ctx;
         ErrorLog::playback_failures = 0;

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -20,6 +21,7 @@
 
 #include "check.hpp"
 #include "fake_config.hpp"
+#include "fake_slot.hpp"
 
 using namespace vigil;
 using namespace vigil::types;
@@ -50,12 +52,14 @@ void Publish(Context &ctx, std::shared_ptr<FileWriterSettings> photo, std::share
 struct Fixture
 {
     Context ctx;
+    FakeSlotAdmission slot; // registered and ready: admission needs a usable Slot (docs/PLAN.md section 8.1)
 
-    // With the Video channel enabled: a dispatch accepts into enabled channels only, and the system enables one
-    // whenever rules are enabled (docs/PLAN.md section 4.1).
-    Fixture() : ctx(MakeFakeConfig())
+    // With rules enabled and the Video channel enabled: a dispatch accepts into enabled channels only, and the
+    // system enables one whenever rules are enabled (docs/PLAN.md section 4.1).
+    Fixture() : ctx(MakeFakeConfig()), slot(ctx)
     {
         RuleEventRecorder::clear();
+        ctx.record_rule_enabled.store(true);
         Publish(ctx, nullptr, ChannelSettings(ctx, CaptureType::Video));
     }
 };
@@ -284,13 +288,16 @@ VG_TEST_CASE(claim_cancel_and_complete_are_identity_aware)
 {
     Fixture f;
     auto &video = f.ctx.file_channels.video;
-    VG_CHECK(video.claim() == nullptr); // nothing pending
+    const auto registration = f.slot.registration();
+    VG_CHECK(video.claim(registration) == nullptr); // nothing pending
     VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER)));
-    const auto a = video.claim();
+    VG_CHECK(video.claim(registration + 1) == nullptr); // another Slot's worker: not its task to run
+    VG_CHECK(video.current()->event->status.load() == WriteEvent::Status::Pending);
+    const auto a = video.claim(registration);
     VG_REQUIRE(a != nullptr);
     VG_CHECK(a->event->status.load() == WriteEvent::Status::Writing);
-    VG_CHECK(video.claim() == nullptr); // claimed once
-    video.cancelPending();              // a claimed task belongs to its worker
+    VG_CHECK(video.claim(registration) == nullptr); // claimed once
+    video.cancelPending();                          // a claimed task belongs to its worker
     VG_CHECK(video.current() == a);
     f.ctx.record_rule_enabled.store(false);
     f.ctx.tick(); // the disabled tick cancels only a pending task
@@ -299,6 +306,7 @@ VG_TEST_CASE(claim_cancel_and_complete_are_identity_aware)
     VG_CHECK(video.current() == nullptr);
     VG_CHECK(video.last() == a);
     VG_CHECK(a->event->status.load() == WriteEvent::Status::Interrupted);
+    f.ctx.record_rule_enabled.store(true); // the gate applies at admission (docs/PLAN.md section 8.1)
 
     // A newer task B is never touched by the stale completion of A.
     VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_HTTP)));
@@ -341,7 +349,7 @@ VG_TEST_CASE(channels_hold_tasks_independently_and_a_stale_task_never_touches_a_
     }
 
     // Completing the Video task leaves the Photo task held; completing Photo frees everything.
-    VG_CHECK(photo.claim() == a);
+    VG_CHECK(photo.claim(f.slot.registration()) == a);
     video.complete(b, WriteEvent::Status::Completed);
     VG_CHECK(video.current() == nullptr && photo.current() == a);
     VG_CHECK(f.ctx.file_channels.holdsTask());
@@ -403,12 +411,96 @@ VG_TEST_CASE(dispatch_accepts_into_every_enabled_channel_and_reports_either_acce
     f.ctx.file_channels.cancelPending();
     const auto loaded = f.ctx.action_settings.get();
     Publish(f.ctx, loaded.settings->photo, ChannelSettings(f.ctx, CaptureType::Video, std::chrono::milliseconds(1234)));
-    VG_CHECK(video.tryAccept(owner1, loaded.settings->video, loaded.video_revision) == nullptr);
-    VG_CHECK(photo.tryAccept(owner1, loaded.settings->photo, loaded.photo_revision) != nullptr);
+    VG_CHECK(video.tryAccept(owner1, loaded) == nullptr);
+    VG_CHECK(photo.tryAccept(owner1, loaded) != nullptr);
     VG_CHECK(video.current() == nullptr);
     VG_CHECK(f.ctx.dispatchRuleEvent(owner1)); // the current snapshot: Video accepts with the new settings
     VG_CHECK_EQ(video.current()->settings->interval.count(), 1234L);
     VG_CHECK(photo.current()->settings == loaded.settings->photo);
+}
+
+VG_TEST_CASE(admission_needs_a_usable_slot_with_headroom_and_a_rejected_owner_leaves_nothing_pending)
+{
+    // The deliberate change of docs/PLAN.md section 8.1: a file action is admitted at dispatch, on the registered
+    // Slot with its budget reserved, or rejected with nothing pending, so the next owner proceeds instead of
+    // waiting behind a pending event. The task binds the Slot it was admitted on: closing that Slot's admission
+    // retires it, and a reopened Slot has a new registration.
+    Fixture f;
+    auto &video = f.ctx.file_channels.video;
+    const auto task_bytes = f.ctx.action_settings.get().settings->video->watermarks.task_bytes;
+    const auto in_flight = [&] { return f.ctx.in_flight_budgets.inFlight(FakeSlotAdmission::kFilesystem); };
+
+    f.slot.ready = false; // no usable Slot: reported, nothing accepted
+    const auto owner1 = Owner(VG_RULE_TYPE_TIMER);
+    VG_CHECK(!f.ctx.dispatchRuleEvent(owner1));
+    VG_CHECK(!f.ctx.file_channels.holdsTask());
+    VG_CHECK(f.ctx.last_dispatched_owner.get() == owner1);
+    VG_CHECK_EQ(in_flight(), FileSize { 0 });
+    f.slot.ready = true;
+    f.slot.free_bytes = f.ctx.action_settings.get().settings->watermarks.critical_remain_bytes; // no headroom
+    VG_CHECK(!f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER)));
+    VG_CHECK(!f.ctx.file_channels.holdsTask());
+    VG_CHECK_EQ(in_flight(), FileSize { 0 });
+    {
+        const auto events = RuleEventRecorder::take();
+        VG_REQUIRE(events.size() == size_t { 2 });
+        VG_CHECK(!events[0].writer_created && !events[1].writer_created);
+        VG_CHECK_EQ(events[0].uid, owner1->uid);
+    }
+
+    f.slot.free_bytes = std::numeric_limits<FileSize>::max() / 2; // the next owner proceeds
+    const auto owner2 = Owner(VG_RULE_TYPE_TIMER);
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner2));
+    const auto task = video.current();
+    VG_REQUIRE(task != nullptr);
+    VG_CHECK(task->owner == owner2);
+    VG_CHECK_EQ(task->slot_registration, f.slot.registration());
+    VG_CHECK_EQ(task->reservation.bytes(), task_bytes); // reserved at acceptance, carried by the task
+    VG_CHECK_EQ(in_flight(), task_bytes);
+
+    const auto old_registration = f.slot.registration();
+    f.slot.close(); // the Slot is disabled: what it accepted and no worker claimed is retired, with its budget
+    VG_CHECK(video.current() == nullptr && video.last() == task);
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Canceled);
+    VG_CHECK_EQ(in_flight(), FileSize { 0 });
+    VG_CHECK(!f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER))); // no Slot registered
+    VG_CHECK(!f.ctx.file_channels.holdsTask());
+    f.slot.open();
+    VG_CHECK(f.slot.registration() > old_registration);
+    VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER)));
+    VG_CHECK_EQ(video.current()->slot_registration, f.slot.registration());
+    VG_CHECK(video.claim(old_registration) == nullptr); // the old Slot's worker cannot run it
+    VG_CHECK(video.claim(f.slot.registration()) != nullptr);
+}
+
+VG_TEST_CASE(admission_rejects_when_a_gate_closed_between_evaluation_and_dispatch)
+{
+    // The gates are read inside the admission section (docs/PLAN.md section 8.1): rules disabled, the schedule
+    // closed, or media paused since the caller evaluated them reject the file action, with the owner still
+    // reported and nothing pending.
+    Fixture f;
+    const auto rejected = [&] {
+        const auto owner = Owner(VG_RULE_TYPE_TIMER);
+        VG_CHECK(!f.ctx.dispatchRuleEvent(owner));
+        VG_CHECK(!f.ctx.file_channels.holdsTask());
+        VG_CHECK(f.ctx.last_dispatched_owner.get() == owner);
+        const auto events = RuleEventRecorder::take();
+        VG_REQUIRE(events.size() == size_t { 1 });
+        VG_CHECK(!events[0].writer_created);
+    };
+    f.ctx.record_rule_enabled.store(false);
+    rejected();
+    f.ctx.record_rule_enabled.store(true);
+    f.ctx.schedule_open.store(false);
+    rejected();
+    f.ctx.schedule_open.store(true);
+    f.ctx.media_barrier.pause(false);
+    rejected();
+    f.ctx.media_barrier.resume();
+    VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER))); // every gate open again
+    VG_CHECK(f.ctx.file_channels.holdsTask());
+    VG_CHECK_EQ(f.ctx.in_flight_budgets.inFlight(FakeSlotAdmission::kFilesystem),
+        f.ctx.action_settings.get().settings->watermarks.task_bytes);
 }
 
 VG_TEST_CASE(source_less_owners_report_event_delivery)
@@ -498,7 +590,7 @@ VG_TEST_CASE(always_on_waits_for_the_current_event_and_for_media)
         VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_HTTP)));
         const AlwaysOnRule rule(AlwaysOnRuleConfig {}, f.ctx);
         VG_CHECK(rule(f.ctx) == nullptr); // a pending task blocks it without consuming its interval
-        const auto task = f.ctx.file_channels.video.claim();
+        const auto task = f.ctx.file_channels.video.claim(f.slot.registration());
         VG_REQUIRE(task != nullptr);
         VG_CHECK(rule(f.ctx) == nullptr); // a running one too
         // The write finished: the worker holds the channel through the interval, and so does the rule.
@@ -517,6 +609,18 @@ VG_TEST_CASE(always_on_waits_for_the_current_event_and_for_media)
             VG_CHECK(rule(f.ctx) == nullptr);
         }
         VG_CHECK(rule(f.ctx) != nullptr);
+    }
+    {
+        // Without a usable Slot each interval's dispatch is rejected and reported, and the interval is consumed
+        // as before: the pacing is unchanged by admission at dispatch (docs/PLAN.md sections 4.4 and 8.1).
+        f.slot.ready = false;
+        const AlwaysOnRule rule(AlwaysOnRuleConfig {}, f.ctx);
+        const auto owner = rule(f.ctx);
+        VG_REQUIRE(owner != nullptr);
+        VG_CHECK(!f.ctx.dispatchRuleEvent(owner));
+        VG_CHECK(!f.ctx.file_channels.holdsTask());
+        VG_CHECK(rule(f.ctx) == nullptr);
+        f.slot.ready = true;
     }
 }
 

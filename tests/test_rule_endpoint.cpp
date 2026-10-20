@@ -26,6 +26,7 @@
 
 #include "check.hpp"
 #include "fake_config.hpp"
+#include "fake_slot.hpp"
 
 namespace vigil::endpoints {
 
@@ -77,6 +78,7 @@ struct Fixture
     std::string root; // temporary directory, removed afterwards
     std::string dir;  // configuration directory; outlives ctx, which borrows its buffer
     std::shared_ptr<Context> ctx;
+    std::unique_ptr<FakeSlotAdmission> slot; // registered and ready, as an enabled Slot is (docs/PLAN.md section 8.1)
     std::unique_ptr<RuleEndpoint> endpoint;
 
     // With `unwritable_store` the configuration "directory" is a regular file, so nothing can be stored.
@@ -88,12 +90,14 @@ struct Fixture
             WriteFile(dir, "x");
         }
         ctx = std::make_shared<Context>(MakeFakeConfig(dir.c_str()));
+        slot = std::make_unique<FakeSlotAdmission>(*ctx);
         RuleEventRecorder::clear();
     }
 
     ~Fixture()
     {
         endpoint.reset();
+        slot.reset();
         ctx.reset();
         std::error_code ec;
         std::filesystem::remove_all(root, ec);
@@ -423,6 +427,60 @@ VG_TEST_CASE(schedule_closure_blocks_dispatch_and_reopening_restores_it)
     VG_CHECK(events[0].writer_created);
 }
 
+VG_TEST_CASE(the_schedule_gate_is_published_with_the_configuration_and_on_every_tick_before_the_enable_check)
+{
+    // docs/PLAN.md section 8.1: the schedule state lives in the context, published when the schedule
+    // configuration changes and on every tick before the enable check, so it is current while rules are
+    // disabled, and admission reads the same state as the rule loop and the HTTP precheck.
+    Fixture f;
+    f.start();
+    VG_CHECK(!f.ctx->record_rule_enabled.load());
+    VG_CHECK(f.ctx->schedule_open.load()); // no schedule configured: open
+    VG_CHECK_EQ(f.postScheduleRuleConfig(ScheduleWindowJson(3 * kHour, 4 * kHour)), 0);
+    VG_CHECK(!f.ctx->schedule_open.load()); // published with the configuration
+    f.ctx->schedule_open.store(true);
+    f.evaluate(); // and on every tick, rules disabled or not
+    VG_CHECK(!f.ctx->schedule_open.load());
+    VG_CHECK_EQ(f.postScheduleRuleConfig(ScheduleWindowJson(-kHour, kHour)), 0);
+    VG_CHECK(f.ctx->schedule_open.load());
+    f.ctx->schedule_open.store(false);
+    f.evaluate();
+    VG_CHECK(f.ctx->schedule_open.load());
+}
+
+VG_TEST_CASE(a_dispatch_without_a_usable_slot_reports_the_owner_and_the_next_owner_proceeds)
+{
+    // The deliberate change of docs/PLAN.md section 8.1: with no usable Slot the file action is rejected at
+    // dispatch, the owner is still reported, nothing is pending, and the next tick's owner is dispatched in
+    // turn instead of waiting behind a pending event.
+    Fixture f;
+    f.start();
+    VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0); // fires on every evaluated tick
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
+    f.slot->ready = false;
+    for (int i = 0; i < 3; ++i)
+    {
+        f.evaluate();
+        const auto events = RuleEventRecorder::take();
+        VG_REQUIRE(events.size() == size_t { 1 });
+        VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_TIMER);
+        VG_CHECK(!events[0].writer_created);
+    }
+    auto info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), true);
+    VG_CHECK(info.at("dLastRuleEvent").is_null()); // nothing was ever accepted
+    VG_CHECK(info.at("dRecordSlot").is_null());    // the registered admission is not a storage Slot here
+
+    f.slot->ready = true;
+    f.evaluate();
+    const auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(events[0].writer_created);
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), false);
+    VG_CHECK_EQ(info.at("dLastRuleEvent").at("sStatus").get<std::string>(), "PENDING");
+}
+
 VG_TEST_CASE(rule_disable_cancels_the_current_event_and_rule_info_reports_it)
 {
     Fixture f;
@@ -503,7 +561,7 @@ VG_TEST_CASE(rule_info_reports_the_channel_busy_through_the_hold)
     VG_REQUIRE(events.size() == size_t { 1 });
     VG_CHECK(events[0].writer_created);
 
-    const auto task = f.ctx->file_channels.video.claim(); // the worker starts the task
+    const auto task = f.ctx->file_channels.video.claim(f.slot->registration()); // the worker starts the task
     VG_REQUIRE(task != nullptr);
     auto info = f.endpoint->getRuleInfo();
     VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), false);
@@ -665,17 +723,14 @@ VG_TEST_CASE(http_activation_reports_busy_and_gate_errors)
     VG_CHECK(!events[0].writer_created);
     CompleteCurrent(*f.ctx, WriteEvent::Status::Completed);
 
-    // A storage slot that is not ready refuses the request before any RULE report.
-    {
-        const std::unique_lock lock(f.ctx->slot_check_mutex);
-        f.ctx->slot_check = { nullptr, [](const void *) { return false; } };
-    }
+    // A storage slot that is not ready refuses the request before any RULE report; so does no slot at all.
+    f.slot->ready = false;
+    VG_CHECK_EQ(f.activateHTTP(), kEndpointErrorBase + EBUSY);
+    f.slot->ready = true;
+    f.slot->close();
     VG_CHECK_EQ(f.activateHTTP(), kEndpointErrorBase + EBUSY);
     VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
-    {
-        const std::unique_lock lock(f.ctx->slot_check_mutex);
-        f.ctx->slot_check = { nullptr, nullptr };
-    }
+    f.slot->open();
     VG_CHECK_EQ(f.activateHTTP(), 0);
     VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 1 });
 

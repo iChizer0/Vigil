@@ -288,6 +288,7 @@ Notes:
 - Returns error `EBUSY` if the storage system is not ready for writing.
 - Returns error `EBUSY` if a pending activation request is still being processed.
 - Returns error `EBUSY` if a previous recording event is still writing.
+- A refused activation leaves no pending event behind: the next activation is admitted afresh (since 2026-10-19).
 
 ## Storage API
 

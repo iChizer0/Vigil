@@ -86,7 +86,7 @@ static inline size_t GetInternalPreservedLimit() noexcept
                : kStorageMinFileSystemFreeBytesInternal - system_usage;
 }
 
-class Slot final
+class Slot final: public Context::SlotAdmission
 {
 public:
     Slot(Context &ctx, std::filesystem::path dev_path, std::filesystem::path mount_path, bool removable, bool internal,
@@ -155,10 +155,55 @@ public:
         return _fsck.load(std::memory_order_acquire);
     }
 
-    inline bool isReadyToWrite() const noexcept
+    // - MARK: Slot Admission (docs/PLAN.md sections 7.1 and 8.1)
+
+    // The Slot can take a task while it is not stopping and in its ready state.
+    bool isReadyToWrite() const noexcept override
     {
         return !_stop_token.load(std::memory_order_acquire)
                && (_state.load(std::memory_order_acquire) == SlotState::Ready);
+    }
+
+    // The registration of this Slot's admission while enabled, 0 otherwise: the identity its tasks are bound to.
+    uint64_t registration() const noexcept
+    {
+        return _registration.load(std::memory_order_acquire);
+    }
+
+    // Admission of a new task of one channel, read inside the channel's admission section (docs/PLAN.md
+    // sections 8.1 and 9): against `admission`, the aggregate watermarks of the enabled channels that the
+    // manager's Ready state also uses, with `task_bytes`, the task's own, reserved in the same critical section
+    // as the free-space check. Empty while the index or the stats are not usable, and when the Slot is saturated
+    // by its quota or by its free space minus what admitted tasks may still write to this filesystem (logged
+    // when rotation is on, as before). The task carries the reservation to the worker that runs it, which
+    // releases it once the file is published; with both channels enabled, the second task is admitted only when
+    // the free space covers the aggregate mark plus the first task's bytes.
+    Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &admission, FileSize task_bytes) noexcept override
+    {
+        Context::InFlightBudgets::Reservation reservation;
+        bool saturated = false;
+        if (const auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit >= 0)
+        {
+            const auto idx_mgr = _index_manager.load(std::memory_order_acquire);
+            if (!idx_mgr)
+                return {};
+            const auto index_result = idx_mgr->size();
+            if (!index_result.valid)
+                return {};
+            saturated = index_result.size + admission.critical_remain_bytes > limit;
+        }
+        if (!saturated)
+        {
+            if (!doStats())
+                return {};
+            reservation = _ctx.in_flight_budgets.tryReserve(_filesystem_id.load(std::memory_order_acquire), task_bytes,
+                _stats.load(std::memory_order_acquire).free_bytes, criticalRemainBytes(admission));
+            saturated = !reservation;
+        }
+        if (saturated && _quota_rotate.load())
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Storage slot for device path ", _dev_path,
+                " is at its critical watermark, skipping a new writer task");
+        return reservation;
     }
 
     inline bool isSaturated() const noexcept
@@ -276,16 +321,9 @@ public:
         }
         _enabled.store(true, std::memory_order_release);
 
-        // Attach slot check callback (single slot only)
-        {
-            const std::unique_lock lock2(_ctx.slot_check_mutex);
-            _ctx.slot_check = std::make_pair(static_cast<const void *>(this), [](const void *p) -> bool {
-                if (!p)
-                    return false;
-                const Slot *sp = static_cast<const Slot *>(p);
-                return sp->isEnabled() && sp->isReadyToWrite();
-            });
-        }
+        // Admission opens last (docs/PLAN.md section 8.1): the tasks accepted from here on bind to this Slot, and
+        // the workers above serve them (they claim nothing before the registration is set).
+        _registration.store(_ctx.slot_admission.open(*this), std::memory_order_release);
 
         return 0;
     }
@@ -311,8 +349,9 @@ private:
         // Disable relay
         disableNginxRelay();
 
-        // Both workers finish and publish the task they run before the index is released (docs/PLAN.md
-        // section 9)
+        // Admission closes first, which cancels what this Slot accepted but no worker claimed; then both workers
+        // finish and publish the task they run, before the index is released (docs/PLAN.md section 9)
+        closeAdmission();
         joinThreads();
 
         // Reset index manager
@@ -320,13 +359,14 @@ private:
 
         // Reset rotating status
         _rotating.store(false, std::memory_order_release);
+    }
 
-        // Detach slot check callback (if current attached)
-        {
-            const std::unique_lock lock2(_ctx.slot_check_mutex);
-            if (_ctx.slot_check.first == static_cast<const void *>(this))
-                _ctx.slot_check = std::make_pair(nullptr, nullptr);
-        }
+    // Closes this Slot's admission if it is open: no task is accepted for it afterwards, and its pending tasks
+    // are canceled.
+    void closeAdmission() noexcept
+    {
+        if (const auto registration = _registration.exchange(0, std::memory_order_acq_rel))
+            _ctx.slot_admission.close(registration);
     }
 
     // Joins the threads that were started, the stop token set: the workers first, which may be finishing a
@@ -608,41 +648,6 @@ protected:
     bool stopRequested() const noexcept
     {
         return _stop_token.load(std::memory_order_acquire);
-    }
-
-    // Admission of a new task of one channel (docs/PLAN.md section 9), against `admission`, the aggregate
-    // watermarks of the enabled channels that the manager's Ready state also uses, with `task_bytes`, the task's
-    // own, reserved in the same critical section as the free-space check. Empty while the index or the stats are
-    // not usable, and when the Slot is saturated by its quota or by its free space minus what admitted tasks may
-    // still write to this filesystem (logged when rotation is on, as before). The worker releases the
-    // reservation once the file is published; with both channels enabled, the second task is admitted only when
-    // the free space covers the aggregate mark plus the first task's bytes.
-    Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &admission, FileSize task_bytes) noexcept
-    {
-        Context::InFlightBudgets::Reservation reservation;
-        bool saturated = false;
-        if (const auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit >= 0)
-        {
-            const auto idx_mgr = _index_manager.load(std::memory_order_acquire);
-            if (!idx_mgr)
-                return {};
-            const auto index_result = idx_mgr->size();
-            if (!index_result.valid)
-                return {};
-            saturated = index_result.size + admission.critical_remain_bytes > limit;
-        }
-        if (!saturated)
-        {
-            if (!doStats())
-                return {};
-            reservation = _ctx.in_flight_budgets.tryReserve(_filesystem_id.load(std::memory_order_acquire), task_bytes,
-                _stats.load(std::memory_order_acquire).free_bytes, criticalRemainBytes(admission));
-            saturated = !reservation;
-        }
-        if (saturated && _quota_rotate.load())
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Storage slot for device path ", _dev_path,
-                " is at its critical watermark, skipping a new writer task");
-        return reservation;
     }
 
     // Whether a running task may continue (docs/PLAN.md section 9): the Slot is not stopping, its filesystem is
@@ -1810,6 +1815,9 @@ private:
     // Public lifecycle flags
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _enabled;
     std::atomic<bool> _failure;
+    // The registration of the open admission (docs/PLAN.md section 8.1), 0 while closed: set after the workers
+    // start and cleared before they are joined
+    std::atomic<uint64_t> _registration = 0;
 
     // Stop token for the manager and worker threads
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _stop_token;
