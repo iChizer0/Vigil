@@ -191,16 +191,25 @@ VG_TEST_CASE(rejects_other_schemas_incomplete_documents_and_wrong_types)
     VG_CHECK(Rejected(nlohmann::json(nullptr), f.ctx));
 }
 
-VG_TEST_CASE(accepts_every_action_combination_and_still_rejects_continuous_recording)
+VG_TEST_CASE(accepts_every_action_combination_and_continuous_recording)
 {
-    // The multi-action configuration (docs/PLAN.md section 4.1, Phase 4D): any combination of actions, with or
-    // without rules enabled, round-trips canonically and maps onto the snapshot; continuous recording is
-    // rejected until Phase 5A rather than accepted as a no-op.
+    // The multi-action configuration (docs/PLAN.md section 4.1, Phases 4D and 5A-3): any combination of actions,
+    // with or without rules enabled, round-trips canonically and maps onto the snapshot, and so does continuous
+    // recording, with or without a Video action, which it suppresses for rule events (section 8.2).
     Fixture f;
-    VG_CHECK(Rejected(Document({ { "/bContinuousRecordEnabled", true } }), f.ctx));
-    VG_CHECK(Rejected(Document({ { "/bContinuousRecordEnabled", true }, { "/bRuleEnabled", true },
-                          { "/dActions/dVideo/bEnabled", true } }),
-        f.ctx));
+    for (const auto &doc: { Document({ { "/bContinuousRecordEnabled", true } }),
+             Document({ { "/bContinuousRecordEnabled", true }, { "/bRuleEnabled", true },
+                 { "/dActions/dVideo/bEnabled", true } }) })
+    {
+        const RecordConfig cfg(doc, f.ctx);
+        VG_CHECK(cfg.continuous_enabled);
+        VG_CHECK_EQ(Canonical(cfg, f.ctx), doc);
+        const auto s = cfg.prepare(f.ctx).settings;
+        VG_REQUIRE(s != nullptr && s->continuous != nullptr);
+        VG_CHECK(!s->channel(CaptureType::Video) && !s->fileChannel()); // triggered Video suppressed
+        VG_CHECK_EQ(s->video != nullptr, cfg.video.enabled);
+        VG_CHECK(s->videoRecording() == s->continuous);
+    }
 
     const auto all = Document(
         { { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true }, { "/dActions/dPhoto/sFormat", "RAW" },
@@ -253,6 +262,9 @@ VG_TEST_CASE(the_always_on_invariant_admits_one_channel_and_exactly_one_while_ru
     VG_CHECK(!satisfies({ { "/dActions/dSound/bEnabled", true } }));
     VG_CHECK(!satisfies(
         { { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true }, { "/dActions/dSound/bEnabled", true } }));
+    VG_CHECK(!satisfies({ { "/bContinuousRecordEnabled", true } })); // rules disabled or not
+    VG_CHECK(!satisfies(
+        { { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true }, { "/bContinuousRecordEnabled", true } }));
 }
 
 VG_TEST_CASE(action_settings_carry_the_enabled_file_channel_and_the_effective_watermarks)
@@ -315,7 +327,7 @@ VG_TEST_CASE(action_settings_carry_the_continuous_video_settings_as_the_video_re
     // docs/PLAN.md sections 7.1, 8.2, and 9 (Phase 5A-2): a snapshot with continuous recording configured
     // carries the continuous Video settings (MP4, no interval, the default clip length, one clip's
     // watermarks), suppresses triggered Video for rule events without rewriting it, and budgets one Video
-    // task for either mode. The parser still rejects the switch, so the snapshot is built directly.
+    // task for either mode. Built directly here; the parsed document is pinned above.
     Fixture f;
     const auto photo = Snapshot(f.ctx, { { "/dActions/dPhoto/bEnabled", true } })->photo;
     const auto video = Snapshot(f.ctx, { { "/dActions/dVideo/bEnabled", true } })->video;
@@ -407,11 +419,10 @@ VG_TEST_CASE(the_video_revision_follows_the_video_recording_of_either_mode)
 
     // Through sync: the switch to continuous cancels the pending triggered task, the continuous clip is
     // admitted, the same configuration again keeps it, and the switch back cancels it while pending.
-    RecordConfig triggered;
-    triggered.rule_enabled = true;
-    triggered.video.enabled = true;
-    RecordConfig continuous = triggered;
-    continuous.continuous_enabled = true; // rejected by the parser until Phase 5A-3; prepare builds it anyway
+    const RecordConfig triggered(Document({ { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true } }), f.ctx);
+    const RecordConfig continuous(Document({ { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true },
+                                      { "/bContinuousRecordEnabled", true } }),
+        f.ctx);
     VG_CHECK_EQ(triggered.sync(f.ctx, triggered.prepare(f.ctx)), 0);
     VG_CHECK(f.ctx.dispatchRuleEvent(
         std::make_shared<EventOwner>(VG_RULE_TYPE_TIMER, "", "", EventOwner::SourceDelivery::Event)));

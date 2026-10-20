@@ -41,7 +41,7 @@ std::shared_ptr<FileWriterSettings> ChannelSettings(const Context &ctx, CaptureT
 }
 
 // Publishes a snapshot with the given file channels, built directly with the intervals each case needs, and
-// with continuous recording configured when `continuous` is set (the parser still rejects the switch).
+// with continuous recording configured when `continuous` is set.
 void Publish(Context &ctx, std::shared_ptr<FileWriterSettings> photo, std::shared_ptr<FileWriterSettings> video,
     bool continuous = false)
 {

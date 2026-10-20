@@ -185,8 +185,8 @@ struct Fixture
         publish(settingsOf(CaptureType::Image, photo_interval), settingsOf(CaptureType::Video, video_interval));
     }
 
-    // Publishes a snapshot with continuous recording configured and no other action (docs/PLAN.md section 8.2):
-    // the parser still rejects the switch, so the snapshot is built directly.
+    // Publishes a snapshot with continuous recording configured and no other action (docs/PLAN.md section 8.2),
+    // built directly as every snapshot here is.
     void enableContinuous()
     {
         auto &shared = ctx.action_settings;

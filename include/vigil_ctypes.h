@@ -125,7 +125,8 @@ typedef struct vg_file_evt_t
     size_t size_bytes;             /**< Size of the file in bytes. */
     const char *attributes;        /**< Internal managed string, null terminated, do not free. */
     int64_t timestamp;  /**< Timestamp of the file event (can be corresponding to the timestamp of rule event). */
-    uint64_t event_uid; /**< Unique identifier for the file event, can be used for event correlation. */
+    uint64_t event_uid; /**< UID of the rule event the file serves, for correlation; 0 for a continuous recording
+                             clip, which serves no rule event. */
 } vg_file_evt_t;
 
 /**

@@ -304,6 +304,43 @@ VG_TEST_CASE(activation_without_a_file_action_needs_no_storage_and_plays_the_sou
     VG_CHECK_EQ(vg_service_deinit(), 0);
 }
 
+VG_TEST_CASE(continuous_recording_is_accepted_through_the_c_api_and_suppresses_the_video_action_for_activation)
+{
+    // docs/PLAN.md sections 4.1 and 8.2 (Phase 5A-3) through the C API, with no Slot ready: the switch is
+    // accepted and returned canonically, rule info reports the Video channel as continuous and not ready for a
+    // rule event, the rule loop admits nothing without storage, an HTTP activation of a Video-only
+    // configuration needs no storage since triggered Video is suppressed, and ALWAYS_ON cannot be selected
+    // over it.
+    Fixture f;
+    RuleEventRecorder::clear();
+    VG_REQUIRE(vg_service_init(&f.config) == 0);
+    nlohmann::json http;
+    http["sCurrentSelected"] = "HTTP";
+    VG_CHECK_EQ(Post(&vg_http_api_rule_record_config_post, http), 0);
+    const auto record = nlohmann::json::parse(R"({
+        "iSchemaVersion": 2, "bRuleEnabled": true, "bContinuousRecordEnabled": true,
+        "dActions": { "dPhoto": { "bEnabled": false, "sFormat": "JPG", "iIntervalMs": 5000 },
+                      "dVideo": { "bEnabled": true, "iIntervalMs": 5000 }, "dSound": { "bEnabled": false } }
+    })");
+    VG_CHECK_EQ(Post(&vg_http_api_rule_config_post, record), 0);
+    VG_CHECK_EQ(Get(&vg_http_api_rule_config_get), record);
+    const auto info = Get(&vg_http_api_rule_info_get);
+    VG_CHECK_EQ(info.at("bRecordEnabled").get<bool>(), true);
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bEnabled").get<bool>(), true);
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bContinuous").get<bool>(), true);
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bReady").get<bool>(), false);
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "IDLE"); // no Slot
+    VG_CHECK_EQ(Post(&vg_http_api_rule_http_rule_activate_post, nlohmann::json::object()), 0);
+    const auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_HTTP);
+    VG_CHECK(!events[0].writer_created);
+    nlohmann::json always_on;
+    always_on["sCurrentSelected"] = "ALWAYS_ON";
+    VG_CHECK_EQ(Post(&vg_http_api_rule_record_config_post, always_on), vigil::constants::kEndpointErrorBase + EINVAL);
+    VG_CHECK_EQ(vg_service_deinit(), 0);
+}
+
 VG_TEST_CASE(the_selected_slot_starts_its_manager_and_both_channel_workers_and_deinit_joins_them)
 {
     // The runtime's full thread set (docs/PLAN.md sections 7.2 and 8.3): selecting the internal Slot starts its

@@ -54,7 +54,7 @@ digraph G {
       label="RuleEndpoint";
       style="rounded,dashed";
       color=gray50;
-      rule_ep [label="Rule Config\niSchemaVersion 2\nbRuleEnabled\ndActions\nALWAYS_ON invariant (commit mutex)", shape=box];
+      rule_ep [label="Rule Config\niSchemaVersion 2\nbRuleEnabled / bContinuousRecordEnabled\ndActions\nALWAYS_ON invariant (commit mutex)", shape=box];
       schedule_ep [label="Schedule Config\nTimeRange per Weekday", shape=box];
       record_ep [label="Record Config\nsCurrentSelected\nRule Type Variants", shape=box];
       rule_info_ep [label="Rule Info\nEvent Status / Last Dispatched Owner\nAction States (Photo/Video/Sound)\nGPIO/TTY Availability\nMedia Pause / Record Enabled\nSelected Record Slot", shape=box];
@@ -359,7 +359,7 @@ digraph G {
   rule_thread -> ctrl_schedule_open [color=blue, xlabel="publish"];
   infer_q -> shared_infer_result [color=orange, style=dashed, xlabel="pop & move", weight=2];
   rule_thread -> ctx [color=blue, xlabel="tick()", weight=3];
-  rule_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="dispatchRuleEvent()"];
+  rule_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="dispatchContinuous() / dispatchRuleEvent()"];
 
   // ============================================================
   // EDGES: Rule Framework Relationships

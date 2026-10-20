@@ -28,6 +28,7 @@
 
 #include "check.hpp"
 #include "fake_config.hpp"
+#include "fake_media.hpp"
 #include "fake_slot.hpp"
 
 namespace vigil::endpoints {
@@ -47,6 +48,7 @@ using namespace vigil::types;
 using namespace vigil::configs;
 using namespace vigil::constants;
 using namespace vigil::endpoints;
+using namespace vigil::writers;
 using namespace vigil::tests;
 
 namespace {
@@ -79,6 +81,7 @@ struct Fixture
 {
     std::string root; // temporary directory, removed afterwards
     std::string dir;  // configuration directory; outlives ctx, which borrows its buffer
+    FakeMedia media;  // the video sink the continuous-recording cases run a writer against
     std::shared_ptr<Context> ctx;
     std::unique_ptr<FakeSlotAdmission> slot; // registered and ready, as an enabled Slot is (docs/PLAN.md section 8.1)
     std::unique_ptr<RuleEndpoint> endpoint;
@@ -96,7 +99,13 @@ struct Fixture
         auto cfg = MakeFakeConfig(dir.c_str());
         if (with_sound)
             cfg.media.sound_play_cb = [](void *) -> vg_sta_e { return 0; };
+        cfg.media.user_data = &media;
+        cfg.media.video_file_create_cb = &FakeMedia::Create;
+        cfg.media.video_file_finish_cb = &FakeMedia::Finish;
+        cfg.media.video_file_write_video_frame_cb = &FakeMedia::WriteVideo;
+        cfg.media.video_file_write_audio_frame_cb = &FakeMedia::WriteAudio;
         ctx = std::make_shared<Context>(cfg, /* run_sound_worker = */ !with_sound);
+        media.ctx = ctx.get();
         slot = std::make_unique<FakeSlotAdmission>(*ctx);
         RuleEventRecorder::clear();
     }
@@ -144,7 +153,72 @@ struct Fixture
     {
         return endpoint->doHTTPRuleActivate(nlohmann::json::object()).at("code").get<int>();
     }
+
+    void pushKeyFrame()
+    {
+        uint8_t data[4] = { 1, 2, 3, 4 };
+        const vg_video_frame_t frame { .pts = ++pts, .data = data, .bytes_len = sizeof data, .key_frame = true };
+        const std::lock_guard lock(media.mutex); // a writer on another thread reads the queue
+        media.queue.emplace_back(frame);
+    }
+
+    // Claims the task the Video channel holds, as its worker would.
+    std::shared_ptr<FileTask> claimVideo()
+    {
+        const auto task = ctx->file_channels.video.claim(slot->registration());
+        VG_REQUIRE(task != nullptr);
+        return task;
+    }
+
+private:
+    int64_t pts = 0;
 };
+
+// A video writer over the fixture's fake media for a claimed task, run on its own thread: what the Video worker
+// does between the claim and the publication. Destruction joins it.
+struct RunningWriter
+{
+    VideoWriter<FakeAdapter> writer;
+    std::thread thread;
+
+    RunningWriter(Fixture &f, const std::shared_ptr<FileTask> &task)
+        : writer(std::ref(f.media), std::ref(*f.ctx), task->settings, task->event, task->settings_revision, task->kind),
+          thread([this] { writer(); })
+    {
+    }
+
+    ~RunningWriter()
+    {
+        join();
+    }
+
+    void join()
+    {
+        if (thread.joinable())
+            thread.join();
+    }
+};
+
+// Spins until `pred` holds: a bounded wait on the writer thread, not a timing assumption.
+template<typename Pred>
+bool WaitFor(Pred pred)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!pred())
+    {
+        if (std::chrono::steady_clock::now() > deadline)
+            return false;
+        std::this_thread::yield();
+    }
+    return true;
+}
+
+// The frames the fake sink has written, read under its lock: the writer runs on another thread.
+int FramesWritten(FakeMedia &media)
+{
+    const std::lock_guard lock(media.records);
+    return media.video_frames;
+}
 
 // The complete version-2 document (the shape GET returns) with at most one enabled file action: "MP4" enables
 // video, "JPG"/"RAW" enable photo, nullptr enables nothing. Every other field holds its default.
@@ -169,6 +243,13 @@ nlohmann::json WithActions(nlohmann::json j, bool photo, bool video, bool sound)
     j["dActions"]["dPhoto"]["bEnabled"] = photo;
     j["dActions"]["dVideo"]["bEnabled"] = video;
     j["dActions"]["dSound"]["bEnabled"] = sound;
+    return j;
+}
+
+// `j` with continuous recording configured (Phase 5A-3).
+nlohmann::json WithContinuous(nlohmann::json j)
+{
+    j["bContinuousRecordEnabled"] = true;
     return j;
 }
 
@@ -722,63 +803,284 @@ VG_TEST_CASE(rule_info_reports_the_last_dispatched_owner_and_the_state_of_each_a
 
 VG_TEST_CASE(rule_info_reports_a_continuous_clip_as_the_video_state_and_not_as_a_rule_event)
 {
-    // docs/PLAN.md sections 6.2 and 8.2 (Phase 5A-2): a continuous clip shows in dActionStates.dVideo, with
-    // bContinuous, the configured switch unchanged, no readiness for a rule event, and the held event with
-    // UID 0; bReadyForNewEvent, dLastRuleEvent, and dLastRuleEventOwner see triggered tasks only. The parser
-    // still rejects the switch, so the snapshot is published directly over the posted Video configuration.
+    // docs/PLAN.md sections 6.2 and 8.2: a continuous clip shows in dActionStates.dVideo, with bContinuous,
+    // the configured switch unchanged, no readiness for a rule event, and the held event with UID 0;
+    // bReadyForNewEvent, dLastRuleEvent, and dLastRuleEventOwner see triggered tasks only.
     Fixture f;
     f.start();
     VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0);
-    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
-    const auto triggered = f.ctx->action_settings.get().settings;
-    VG_REQUIRE(triggered != nullptr && triggered->video != nullptr);
-    auto &shared = f.ctx->action_settings;
-    VG_REQUIRE(shared.update(shared.getRevision(),
-        ActionSettings::create(true, false, nullptr, triggered->video, &f.ctx->c_api.media)));
-
-    // The Timer tick dispatches an owner that no channel accepts (triggered Video is suppressed): reported,
-    // and rule info shows no rule event, the configured switch, and the suppression.
-    f.evaluate();
-    const auto events = RuleEventRecorder::take();
-    VG_REQUIRE(events.size() == size_t { 1 });
-    VG_CHECK(!events[0].writer_created);
+    VG_CHECK_EQ(f.postRecordConfig(WithContinuous(RecordJson(true, "MP4", 5000))), 0);
     auto info = f.endpoint->getRuleInfo();
-    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), true);
-    VG_CHECK(info.at("dLastRuleEvent").is_null());
-    VG_CHECK(info.at("dLastRuleEventOwner").is_null());
-    VG_CHECK_EQ(info.at("dLastDispatchedOwner").at("iUID").get<uint64_t>(), events[0].uid);
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bEnabled").get<bool>(), true); // as configured
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bContinuous").get<bool>(), true);
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bReady").get<bool>(), false); // suppressed
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "IDLE");
     VG_CHECK(!info.at("dActionStates").at("dPhoto").contains("bContinuous"));
 
-    // The clip is admitted and claimed: PENDING, then WRITING, with UID 0; the triggered view stays empty.
-    VG_CHECK(f.ctx->dispatchContinuous());
+    // The tick admits the clip (PENDING, UID 0) and dispatches a Timer owner that no channel accepts, since
+    // triggered Video is suppressed: reported, while the triggered view shows no rule event.
+    f.evaluate();
+    const auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(!events[0].writer_created);
     info = f.endpoint->getRuleInfo();
     VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), true);
     VG_CHECK(info.at("dLastRuleEvent").is_null());
+    VG_CHECK(info.at("dLastRuleEventOwner").is_null());
+    VG_CHECK_EQ(info.at("dLastDispatchedOwner").at("iUID").get<uint64_t>(), events[0].uid);
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "PENDING");
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("dEvent").at("iOwnerUID").get<uint64_t>(), uint64_t { 0 });
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bReady").get<bool>(), false);
+
+    // Claimed: WRITING; completed: IDLE, and still no rule event.
     auto &video = f.ctx->file_channels.video;
-    const auto clip = video.claim(f.slot->registration());
-    VG_REQUIRE(clip != nullptr);
+    const auto clip = f.claimVideo();
     info = f.endpoint->getRuleInfo();
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "WRITING");
-    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bReady").get<bool>(), false);
     video.complete(clip, WriteEvent::Status::Completed);
     info = f.endpoint->getRuleInfo();
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "IDLE");
     VG_CHECK(info.at("dLastRuleEvent").is_null()); // a completed clip is no rule event either
 
     // Without the Video action configured, continuous recording still runs the channel: not enabled, continuous.
-    VG_REQUIRE(shared.update(shared.getRevision(),
-        ActionSettings::create(true, false, nullptr, nullptr, &f.ctx->c_api.media)));
+    VG_CHECK_EQ(f.postRecordConfig(WithContinuous(RecordJson(true, nullptr, 0))), 0);
     info = f.endpoint->getRuleInfo();
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bEnabled").get<bool>(), false);
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bContinuous").get<bool>(), true);
-    VG_CHECK(f.ctx->dispatchContinuous());
+    f.evaluate();
     VG_CHECK_EQ(f.endpoint->getRuleInfo().at("dActionStates").at("dVideo").at("sState").get<std::string>(), "PENDING");
+}
+
+VG_TEST_CASE(continuous_recording_is_admitted_by_the_rule_loop_whatever_the_rule_flag_and_obeys_the_schedule)
+{
+    // docs/PLAN.md sections 4.1, 8.1, and 8.2 (Phase 5A-3): the switch is accepted and stored canonically; the
+    // rule loop admits a clip on every tick before the enable check, so bRuleEnabled=false records; a held
+    // clip refuses the next until completed; the Slot, the pause, and the schedule gate admission; a clip
+    // admitted while the schedule was open does not start once it closed; and a stored configuration records
+    // from startup, unless the selected rule is ALWAYS_ON, which cannot be combined with it (section 4.4): a
+    // POST is refused, and a stored pair fails closed with continuous recording off as well.
+    Fixture f;
+    f.start();
+    const auto doc = WithContinuous(RecordJson(false, nullptr, 0));    // rules disabled, nothing but the switch
+    VG_CHECK_EQ(f.postRecordConfig(doc), kEndpointErrorBase + EINVAL); // ALWAYS_ON, the default, is selected
+    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0);
+    VG_CHECK_EQ(f.postRecordConfig(doc), 0);
+    VG_CHECK_EQ(f.endpoint->getRecordConfig(), doc);
+    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_config.json"))), doc);
+    VG_CHECK(!f.ctx->record_rule_enabled.load());
+    auto &video = f.ctx->file_channels.video;
+
+    f.evaluate();
+    const auto clip = video.current();
+    VG_REQUIRE(clip != nullptr);
+    VG_CHECK(clip->kind == FileTask::Kind::Continuous);
+    VG_CHECK_EQ(clip->event->owner_uid, uint64_t { 0 });
+    VG_CHECK_EQ(clip->slot_registration, f.slot->registration());
+    VG_CHECK(RuleEventRecorder::take().empty()); // no rule event, and no rule evaluated
+    f.evaluate();
+    VG_CHECK(video.current() == clip); // held: nothing new
+    video.complete(f.claimVideo(), WriteEvent::Status::Completed);
+    f.evaluate();
+    VG_CHECK(video.current() != nullptr && video.current() != clip); // the next clip follows
+    video.cancelPending();
+
+    // The gates: no usable Slot, media paused, the schedule closed.
+    f.slot->ready = false;
+    f.evaluate();
+    VG_CHECK(video.current() == nullptr);
+    f.slot->ready = true;
+    f.ctx->media_barrier.pause(false);
+    f.evaluate();
+    VG_CHECK(video.current() == nullptr);
+    f.ctx->media_barrier.resume();
+    VG_CHECK_EQ(f.postScheduleRuleConfig(ScheduleWindowJson(3 * kHour, 4 * kHour)), 0); // closed now
+    f.evaluate();
+    VG_CHECK(video.current() == nullptr);
+    VG_CHECK_EQ(f.postScheduleRuleConfig(ScheduleWindowJson(-kHour, kHour)), 0); // open
+    f.evaluate();
+    const auto pending = video.current();
+    VG_REQUIRE(pending != nullptr);
+
+    // Admitted while open, then the schedule closes before a worker starts it: the closure cancels nothing,
+    // and the writer records nothing (Canceled, no sink), since the schedule is a continuous clip's gate.
+    VG_CHECK_EQ(f.postScheduleRuleConfig(ScheduleWindowJson(3 * kHour, 4 * kHour)), 0);
+    VG_CHECK(video.current() == pending);
+    f.pushKeyFrame();
+    {
+        RunningWriter writer(f, f.claimVideo());
+        writer.join();
+    }
+    VG_CHECK(pending->event->status.load() == WriteEvent::Status::Canceled);
+    VG_CHECK_EQ(f.media.creates, 0);
+
+    // A stored continuous configuration records from startup, rules disabled or not.
+    Fixture g;
+    WriteFile(g.file("record_config.json"), doc.dump());
+    WriteFile(g.file("record_rule_config.json"), SelectedRuleJson("HTTP").dump());
+    g.start();
+    VG_CHECK_EQ(g.endpoint->getRecordConfig(), doc);
+    g.evaluate();
+    VG_REQUIRE(g.ctx->file_channels.video.current() != nullptr);
+    VG_CHECK(g.ctx->file_channels.video.current()->kind == FileTask::Kind::Continuous);
+
+    // Stored under the default ALWAYS_ON, the pair fails closed: nothing records, both switches read false with
+    // the file untouched, and a supporting rule, then the configuration, recovers.
+    Fixture h;
+    WriteFile(h.file("record_config.json"), doc.dump());
+    h.start();
+    VG_CHECK(!h.ctx->record_rule_enabled.load());
+    VG_CHECK_EQ(h.endpoint->getRecordConfig(), RecordJson(false, nullptr, 0));
+    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(h.file("record_config.json"))), doc);
+    h.evaluate();
+    VG_CHECK(h.ctx->file_channels.video.current() == nullptr);
+    VG_CHECK_EQ(h.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0);
+    h.evaluate();
+    VG_CHECK(h.ctx->file_channels.video.current() == nullptr); // until the configuration is posted again
+    VG_CHECK_EQ(h.postRecordConfig(doc), 0);
+    h.evaluate();
+    VG_REQUIRE(h.ctx->file_channels.video.current() != nullptr);
+    VG_CHECK(h.ctx->file_channels.video.current()->kind == FileTask::Kind::Continuous);
+}
+
+VG_TEST_CASE(schedule_closure_finishes_a_running_continuous_clip_and_reopening_admits_a_new_one)
+{
+    // docs/PLAN.md section 8.2 (GATE-5): the schedule closing through the endpoint finishes a running clip at
+    // its next check, as Interrupted with UID 0 and its sink finished; while closed nothing is admitted, and
+    // reopening admits a new clip once the channel is free.
+    Fixture f;
+    f.start();
+    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0); // any rule but ALWAYS_ON
+    VG_CHECK_EQ(f.postRecordConfig(WithContinuous(RecordJson(false, nullptr, 0))), 0);
+    auto &video = f.ctx->file_channels.video;
+    f.evaluate();
+    const auto clip = video.current();
+    VG_REQUIRE(clip != nullptr);
+    f.pushKeyFrame();
+    {
+        RunningWriter writer(f, f.claimVideo());
+        VG_REQUIRE(WaitFor([&] { return FramesWritten(f.media) == 1; })); // the clip has started
+        VG_CHECK_EQ(f.postScheduleRuleConfig(ScheduleWindowJson(3 * kHour, 4 * kHour)), 0);
+        writer.join();
+    }
+    VG_CHECK(clip->event->status.load() == WriteEvent::Status::Interrupted);
+    VG_CHECK_EQ(clip->event->owner_uid, uint64_t { 0 });
+    VG_CHECK_EQ(f.media.creates, 1);
+    VG_CHECK_EQ(f.media.finishes, 1);
+    f.evaluate();
+    VG_CHECK(video.current() == clip); // the worker completes it; the closed schedule admits nothing either way
+    video.complete(clip, WriteEvent::Status::Interrupted);
+    f.evaluate();
+    VG_CHECK(video.current() == nullptr);
+    VG_CHECK_EQ(f.postScheduleRuleConfig(ScheduleWindowJson(-kHour, kHour)), 0);
+    f.evaluate();
+    VG_REQUIRE(video.current() != nullptr);
+    VG_CHECK(video.current() != clip && video.current()->kind == FileTask::Kind::Continuous);
+}
+
+VG_TEST_CASE(a_mode_switch_finishes_the_running_clip_with_its_uid_before_the_other_mode_starts)
+{
+    // docs/PLAN.md section 8.2 (GATE-4): switching to continuous cancels the pending triggered Video task and
+    // interrupts a running one through the Video revision, its event keeping the owner's UID, and the first
+    // continuous clip is admitted only once the channel is free; switching back does the same with the
+    // UID-zero clip, and the next Timer event is admitted as a triggered task again.
+    Fixture f;
+    f.start();
+    VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0);
+    const auto triggered = RecordJson(true, "MP4", 5000);
+    const auto continuous = WithContinuous(triggered);
+    auto &video = f.ctx->file_channels.video;
+
+    // A pending triggered task, then the switch: canceled, and the next tick admits a continuous clip while
+    // the Timer owner is reported without acceptance.
+    VG_CHECK_EQ(f.postRecordConfig(triggered), 0);
+    f.evaluate();
+    const auto pending = video.current();
+    VG_REQUIRE(pending != nullptr && pending->kind == FileTask::Kind::Triggered);
+    VG_CHECK_EQ(f.postRecordConfig(continuous), 0);
+    VG_CHECK(video.current() == nullptr && pending->event->status.load() == WriteEvent::Status::Canceled);
+    f.evaluate();
+    const auto clip = video.current();
+    VG_REQUIRE(clip != nullptr && clip->kind == FileTask::Kind::Continuous);
+    auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 2 });
+    VG_CHECK(events[0].writer_created && !events[1].writer_created);
+
+    // The clip runs; the switch back interrupts it at its next check, UID 0 kept, and the channel holds it
+    // until its worker completes it: the Timer event is admitted only afterwards, with the owner's UID.
+    f.pushKeyFrame();
+    {
+        RunningWriter writer(f, f.claimVideo());
+        VG_REQUIRE(WaitFor([&] { return FramesWritten(f.media) == 1; }));
+        VG_CHECK_EQ(f.postRecordConfig(triggered), 0);
+        writer.join();
+    }
+    VG_CHECK(clip->event->status.load() == WriteEvent::Status::Interrupted);
+    VG_CHECK_EQ(clip->event->owner_uid, uint64_t { 0 });
+    VG_CHECK_EQ(f.media.finishes, 1);
+    f.evaluate();
+    VG_CHECK(video.current() == clip);
+    events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(!events[0].writer_created);
+    video.complete(clip, WriteEvent::Status::Interrupted);
+    f.evaluate();
+    const auto task = video.current();
+    VG_REQUIRE(task != nullptr && task->kind == FileTask::Kind::Triggered);
+    events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(events[0].writer_created);
+    VG_CHECK_EQ(task->event->owner_uid, events[0].uid);
+
+    // And the reverse: the running triggered clip is interrupted by the switch to continuous and keeps its
+    // owner's UID; the first continuous clip waits for the channel.
+    f.pushKeyFrame();
+    {
+        RunningWriter writer(f, f.claimVideo());
+        VG_REQUIRE(WaitFor([&] { return FramesWritten(f.media) == 2; }));
+        VG_CHECK_EQ(f.postRecordConfig(continuous), 0);
+        writer.join();
+    }
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Interrupted);
+    VG_CHECK_EQ(task->event->owner_uid, events[0].uid);
+    VG_CHECK_EQ(f.media.finishes, 2);
+    f.evaluate();
+    VG_CHECK(video.current() == task);
+    video.complete(task, WriteEvent::Status::Interrupted);
+    f.evaluate();
+    VG_REQUIRE(video.current() != nullptr);
+    VG_CHECK(video.current()->kind == FileTask::Kind::Continuous);
+}
+
+VG_TEST_CASE(http_activation_needs_no_storage_while_continuous_recording_suppresses_the_video_action)
+{
+    // docs/PLAN.md sections 5.2 and 8.2: with continuous recording configured, a Video-only configuration has
+    // no file action for a rule event, so the activation is dispatched without storage and reported without
+    // acceptance; a Photo action makes storage a precondition again and is admitted beside the clip.
+    Fixture f;
+    f.start();
+    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0);
+    VG_CHECK_EQ(f.postRecordConfig(WithContinuous(RecordJson(true, "MP4", 5000))), 0);
+    f.slot->ready = false;
+    VG_CHECK_EQ(f.activateHTTP(), 0);
+    auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(!events[0].writer_created);
+    VG_CHECK(!f.ctx->file_channels.holdsTask());
+
+    VG_CHECK_EQ(f.postRecordConfig(WithContinuous(WithActions(RecordJson(true, "MP4", 5000), true, true, false))), 0);
+    VG_CHECK_EQ(f.activateHTTP(), kEndpointErrorBase + EBUSY);
+    VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+    f.slot->ready = true;
+    f.evaluate(); // the tick admits the clip; the HTTP rule dispatches nothing by itself
+    auto &channels = f.ctx->file_channels;
+    VG_REQUIRE(channels.video.current() != nullptr);
+    VG_CHECK_EQ(f.activateHTTP(), 0);
+    events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(events[0].writer_created); // Photo accepted beside the continuous clip
+    VG_REQUIRE(channels.photo.current() != nullptr);
+    VG_CHECK_EQ(channels.photo.current()->event->owner_uid, events[0].uid);
+    VG_CHECK_EQ(channels.video.current()->event->owner_uid, uint64_t { 0 });
 }
 
 VG_TEST_CASE(record_rule_config_switches_rules_persists_and_rolls_back_failures)
