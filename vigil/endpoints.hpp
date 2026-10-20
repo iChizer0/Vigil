@@ -408,6 +408,7 @@ public:
                 _schedule_rule.reset();
                 _schedule_rule = std::make_unique<ScheduleRule>(*schedule_rule_config, *_ctx);
                 _schedule_rule_config = std::move(schedule_rule_config);
+                publishScheduleGateUnsafe(); // the new schedule gates admission from here, before the next tick
             }
         }
         catch (const std::exception &e)
@@ -659,11 +660,15 @@ public:
                 res_j["bMediaPaused"] = _ctx->media_barrier.isPaused();
                 res_j["bRecordEnabled"] = _ctx->record_rule_enabled.load(std::memory_order_relaxed);
                 {
+                    // The registered admission is the enabled Slot (docs/PLAN.md section 8.1); anything else
+                    // (a test fake) has no status to report.
                     auto get_target_slot_status = [this]() -> std::optional<SlotStatus> {
-                        const std::shared_lock scl(_ctx->slot_check_mutex);
-                        if (_ctx->slot_check.first)
-                            return static_cast<const Slot *>(_ctx->slot_check.first)->getStatus();
-                        return std::nullopt;
+                        return _ctx->slot_admission.with(
+                            [](const Context::SlotAdmission *admission) -> std::optional<SlotStatus> {
+                                if (const auto *slot = dynamic_cast<const Slot *>(admission))
+                                    return slot->getStatus();
+                                return std::nullopt;
+                            });
                     };
                     if (auto sta = get_target_slot_status(); sta.has_value())
                     {
@@ -705,31 +710,19 @@ public:
                     throw Exception("Cannot activate HTTP rule when rule evaluation is disabled");
                 }
             }
+            // The schedule gate as published into the context (docs/PLAN.md section 8.1): the state the rule
+            // loop and admission read.
+            if (!_ctx->schedule_open.load(std::memory_order_acquire))
             {
-                const std::shared_lock lock(_schedule_rule_mutex);
-                if (_schedule_rule && _schedule_rule->type() == VG_RULE_TYPE_SCHEDULE)
-                {
-                    if (!static_cast<ScheduleRule *>(_schedule_rule.get())->isActive(LocalTime::now()))
-                    {
-                        ret = EPERM;
-                        throw Exception(
-                            "Activating HTTP rule required schedule rule to be ready in current configuration");
-                    }
-                }
+                ret = EPERM;
+                throw Exception("Activating HTTP rule required schedule rule to be ready in current configuration");
             }
             // The storage precheck applies only when a file action is enabled (docs/PLAN.md section 5.2). Until
             // Phase 4D every configuration that enables rules enables one, so it always applies today.
-            if (hasEnabledFileAction())
+            if (hasEnabledFileAction() && !_ctx->slot_admission.isReadyToWrite())
             {
-                const std::shared_lock lock(_ctx->slot_check_mutex);
-                if (_ctx->slot_check.second)
-                {
-                    if (!(_ctx->slot_check.second)(_ctx->slot_check.first))
-                    {
-                        ret = EBUSY;
-                        throw Exception("Cannot activate HTTP rule when storage slot is not ready to write");
-                    }
-                }
+                ret = EBUSY;
+                throw Exception("Cannot activate HTTP rule when storage slot is not ready to write");
             }
             // Try to activate. The rule lock covers the type check only: the dispatch runs the RULE callback,
             // which must not run under an internal lock (docs/PLAN.md section 6.2), and an HTTP owner needs
@@ -784,23 +777,30 @@ private:
         }
     }
 
+    // Publishes the schedule gate into the context (docs/PLAN.md section 8.1): open without a schedule rule, or
+    // while the configured one is active at the context's local time. Call with the schedule lock held.
+    void publishScheduleGateUnsafe() const noexcept
+    {
+        const bool open
+            = !_schedule_rule || _schedule_rule->type() != VG_RULE_TYPE_SCHEDULE
+              || static_cast<const ScheduleRule *>(_schedule_rule.get())->isActive(_ctx->shared_time.localTime());
+        _ctx->schedule_open.store(open, std::memory_order_release);
+    }
+
     inline void ruleTaskLoop()
     {
         _ctx->tick();
-        if (!_ctx->record_rule_enabled.load(std::memory_order_relaxed))
+        // The schedule gate is published on every tick, before the enable check, so admission reads one state
+        // whether or not rules are enabled (docs/PLAN.md section 8.1).
+        {
+            const std::shared_lock lock(_schedule_rule_mutex);
+            publishScheduleGateUnsafe();
+        }
+        if (!_ctx->record_rule_enabled.load(std::memory_order_relaxed)
+            || !_ctx->schedule_open.load(std::memory_order_acquire))
             return;
 
         std::shared_ptr<EventOwner> event_owner { nullptr };
-        {
-            const std::shared_lock lock(_schedule_rule_mutex);
-            if (_schedule_rule)
-            {
-                event_owner = _schedule_rule->operator()(*_ctx);
-                if (!event_owner)
-                    return;
-            }
-        }
-
         if (_ctx->shared_inference_result.has_value()
             && std::holds_alternative<std::monostate>(_ctx->shared_inference_result->data))
         {

@@ -162,13 +162,15 @@ struct Context
         capture_media_buffer.clear();
     }
 
-    // Dispatches one owner after attribution (docs/PLAN.md sections 5.1, 6.2, and 7.1): records it as the last
-    // dispatched owner, attempts a task in every file channel the snapshot enables and a Sound trigger when it
-    // enables Sound, then reports the owner through the RULE callback. The result, which is also
-    // `writer_created`, is file acceptance only: at least one channel accepted a task. A channel that holds a
-    // task, or whose settings changed since the snapshot was loaded, accepts nothing, and a rejected or failed
-    // Sound trigger changes nothing else. No configuration enables two channels or Sound before Phase 4D. Runs
-    // on the rule thread and on the HTTP request thread.
+    // Dispatches one owner after attribution (docs/PLAN.md sections 5.1, 6.2, 7.1, and 8.1): records it as the
+    // last dispatched owner, attempts a task in every file channel the snapshot enables and a Sound trigger
+    // when it enables Sound, then reports the owner through the RULE callback. The result, which is also
+    // `writer_created`, is file acceptance only: at least one channel accepted a task. A channel accepts
+    // nothing while it holds a task, when its settings changed since the snapshot was loaded, when a gate
+    // closed since the caller evaluated it, or without a usable Slot with headroom; a rejected file action
+    // leaves nothing pending, so the next owner proceeds, and a rejected or failed Sound trigger changes nothing
+    // else. No configuration enables two channels or Sound before Phase 4D. Runs on the rule thread and on the
+    // HTTP request thread.
     bool dispatchRuleEvent(std::shared_ptr<EventOwner> owner) const noexcept
     {
         if (!owner)
@@ -180,11 +182,9 @@ struct Context
             last_dispatched_owner.set(owner);
             if (loaded.settings)
             {
-                if (loaded.settings->photo
-                    && file_channels.photo.tryAccept(owner, loaded.settings->photo, loaded.photo_revision))
+                if (file_channels.photo.tryAccept(owner, loaded))
                     accepted = true;
-                if (loaded.settings->video
-                    && file_channels.video.tryAccept(owner, loaded.settings->video, loaded.video_revision))
+                if (file_channels.video.tryAccept(owner, loaded))
                     accepted = true;
                 if (loaded.settings->sound_enabled)
                     sound_executor.tryTrigger();
@@ -303,9 +303,11 @@ struct Context
         alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _paused = false;
         alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> _active = 0;
     } media_barrier;
-    // Callback for slot status check (for HTTP rule)
-    std::shared_mutex slot_check_mutex;
-    std::pair<const void * /* owner */, std::function<bool(const void *)>> slot_check = { nullptr, nullptr };
+    // The schedule gate (docs/PLAN.md section 8.1): published by the rule loop on every tick before the enable
+    // check, and by the endpoint when the schedule configuration changes, so dispatch from the rule thread and
+    // the HTTP thread reads one state inside the admission section. Open until the first publication, as a
+    // runtime without a schedule is.
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> schedule_open = true;
 
     // The published action settings snapshot and its revisions (docs/PLAN.md section 7.1). The global revision
     // detects configuration-commit conflicts: `update` publishes only for a caller that saw the current one, so
@@ -321,6 +323,12 @@ struct Context
             size_t photo_revision;
             size_t video_revision;
             std::shared_ptr<const ActionSettings> settings; // null only if the first allocation failed
+
+            // The loaded revision of the file channel that writes `type`.
+            size_t channelRevision(CaptureType type) const noexcept
+            {
+                return type == CaptureType::Image ? photo_revision : video_revision;
+            }
         };
 
         // Publishes `next` if `rev` is still the current revision; an equal snapshot publishes nothing. Returns
@@ -389,8 +397,10 @@ struct Context
     // One automatic file channel, Photo or Video (docs/PLAN.md section 7.2): at most one accepted task, pending
     // or running, and the last retired one. The channel holds its task from acceptance until the worker
     // completes it, which follows the interval hold and the failure cooldown (section 6.2), and accepts nothing
-    // meanwhile. Every operation is identity-aware: completing or canceling task A never touches a newer task
-    // B. Phase 4C-5 binds the Slot at acceptance; `requestStop` on a running task comes with its first caller,
+    // meanwhile. Acceptance is admission (section 8.1): the gates, the channel, and the registered Slot are
+    // checked in one critical section, and a task carries the Slot it is bound to and its budget reservation.
+    // Every operation is identity-aware: completing or canceling task A never touches a newer task B, and a
+    // worker claims only a task bound to its Slot. `requestStop` on a running task comes with its first caller,
     // the continuous-mode handover of Phase 5A.
     struct FileChannel
     {
@@ -408,29 +418,46 @@ struct Context
             return _type;
         }
 
-        // Accepts a task for `owner`, bound to the channel settings the dispatcher loaded and the revision they
-        // were published under. Null while a task is held, or when the channel's settings changed since the
-        // load: a task bound to them would be stale, and the next tick dispatches with the new ones.
+        // Accepts a task for `owner` on this channel, from the snapshot the dispatcher loaded, in one critical
+        // section (docs/PLAN.md section 8.1): the snapshot enables the channel, the channel is idle (its last
+        // task completed, after its hold), its settings revision is still the loaded one, the gates are open
+        // (rules enabled, the schedule open, media not paused), and the registered Slot is usable and has
+        // headroom, whose reservation the task carries with the Slot's registration. Null otherwise: nothing is
+        // left pending, and the next owner is tried afresh. A task bound to old settings, an old Slot, or a
+        // closed gate is never created.
         std::shared_ptr<FileTask> tryAccept(const std::shared_ptr<EventOwner> &owner,
-            const std::shared_ptr<FileWriterSettings> &settings, size_t settings_revision)
+            const SharedActionSettings::Loaded &loaded)
         {
+            const auto settings = loaded.settings ? loaded.settings->channel(_type) : nullptr;
+            if (!settings)
+                return nullptr;
             const auto steady_time = _ctx.shared_time.steadyTime();
             const std::unique_lock lock(_mutex);
-            if (_current || _ctx.action_settings.channelRevision(_type) != settings_revision)
+            if (_current || _ctx.action_settings.channelRevision(_type) != loaded.channelRevision(_type))
+                return nullptr;
+            if (!_ctx.record_rule_enabled.load(std::memory_order_relaxed)
+                || !_ctx.schedule_open.load(std::memory_order_acquire) || _ctx.media_barrier.isPaused())
+                return nullptr;
+            auto admitted = _ctx.slot_admission.tryAdmit(loaded.settings->watermarks, settings->watermarks.task_bytes);
+            if (!admitted.registration)
                 return nullptr;
             // The task carries its owner's event time (the input's timestamp for FRAME and direct EVENT owners),
             // not the current time.
-            _current = std::make_shared<FileTask>(_type, owner, settings, settings_revision,
-                _ctx.file_task_sequence.fetch_add(1, std::memory_order_relaxed) + 1,
+            _current = std::make_shared<FileTask>(_type, owner, settings, loaded.channelRevision(_type),
+                _ctx.file_task_sequence.fetch_add(1, std::memory_order_relaxed) + 1, admitted.registration,
+                std::move(admitted.reservation),
                 std::make_shared<WriteEvent>(steady_time, owner->timestamp, owner->uid));
             return _current;
         }
 
-        // Claims the pending task for a worker: Pending becomes Writing. Null when nothing is pending.
-        std::shared_ptr<FileTask> claim() noexcept
+        // Claims the pending task for the worker of the Slot registered as `registration`: Pending becomes
+        // Writing. Null when nothing is pending, or when the pending task is bound to another registration,
+        // which is not this worker's to run (docs/PLAN.md section 7.2; closing that Slot's admission cancels it).
+        std::shared_ptr<FileTask> claim(uint64_t registration) noexcept
         {
             const std::unique_lock lock(_mutex);
-            if (!_current || _current->event->status.load(std::memory_order_acquire) != WriteEvent::Status::Pending)
+            if (!_current || _current->event->status.load(std::memory_order_acquire) != WriteEvent::Status::Pending
+                || _current->slot_registration != registration)
                 return nullptr;
             _current->event->status.store(WriteEvent::Status::Writing, std::memory_order_release);
             return _current;
@@ -442,6 +469,16 @@ struct Context
         {
             const std::unique_lock lock(_mutex);
             if (_current && _current->event->status.load(std::memory_order_acquire) == WriteEvent::Status::Pending)
+                retireUnsafe(WriteEvent::Status::Canceled);
+        }
+
+        // Cancels the pending task if it is bound to the Slot registered as `registration`, whose admission is
+        // closing (docs/PLAN.md section 9). A claimed task is finished by its worker.
+        void cancelPendingBoundTo(uint64_t registration) noexcept
+        {
+            const std::unique_lock lock(_mutex);
+            if (_current && _current->event->status.load(std::memory_order_acquire) == WriteEvent::Status::Pending
+                && _current->slot_registration == registration)
                 retireUnsafe(WriteEvent::Status::Canceled);
         }
 
@@ -489,9 +526,11 @@ struct Context
         }
 
     private:
-        // Retires the held task with its terminal status. Call with the lock held.
+        // Retires the held task with its terminal status; the reservation of a task retired unrun goes with it
+        // (a claimed task's reservation is its worker's). Call with the lock held.
         void retireUnsafe(WriteEvent::Status status) noexcept
         {
+            _current->reservation.release();
             _current->event->status.store(status, std::memory_order_release);
             _last = std::move(_current);
             _current.reset();
@@ -543,6 +582,13 @@ struct Context
             video.cancelPending();
         }
 
+        // Cancels the pending task of each channel that is bound to the Slot registered as `registration`.
+        void cancelPendingBoundTo(uint64_t registration) noexcept
+        {
+            photo.cancelPendingBoundTo(registration);
+            video.cancelPendingBoundTo(registration);
+        }
+
         // What rule info reports: the most recently accepted task across both channels, that is the held task
         // accepted last if any channel holds one, else the retired task accepted last.
         Latest latest() const noexcept
@@ -586,109 +632,99 @@ struct Context
         std::shared_ptr<EventOwner> _owner;
     } mutable last_dispatched_owner;
 
-    // In-flight budgets (docs/PLAN.md section 9): the bytes that admitted tasks may still write into a
-    // filesystem, which the index does not see while the files are in a cache directory. Admission subtracts
-    // them from the free space before comparing with the critical watermark, in the same critical section as
-    // the reservation, so two admissions cannot both count the same free bytes; automatic Photo and Video and
-    // manual capture on the same filesystem share one budget. Watermarks are estimates, not reservations: the
-    // actual write errors still decide. A holder keeps its reservation for the life of its task and releases it
-    // on every terminal path.
-    struct InFlightBudgets
+    // In-flight budgets (docs/PLAN.md section 9): `types::InFlightBudgets`, shared by automatic Photo and Video
+    // and manual capture on the same filesystem.
+    using InFlightBudgets = types::InFlightBudgets;
+    InFlightBudgets in_flight_budgets;
+
+    // The admission interface of the enabled Slot (docs/PLAN.md sections 7.1, 8.1, and 9), which the Slot
+    // registers while it is enabled and a file channel reads inside its admission section.
+    struct SlotAdmission
+    {
+        virtual ~SlotAdmission() = default;
+
+        // Whether the Slot can take a task now: enabled and in its ready state (admission, not continuation).
+        virtual bool isReadyToWrite() const noexcept = 0;
+
+        // The quota and free-space probes of one task against the aggregate admission mark, with the task's own
+        // bytes reserved in the same critical section (section 9). Empty when refused.
+        virtual InFlightBudgets::Reservation tryAdmit(const WaterMarks &admission, FileSize task_bytes) noexcept = 0;
+    };
+
+    // The registered Slot admission, which replaces the slot check callback: at most one Slot, the enabled one,
+    // with a registration that the tasks it admits are bound to, so a worker runs only its own Slot's tasks and
+    // closing admission retires what the Slot accepted but no worker claimed. Lock order: a channel lock, then
+    // this registry, then the Slot's own locks; `close` takes the channel locks after releasing the registry.
+    struct SlotAdmissionRegistry
     {
     public:
-        using FilesystemId = std::uintmax_t; // the device number of the filesystem (utils::FilesystemIdOf)
-
-        // One admitted reservation, released when destroyed or released explicitly. Empty when refused.
-        class Reservation final
+        struct Admitted
         {
-        public:
-            Reservation() noexcept = default;
-
-            Reservation(Reservation &&other) noexcept
-                : _budgets(std::exchange(other._budgets, nullptr)), _filesystem(other._filesystem), _bytes(other._bytes)
-            {
-            }
-
-            Reservation &operator=(Reservation &&other) noexcept
-            {
-                if (this != &other)
-                {
-                    release();
-                    _budgets = std::exchange(other._budgets, nullptr);
-                    _filesystem = other._filesystem;
-                    _bytes = other._bytes;
-                }
-                return *this;
-            }
-
-            ~Reservation() noexcept
-            {
-                release();
-            }
-
-            explicit operator bool() const noexcept
-            {
-                return _budgets != nullptr;
-            }
-
-            FileSize bytes() const noexcept
-            {
-                return _budgets ? _bytes : 0;
-            }
-
-            void release() noexcept
-            {
-                if (const auto budgets = std::exchange(_budgets, nullptr))
-                    budgets->release(_filesystem, _bytes);
-            }
-
-        private:
-            friend InFlightBudgets;
-
-            Reservation(InFlightBudgets &budgets, FilesystemId filesystem, FileSize bytes) noexcept
-                : _budgets(&budgets), _filesystem(filesystem), _bytes(bytes)
-            {
-            }
-
-            InFlightBudgets *_budgets = nullptr;
-            FilesystemId _filesystem = 0;
-            FileSize _bytes = 0;
+            uint64_t registration = 0; // 0: refused
+            InFlightBudgets::Reservation reservation;
         };
 
-        // Admits a task that may write `bytes` to `filesystem` when `free_bytes`, minus what admitted tasks may
-        // still write there, exceed `critical_remain_bytes`, and reserves its bytes in the same critical
-        // section. Empty when refused.
-        Reservation tryReserve(FilesystemId filesystem, FileSize bytes, FileSize free_bytes,
-            FileSize critical_remain_bytes) noexcept
+        explicit SlotAdmissionRegistry(Context &ctx) noexcept : _ctx(ctx) { }
+
+        // Opens admission for `slot`: the tasks accepted from here on bind to the returned registration, which
+        // is never 0 and never reused.
+        uint64_t open(SlotAdmission &slot) noexcept
         {
-            const std::lock_guard lock(_mutex);
-            const auto it = _bytes.find(filesystem);
-            const FileSize in_flight = it != _bytes.end() ? it->second : 0;
-            if (free_bytes - in_flight <= critical_remain_bytes)
-                return {};
-            _bytes[filesystem] += bytes;
-            return Reservation(*this, filesystem, bytes);
+            const std::unique_lock lock(_mutex);
+            _slot = &slot;
+            _registration = ++_sequence;
+            return _registration;
         }
 
-        // What admitted tasks may still write to `filesystem`.
-        FileSize inFlight(FilesystemId filesystem) const noexcept
+        // Closes admission for `registration` if it is the open one, then cancels the pending tasks bound to
+        // it: nothing is accepted for the Slot afterwards, and a claimed task is finished by its worker.
+        void close(uint64_t registration) noexcept
         {
-            const std::lock_guard lock(_mutex);
-            const auto it = _bytes.find(filesystem);
-            return it != _bytes.end() ? it->second : 0;
+            {
+                const std::unique_lock lock(_mutex);
+                if (_registration != registration)
+                    return;
+                _slot = nullptr;
+                _registration = 0;
+            }
+            _ctx.file_channels.cancelPendingBoundTo(registration);
+        }
+
+        // Whether a usable Slot is registered: the HTTP precheck of a file action (docs/PLAN.md section 5.2).
+        bool isReadyToWrite() const noexcept
+        {
+            const std::shared_lock lock(_mutex);
+            return _slot && _slot->isReadyToWrite();
+        }
+
+        // Admits one task on the registered Slot: its registration with the reservation, or registration 0
+        // when no usable Slot is registered or it has no headroom.
+        Admitted tryAdmit(const WaterMarks &admission, FileSize task_bytes) const noexcept
+        {
+            const std::shared_lock lock(_mutex);
+            if (!_slot || !_slot->isReadyToWrite())
+                return {};
+            auto reservation = _slot->tryAdmit(admission, task_bytes);
+            if (!reservation)
+                return {};
+            return { _registration, std::move(reservation) };
+        }
+
+        // Runs `fn` on the registered Slot, null when none, under the registry lock (rule info reads its status).
+        template<typename F>
+        auto with(F &&fn) const
+        {
+            const std::shared_lock lock(_mutex);
+            return fn(static_cast<const SlotAdmission *>(_slot));
         }
 
     private:
-        void release(FilesystemId filesystem, FileSize bytes) noexcept
-        {
-            const std::lock_guard lock(_mutex);
-            if (const auto it = _bytes.find(filesystem); it != _bytes.end() && (it->second -= bytes) <= 0)
-                _bytes.erase(it);
-        }
-
-        mutable std::mutex _mutex;
-        std::unordered_map<FilesystemId, FileSize> _bytes;
-    } in_flight_budgets;
+        Context &_ctx;
+        mutable std::shared_mutex _mutex;
+        SlotAdmission *_slot = nullptr;
+        uint64_t _registration = 0;
+        uint64_t _sequence = 0;
+    } slot_admission;
 
     // Shared video/audio frame buffers
     template<size_t PeriodLimit>
@@ -974,7 +1010,7 @@ struct Context
 
     // Constructor. `run_sound_worker` is the test seam of SoundActionExecutor.
     Context(const vg_config_t &cfg, bool run_sound_worker = true)
-        : c_api(cfg), file_channels(*this), sound_executor(*this, run_sound_worker)
+        : c_api(cfg), file_channels(*this), slot_admission(*this), sound_executor(*this, run_sound_worker)
     {
         action_settings.sync(c_api.media);
     }

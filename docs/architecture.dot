@@ -142,6 +142,7 @@ digraph G {
       ctrl_rule_enabled [label="record_rule_enabled\nstd::atomic<bool>", shape=note];
       ctrl_infer_subs [label="inference_subscribers\nstd::atomic<int>", shape=note];
       ctrl_media_paused [label="media_barrier\npause + admission", shape=note];
+      ctrl_schedule_open [label="schedule_open\nstd::atomic<bool>", shape=note];
       ctrl_writers_active [label="media_barrier.activeOperations\nstd::atomic<size_t>", shape=note];
     }
 
@@ -162,7 +163,7 @@ digraph G {
       shared_infer_result [label="SharedInferenceResult\nDetectionResultVec\nClassificationResultVec", shape=note];
       shared_rule_evt [label="FileChannels\nPhoto / Video FileChannel\nCurrent / Last FileTask\n(Owner, Settings, Revision, Sequence)", shape=note];
       shared_writer_cfg [label="SharedActionSettings\nGlobal + Per-Channel Revisions\nshared_ptr<const ActionSettings>\n(Immutable, Factory Created)\nWaterMarks", shape=note];
-      slot_check [label="Slot Check Callback\nSelected Slot Owner\nReady-To-Write Predicate", shape=note];
+      slot_admission [label="SlotAdmissionRegistry\nEnabled Slot: Ready / tryAdmit\nRegistration (Task Identity)", shape=note];
     }
   }
 
@@ -225,7 +226,7 @@ digraph G {
       video_writer [label="VideoWriter<T>\nKeyframe Clip Boundaries\nClip Length Control\nFrame-by-Frame Write\nvideo_file_*_cb", shape=box];
     }
 
-    writer_thread [label="Slot Worker Threads (Photo, Video)\nFileChannelWorker<Slot> per Channel (50ms)\nReady / Budget / Pause Probes\nClaim, Write, Publish, Hold, Complete", shape=box, style=filled, fillcolor=lightsalmon];
+    writer_thread [label="Slot Worker Threads (Photo, Video)\nFileChannelWorker<Slot> per Channel (50ms)\nReady / Pause Probes\nClaim (own Slot), Write, Publish, Hold, Complete", shape=box, style=filled, fillcolor=lightsalmon];
 
     capture_thread [label="Capture Thread (50ms)\nCaptureEvent Check\nSpace Check\nMedia Pause Check\nDirect File Write", shape=box, style=filled, fillcolor=lightsalmon];
   }
@@ -318,11 +319,12 @@ digraph G {
   schedule_ep -> rule_schedule [color=blue, xlabel="create/update"];
   record_ep -> rule_thread [color=blue, xlabel="swap rule"];
   record_ep -> rule_http [color=blue, xlabel="activate"];
-  record_ep -> slot_check [color=blue, xlabel="HTTP precheck"];
+  record_ep -> slot_admission [color=blue, xlabel="HTTP precheck"];
+  record_ep -> ctrl_schedule_open [color=blue, xlabel="HTTP precheck"];
   rule_info_ep -> shared_rule_evt [color=blue, xlabel="latest()"];
   rule_info_ep -> ctrl_rule_enabled [color=blue, xlabel="read"];
   rule_info_ep -> ctrl_media_paused [color=blue, xlabel="read"];
-  rule_info_ep -> slot_check [color=blue, xlabel="record slot status"];
+  rule_info_ep -> slot_admission [color=blue, xlabel="record slot status"];
   storage_cfg_ep -> storage [color=blue, xlabel="setConfig"];
   storage_status_ep -> storage [color=blue, xlabel="getStatus"];
   storage_ctrl_ep -> storage [color=blue];
@@ -351,7 +353,10 @@ digraph G {
   ctx -> shared_time [color=blue, xlabel="tick()", weight=2];
   ctx -> ctrl_rule_enabled [color=blue, weight=2];
   ctx -> ctrl_infer_subs [color=blue];
-  ctx -> slot_check [color=blue];
+  ctx -> slot_admission [color=blue];
+  shared_rule_evt -> slot_admission [color=blue, xlabel="tryAdmit at acceptance"];
+  shared_rule_evt -> ctrl_schedule_open [color=blue, xlabel="read"];
+  rule_thread -> ctrl_schedule_open [color=blue, xlabel="publish"];
   infer_q -> shared_infer_result [color=orange, style=dashed, xlabel="pop & move", weight=2];
   rule_thread -> ctx [color=blue, xlabel="tick()", weight=3];
   rule_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="dispatchRuleEvent()"];
@@ -437,7 +442,7 @@ digraph G {
   slot_state -> slot_recovery [color=blue, xlabel="retry/give up"];
   slot_ops -> slot_quota [color=blue, xlabel="quota check"];
   slot_ops -> fsck_util [color=blue, xlabel="dirty check/repair"];
-  slot_ops -> slot_check [color=blue, xlabel="attach/detach ready cb"];
+  slot_ops -> slot_admission [color=blue, xlabel="open/close admission"];
   slot_quota -> indexer [color=blue, xlabel="size() query", weight=2];
   slot_quota -> slot_rotating [color=blue, xlabel="set flag"];
   indexer -> write_stats [color=blue, weight=2];

@@ -18,10 +18,12 @@
 #include <filesystem>
 #include <ios>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -1167,6 +1169,110 @@ private:
     }
 };
 
+// In-flight budgets (docs/PLAN.md section 9): the bytes that admitted tasks may still write into a
+// filesystem, which the index does not see while the files are in a cache directory. Admission subtracts
+// them from the free space before comparing with the critical watermark, in the same critical section as
+// the reservation, so two admissions cannot both count the same free bytes; automatic Photo and Video and
+// manual capture on the same filesystem share one budget. Watermarks are estimates, not reservations: the
+// actual write errors still decide. A holder keeps its reservation for the life of its task and releases it
+// on every terminal path.
+struct InFlightBudgets
+{
+public:
+    using FilesystemId = std::uintmax_t; // the device number of the filesystem (utils::FilesystemIdOf)
+
+    // One admitted reservation, released when destroyed or released explicitly. Empty when refused.
+    class Reservation final
+    {
+    public:
+        Reservation() noexcept = default;
+
+        Reservation(Reservation &&other) noexcept
+            : _budgets(std::exchange(other._budgets, nullptr)), _filesystem(other._filesystem), _bytes(other._bytes)
+        {
+        }
+
+        Reservation &operator=(Reservation &&other) noexcept
+        {
+            if (this != &other)
+            {
+                release();
+                _budgets = std::exchange(other._budgets, nullptr);
+                _filesystem = other._filesystem;
+                _bytes = other._bytes;
+            }
+            return *this;
+        }
+
+        ~Reservation() noexcept
+        {
+            release();
+        }
+
+        explicit operator bool() const noexcept
+        {
+            return _budgets != nullptr;
+        }
+
+        FileSize bytes() const noexcept
+        {
+            return _budgets ? _bytes : 0;
+        }
+
+        void release() noexcept
+        {
+            if (const auto budgets = std::exchange(_budgets, nullptr))
+                budgets->release(_filesystem, _bytes);
+        }
+
+    private:
+        friend InFlightBudgets;
+
+        Reservation(InFlightBudgets &budgets, FilesystemId filesystem, FileSize bytes) noexcept
+            : _budgets(&budgets), _filesystem(filesystem), _bytes(bytes)
+        {
+        }
+
+        InFlightBudgets *_budgets = nullptr;
+        FilesystemId _filesystem = 0;
+        FileSize _bytes = 0;
+    };
+
+    // Admits a task that may write `bytes` to `filesystem` when `free_bytes`, minus what admitted tasks may
+    // still write there, exceed `critical_remain_bytes`, and reserves its bytes in the same critical
+    // section. Empty when refused.
+    Reservation tryReserve(FilesystemId filesystem, FileSize bytes, FileSize free_bytes,
+        FileSize critical_remain_bytes) noexcept
+    {
+        const std::lock_guard lock(_mutex);
+        const auto it = _bytes.find(filesystem);
+        const FileSize in_flight = it != _bytes.end() ? it->second : 0;
+        if (free_bytes - in_flight <= critical_remain_bytes)
+            return {};
+        _bytes[filesystem] += bytes;
+        return Reservation(*this, filesystem, bytes);
+    }
+
+    // What admitted tasks may still write to `filesystem`.
+    FileSize inFlight(FilesystemId filesystem) const noexcept
+    {
+        const std::lock_guard lock(_mutex);
+        const auto it = _bytes.find(filesystem);
+        return it != _bytes.end() ? it->second : 0;
+    }
+
+private:
+    void release(FilesystemId filesystem, FileSize bytes) noexcept
+    {
+        const std::lock_guard lock(_mutex);
+        if (const auto it = _bytes.find(filesystem); it != _bytes.end() && (it->second -= bytes) <= 0)
+            _bytes.erase(it);
+    }
+
+    mutable std::mutex _mutex;
+    std::unordered_map<FilesystemId, FileSize> _bytes;
+};
+
 // One automatic file task (docs/PLAN.md section 7.2): the owner it serves, the channel settings bound at
 // acceptance with the revision they were published under, its place in the acceptance sequence across both
 // channels, and the WriteEvent that carries its status, which manual capture and CacheFileInfo share.
@@ -1178,12 +1284,16 @@ struct FileTask
     const std::shared_ptr<FileWriterSettings> settings;
     const size_t settings_revision;
     const uint64_t sequence;
+    const uint64_t slot_registration;         // the Slot admission the task is bound to (docs/PLAN.md section 7.2)
+    InFlightBudgets::Reservation reservation; // its bytes in flight (section 9): held from acceptance, taken by the
+                                              // worker that runs it, released once the file is published or the
+                                              // task is retired unrun
     const std::shared_ptr<WriteEvent> event;
 
     FileTask(CaptureType tp, std::shared_ptr<EventOwner> o, std::shared_ptr<FileWriterSettings> s, size_t rev,
-        uint64_t seq, std::shared_ptr<WriteEvent> e) noexcept
+        uint64_t seq, uint64_t slot, InFlightBudgets::Reservation r, std::shared_ptr<WriteEvent> e) noexcept
         : type(tp), owner(std::move(o)), settings(std::move(s)), settings_revision(rev), sequence(seq),
-          event(std::move(e))
+          slot_registration(slot), reservation(std::move(r)), event(std::move(e))
     {
     }
 

@@ -24,10 +24,8 @@ using namespace vigil::types;
 //
 //   bool stopRequested() const;                           the Slot is stopping: end the loop and any hold
 //   bool isReadyToWrite() const;                          the Slot can take a task
-//   Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &admission, FileSize task_bytes);
-//                                                         the quota and free-space probes against the aggregate
-//                                                         admission mark, with the task's own bytes reserved
-//                                                         (section 9)
+//   uint64_t registration() const;                        the Slot's admission registration: the worker claims
+//                                                         only tasks bound to it (section 8.1)
 //   std::unique_ptr<W> createWriter(const std::shared_ptr<FileTask> &);   the writer of a claimed task; throws
 //                                                                           when it cannot be built
 //   void publish(CacheFileInfo &&);                       the filesystem publication and the FILE callback
@@ -36,9 +34,10 @@ using namespace vigil::types;
 //
 // The writer W runs its task to the terminal status with operator(), reports endTime(), and hands over the
 // recorded file with takePublication() (empty when nothing is published), generating its thumbnail while it
-// still holds its media operation. One task runs as admit, claim, write (the writer finishes its sink on every
-// path), takePublication, release the writer and with it the media operation, publish outside it, release the
-// budget reservation now that the index sees the file, then the hold: the channel holds a Completed or Failed
+// still holds its media operation. A task was admitted at dispatch with its budget reserved (section 8.1); it
+// runs as claim, write (the writer finishes its sink on every path), takePublication, release the writer and
+// with it the media operation, publish outside it, release the budget reservation now that the index sees the
+// file, then the hold: the channel holds a Completed or Failed
 // task until the interval (plus the cooldown after a failure) has elapsed from the writer's start, and only
 // then completes it, while Canceled and Interrupted (a closed gate) complete at once. A constructor failure is
 // a failed task like any other. The cooldown and the consecutive failure limit, which marks the adapter failed
@@ -59,11 +58,11 @@ public:
     {
     }
 
-    // The thread body: a task of this channel from before this worker started is stale; then one step per probe
-    // period until the adapter requests a stop or the failure limit is reached.
+    // The thread body: one step per probe period until the adapter requests a stop or the failure limit is
+    // reached. A task accepted before the worker started is its own Slot's, bound at admission, and is served
+    // like any other.
     void run() noexcept
     {
-        _ctx.file_channels.of(_type).cancelPending();
         while (!_adapter.stopRequested())
         {
             const auto start = std::chrono::steady_clock::now();
@@ -81,35 +80,22 @@ public:
         }
     }
 
-    // One probe and, when it admits one, one task: Idle when nothing was claimed, Ran when a task was completed,
-    // Stop when the loop must end (a stop request, or the failure limit).
+    // One probe and, when it claims one, one task: Idle when nothing was claimed, Ran when a task was completed,
+    // Stop when the loop must end (a stop request, or the failure limit). The recheck before a claim covers the
+    // Slot (ready, and the task's own by registration) and the media pause, never the schedule (docs/PLAN.md
+    // section 8.1); the writer rechecks the rule and revision gates before it creates anything.
     Step step() noexcept
     {
-        const auto loaded = _ctx.action_settings.get();
-        if (!loaded.settings) [[unlikely]]
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "ActionSettings is null in the ", channelName(), " worker of ",
-                _adapter.name(), ", cannot start a writer task");
-            return Step::Idle;
-        }
-        // This worker's channel in the snapshot (docs/PLAN.md section 7.1). Nothing to write while it is
-        // disabled: the commit that disabled it moved its revision, which canceled its pending task.
-        const auto &channel = loaded.settings->channel(_type);
-        if (!channel || !_adapter.isReadyToWrite())
-            return Step::Idle;
-        // Against the aggregate mark of the snapshot, as the Slot's readiness is, with this channel's own bytes
-        // reserved (section 9).
-        auto admission = _adapter.tryAdmit(loaded.settings->watermarks, channel->watermarks.task_bytes);
-        if (!admission)
+        if (!_adapter.isReadyToWrite())
             return Step::Idle;
         // The writer's admission is the linearization point of a pause (section 8.3); this cheap pre-check keeps
         // the task unclaimed.
         if (_ctx.media_barrier.isPaused())
             return Step::Idle;
-        const auto task = _ctx.file_channels.of(_type).claim();
+        const auto task = _ctx.file_channels.of(_type).claim(_adapter.registration());
         if (!task)
             return Step::Idle;
-        return runTask(task, std::move(admission)) ? Step::Ran : Step::Stop;
+        return runTask(task) ? Step::Ran : Step::Stop;
     }
 
 private:
@@ -120,11 +106,12 @@ private:
         return _type == CaptureType::Image ? "Photo" : "Video";
     }
 
-    // Runs one claimed task through to its completion, holding its budget reservation until its file is
-    // published. False when the loop must end.
-    bool runTask(const std::shared_ptr<FileTask> &task, Context::InFlightBudgets::Reservation admission) noexcept
+    // Runs one claimed task through to its completion, holding the budget reservation it was admitted with until
+    // its file is published. False when the loop must end.
+    bool runTask(const std::shared_ptr<FileTask> &task) noexcept
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting a ", channelName(), " writer task for ", _adapter.name());
+        auto admission = std::move(task->reservation); // released below, or with this frame on a failure
         auto status = WriteEvent::Status::Failed;
         auto end = std::chrono::steady_clock::now() + task->settings->interval; // a constructor failure holds from here
         try

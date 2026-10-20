@@ -18,6 +18,7 @@
 
 #include "check.hpp"
 #include "fake_config.hpp"
+#include "fake_slot.hpp"
 
 using namespace vigil;
 using namespace vigil::types;
@@ -30,8 +31,9 @@ namespace {
 struct Fixture
 {
     Context ctx;
+    FakeSlotAdmission slot; // registered and ready: a dispatch needs a usable Slot (docs/PLAN.md section 8.1)
 
-    Fixture() : ctx(MakeFakeConfig()) { }
+    Fixture() : ctx(MakeFakeConfig()), slot(ctx) { }
 };
 
 using Overrides = std::initializer_list<std::pair<const char *, nlohmann::json>>;
@@ -309,7 +311,7 @@ VG_TEST_CASE(sync_cancels_the_pending_task_of_a_channel_whose_settings_changed)
     VG_CHECK(f.ctx.record_rule_enabled.load());
 
     VG_CHECK(f.ctx.dispatchRuleEvent(owner())); // accepted again, with the new settings
-    const auto claimed = video.claim();
+    const auto claimed = video.claim(f.slot.registration());
     VG_REQUIRE(claimed != nullptr);
     VG_CHECK_EQ(claimed->settings->interval.count(), 2500L);
     VG_CHECK_EQ(cfg.sync(f.ctx, cfg.prepare(f.ctx)), 0); // back to 5000 ms: the claimed task is its worker's
