@@ -16,6 +16,7 @@
 #include <thread>
 
 #include "vigil/configs.hpp"
+#include "vigil/constants.hpp"
 #include "vigil/context.hpp"
 #include "vigil/json.hpp" // IWYU pragma: keep
 #include "vigil/types.hpp"
@@ -38,6 +39,7 @@ struct SoundActionExecutorTestAccess
 using namespace vigil;
 using namespace vigil::types;
 using namespace vigil::configs;
+using namespace vigil::constants;
 using namespace vigil::tests;
 
 namespace {
@@ -147,12 +149,17 @@ struct Fixture
         return true;
     }
 
-    // Publishes a snapshot with Sound switched as given, built directly: the parser rejects it until Phase 4D.
+    // Publishes a snapshot with the Video channel enabled and Sound switched as given, built directly: the
+    // parser rejects Sound until Phase 4D.
     void publishSound(bool enabled)
     {
         auto &shared = ctx.action_settings;
         VG_REQUIRE(shared.update(shared.getRevision(),
-            ActionSettings::create(false, enabled, nullptr, nullptr, &ctx.c_api.media)));
+            ActionSettings::create(false, enabled, nullptr,
+                FileWriterSettings::create(CaptureType::Video, kRecordWriterDefaultFormat,
+                    kRecordWriterDefaultIntervalMs, kRecordWriterPrefixDefault, kVideoClipLengthDefault,
+                    &ctx.c_api.media),
+                &ctx.c_api.media)));
     }
 
     // Enables Sound and rules, the gates the worker rechecks after claiming a trigger.
@@ -348,10 +355,11 @@ VG_TEST_CASE(stop_waits_for_the_playing_callback_and_the_executor_stays_stopped)
 VG_TEST_CASE(dispatch_triggers_sound_only_when_the_snapshot_enables_it_and_reports_the_dispatch_time)
 {
     Fixture f;
+    f.publishSound(false); // one Video channel, Sound disabled
     f.ctx.record_rule_enabled.store(true);
     f.ctx.tick();
     const auto owner = Owner();
-    VG_CHECK(f.ctx.tryCreateWriterEvent(owner)); // Sound disabled (the default): nothing is triggered
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner)); // the file task is accepted; Sound disabled: nothing is triggered
     VG_CHECK(f.executor().state() == State::Idle);
     {
         const auto events = RuleEventRecorder::take();
@@ -362,14 +370,14 @@ VG_TEST_CASE(dispatch_triggers_sound_only_when_the_snapshot_enables_it_and_repor
     }
 
     f.publishSound(true);
-    VG_CHECK(!f.ctx.tryCreateWriterEvent(Owner()));   // the file task is still pending: not accepted again
+    VG_CHECK(!f.ctx.dispatchRuleEvent(Owner()));      // the file task is still pending: not accepted again
     VG_CHECK(f.executor().state() == State::Pending); // but Sound was triggered on its own
     {
         const auto events = RuleEventRecorder::take();
         VG_REQUIRE(events.size() == size_t { 1 });
         VG_CHECK(!events[0].writer_created); // file acceptance only; Sound is not part of it
     }
-    VG_CHECK(!f.ctx.tryCreateWriterEvent(Owner())); // a third dispatch keeps the one Pending trigger, no queue
+    VG_CHECK(!f.ctx.dispatchRuleEvent(Owner())); // a third dispatch keeps the one Pending trigger, no queue
     VG_CHECK(f.executor().state() == State::Pending);
     VG_CHECK(f.serve());
     VG_CHECK_EQ(f.sound.calls.load(), 1);

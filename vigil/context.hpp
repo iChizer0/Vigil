@@ -83,8 +83,8 @@ struct Context
         {
             resetInference();
             shared_inference_result.reset();
-            shared_rule_event.cancelPending(); // a claimed event is completed by its writer
-            sound_executor.cancelPending();    // a playing callback finishes on its own
+            file_channels.cancelPending();  // a claimed task is completed by its worker
+            sound_executor.cancelPending(); // a playing callback finishes on its own
             return;
         }
 
@@ -161,32 +161,33 @@ struct Context
         capture_media_buffer.clear();
     }
 
-    bool tryCreateWriterEvent(std::shared_ptr<EventOwner> owner) const noexcept
+    // Dispatches one owner after attribution (docs/PLAN.md sections 5.1, 6.2, and 7.1): records it as the last
+    // dispatched owner, attempts a task in every file channel the snapshot enables and a Sound trigger when it
+    // enables Sound, then reports the owner through the RULE callback. The result, which is also
+    // `writer_created`, is file acceptance only: at least one channel accepted a task. A channel that holds a
+    // task, or whose settings changed since the snapshot was loaded, accepts nothing, and a rejected or failed
+    // Sound trigger changes nothing else. No configuration enables two channels or Sound before Phase 4D. Runs
+    // on the rule thread and on the HTTP request thread.
+    bool dispatchRuleEvent(std::shared_ptr<EventOwner> owner) const noexcept
     {
         if (!owner)
             return false;
-        const auto steady_time = shared_time.steadyTime();
-        const auto settings = action_settings.get().settings;
-        bool writer_created = false;
+        const auto loaded = action_settings.get();
+        bool accepted = false;
         try
         {
+            last_dispatched_owner.set(owner);
+            if (loaded.settings)
             {
-                const std::unique_lock lock(shared_rule_event.mutex);
-                if (!shared_rule_event.current)
-                {
-                    // The file task carries its owner's event time (the input's timestamp for FRAME and direct
-                    // EVENT owners), not the current time.
-                    auto event = std::make_shared<WriteEvent>(steady_time, owner->timestamp, owner->uid);
-                    shared_rule_event.current = std::move(event);
-                    shared_rule_event.current_owner = owner;
-                    writer_created = true;
-                }
+                if (loaded.settings->photo
+                    && file_channels.photo.tryAccept(owner, loaded.settings->photo, loaded.photo_revision))
+                    accepted = true;
+                if (loaded.settings->video
+                    && file_channels.video.tryAccept(owner, loaded.settings->video, loaded.video_revision))
+                    accepted = true;
+                if (loaded.settings->sound_enabled)
+                    sound_executor.tryTrigger();
             }
-            // Sound is attempted on its own (docs/PLAN.md section 7.1): a rejected or failed trigger changes
-            // nothing else, and writer_created reports file acceptance only. No configuration enables it before
-            // Phase 4D.
-            if (settings && settings->sound_enabled)
-                sound_executor.tryTrigger();
             if (c_api.basic.on_rule_event_cb)
             {
                 const auto evt = vg_rule_evt_t { .type = owner->type,
@@ -195,22 +196,22 @@ struct Context
                     .uid = owner->uid,
                     .source_id = owner->source_id.c_str(),
                     .source_delivery = EventOwner::SourceDeliveryString(owner->source_delivery),
-                    .writer_created = writer_created,
+                    .writer_created = accepted,
                     .dispatch_timestamp = owner->dispatch_timestamp };
                 c_api.basic.on_rule_event_cb(&evt);
             }
         }
         catch (const std::exception &e)
         {
-            VG_LOG(log, VG_LOG_LEVEL_ERROR, "Failed to publish rule evaluation event: ", e.what());
+            VG_LOG(log, VG_LOG_LEVEL_ERROR, "Failed to dispatch rule event: ", e.what());
             return false;
         }
         catch (...)
         {
-            VG_LOG(log, VG_LOG_LEVEL_ERROR, "Unknown exception occurred while publishing rule evaluation event");
+            VG_LOG(log, VG_LOG_LEVEL_ERROR, "Unknown exception occurred while dispatching rule event");
             return false;
         }
-        return writer_created;
+        return accepted;
     }
 
     // Shared data
@@ -305,79 +306,6 @@ struct Context
     std::shared_mutex slot_check_mutex;
     std::pair<const void * /* owner */, std::function<bool(const void *)>> slot_check = { nullptr, nullptr };
 
-    // Shared rule event
-    struct SharedRuleEvent
-    {
-    protected:
-        friend Context;
-
-        mutable std::shared_mutex mutex;
-        std::shared_ptr<WriteEvent> last;
-        std::shared_ptr<EventOwner> last_owner;
-        std::shared_ptr<WriteEvent> current;
-        std::shared_ptr<EventOwner> current_owner;
-
-        // Retires the current event with its terminal status. Call with the lock held.
-        void retireUnsafe(WriteEvent::Status status) noexcept
-        {
-            current->status.store(status, std::memory_order_release);
-            last = std::move(current);
-            current.reset();
-            last_owner = std::move(current_owner);
-            current_owner.reset();
-        }
-
-    public:
-        // Claims the current event for a writer: Pending becomes Writing. Null when nothing is pending.
-        std::shared_ptr<WriteEvent> claim() noexcept
-        {
-            const std::unique_lock lock(mutex);
-            if (!current || current->status.load(std::memory_order_acquire) != WriteEvent::Status::Pending)
-                return nullptr;
-            current->status.store(WriteEvent::Status::Writing, std::memory_order_release);
-            return current;
-        }
-
-        // Cancels the current event unless a writer has claimed it. A claimed event belongs to its writer,
-        // which interrupts itself when rules are disabled and completes the event (docs/PLAN.md section 7.2).
-        void cancelPending() noexcept
-        {
-            const std::unique_lock lock(mutex);
-            if (current && current->status.load(std::memory_order_acquire) == WriteEvent::Status::Pending)
-                retireUnsafe(WriteEvent::Status::Canceled);
-        }
-
-        // Completes `expected` with its terminal status if it is still the current event. A stale event never
-        // touches a newer one.
-        void complete(const std::shared_ptr<WriteEvent> &expected, WriteEvent::Status status) noexcept
-        {
-            const std::unique_lock lock(mutex);
-            if (expected && current == expected)
-                retireUnsafe(status);
-        }
-
-        std::shared_ptr<WriteEvent> getLast() const noexcept
-        {
-            const std::shared_lock lock(mutex);
-            return last;
-        }
-
-        std::shared_ptr<WriteEvent> getCurrent() const noexcept
-        {
-            const std::shared_lock lock(mutex);
-            return current;
-        }
-
-        std::tuple<std::shared_ptr<WriteEvent>, std::shared_ptr<EventOwner>, std::shared_ptr<WriteEvent>,
-            std::shared_ptr<EventOwner>>
-        get() const noexcept
-        {
-            const std::shared_lock lock(mutex);
-            return { last, last_owner, current, current_owner };
-        }
-
-    } mutable shared_rule_event;
-
     // The published action settings snapshot and its revisions (docs/PLAN.md section 7.1). The global revision
     // detects configuration-commit conflicts: `update` publishes only for a caller that saw the current one, so
     // a commit and a media refresh cannot interleave. Each file channel has its own revision, bumped only when
@@ -456,6 +384,197 @@ struct Context
         alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> video_revision = 0;
         std::shared_ptr<const ActionSettings> settings;
     } action_settings;
+
+    // One automatic file channel, Photo or Video (docs/PLAN.md section 7.2): at most one accepted task, pending
+    // or running, and the last retired one. The channel holds its task from acceptance until the worker
+    // completes it, which follows the interval hold and the failure cooldown (section 6.2), and accepts nothing
+    // meanwhile. Every operation is identity-aware: completing or canceling task A never touches a newer task
+    // B. Phase 4C-5 binds the Slot at acceptance; `requestStop` on a running task comes with its first caller,
+    // the continuous-mode handover of Phase 5A.
+    struct FileChannel
+    {
+    public:
+        struct Tasks
+        {
+            std::shared_ptr<FileTask> current; // held: pending, running, or finished and within its hold
+            std::shared_ptr<FileTask> last;    // the last retired one
+        };
+
+        FileChannel(const Context &ctx, CaptureType type) noexcept : _ctx(ctx), _type(type) { }
+
+        CaptureType type() const noexcept
+        {
+            return _type;
+        }
+
+        // Accepts a task for `owner`, bound to the channel settings the dispatcher loaded and the revision they
+        // were published under. Null while a task is held, or when the channel's settings changed since the
+        // load: a task bound to them would be stale, and the next tick dispatches with the new ones.
+        std::shared_ptr<FileTask> tryAccept(const std::shared_ptr<EventOwner> &owner,
+            const std::shared_ptr<FileWriterSettings> &settings, size_t settings_revision)
+        {
+            const auto steady_time = _ctx.shared_time.steadyTime();
+            const std::unique_lock lock(_mutex);
+            if (_current || _ctx.action_settings.channelRevision(_type) != settings_revision)
+                return nullptr;
+            // The task carries its owner's event time (the input's timestamp for FRAME and direct EVENT owners),
+            // not the current time.
+            _current = std::make_shared<FileTask>(_type, owner, settings, settings_revision,
+                _ctx.file_task_sequence.fetch_add(1, std::memory_order_relaxed) + 1,
+                std::make_shared<WriteEvent>(steady_time, owner->timestamp, owner->uid));
+            return _current;
+        }
+
+        // Claims the pending task for a worker: Pending becomes Writing. Null when nothing is pending.
+        std::shared_ptr<FileTask> claim() noexcept
+        {
+            const std::unique_lock lock(_mutex);
+            if (!_current || _current->event->status.load(std::memory_order_acquire) != WriteEvent::Status::Pending)
+                return nullptr;
+            _current->event->status.store(WriteEvent::Status::Writing, std::memory_order_release);
+            return _current;
+        }
+
+        // Cancels the pending task unless a worker has claimed it. A claimed task belongs to its worker, which
+        // interrupts itself when a gate closes and completes the task.
+        void cancelPending() noexcept
+        {
+            const std::unique_lock lock(_mutex);
+            if (_current && _current->event->status.load(std::memory_order_acquire) == WriteEvent::Status::Pending)
+                retireUnsafe(WriteEvent::Status::Canceled);
+        }
+
+        // Completes `expected` with its terminal status if it is still the held task. A stale task never
+        // touches a newer one.
+        void complete(const std::shared_ptr<FileTask> &expected, WriteEvent::Status status) noexcept
+        {
+            const std::unique_lock lock(_mutex);
+            if (expected && _current == expected)
+                retireUnsafe(status);
+        }
+
+        // Whether the channel holds a task: from acceptance until completion, through the hold.
+        bool holdsTask() const noexcept
+        {
+            const std::shared_lock lock(_mutex);
+            return _current != nullptr;
+        }
+
+        std::shared_ptr<FileTask> current() const noexcept
+        {
+            const std::shared_lock lock(_mutex);
+            return _current;
+        }
+
+        std::shared_ptr<FileTask> last() const noexcept
+        {
+            const std::shared_lock lock(_mutex);
+            return _last;
+        }
+
+        Tasks get() const noexcept
+        {
+            const std::shared_lock lock(_mutex);
+            return { _current, _last };
+        }
+
+    private:
+        // Retires the held task with its terminal status. Call with the lock held.
+        void retireUnsafe(WriteEvent::Status status) noexcept
+        {
+            _current->event->status.store(status, std::memory_order_release);
+            _last = std::move(_current);
+            _current.reset();
+        }
+
+        const Context &_ctx;
+        const CaptureType _type;
+        mutable std::shared_mutex _mutex;
+        std::shared_ptr<FileTask> _current;
+        std::shared_ptr<FileTask> _last;
+    };
+
+    // The two automatic file channels and what is reported across them (docs/PLAN.md section 6.2).
+    struct FileChannels
+    {
+    public:
+        struct Latest
+        {
+            std::shared_ptr<FileTask> task; // null before the first acceptance
+            bool held;                      // whether any channel holds a task
+        };
+
+        explicit FileChannels(const Context &ctx) noexcept
+            : photo(ctx, CaptureType::Image), video(ctx, CaptureType::Video)
+        {
+        }
+
+        // The channel that writes `type`: Image is the Photo channel, Video the Video one.
+        FileChannel &of(CaptureType type) noexcept
+        {
+            return type == CaptureType::Image ? photo : video;
+        }
+
+        const FileChannel &of(CaptureType type) const noexcept
+        {
+            return type == CaptureType::Image ? photo : video;
+        }
+
+        // Whether any channel holds a task: ALWAYS_ON waits for it (docs/PLAN.md section 4.4).
+        bool holdsTask() const noexcept
+        {
+            return photo.holdsTask() || video.holdsTask();
+        }
+
+        // Cancels the pending task of each channel (rule disable, shutdown).
+        void cancelPending() noexcept
+        {
+            photo.cancelPending();
+            video.cancelPending();
+        }
+
+        // What rule info reports: the most recently accepted task across both channels, that is the held task
+        // accepted last if any channel holds one, else the retired task accepted last.
+        Latest latest() const noexcept
+        {
+            const auto later = [](const std::shared_ptr<FileTask> &a,
+                                   const std::shared_ptr<FileTask> &b) -> std::shared_ptr<FileTask> {
+                return !a ? b : !b ? a : a->sequence > b->sequence ? a : b;
+            };
+            const auto p = photo.get(), v = video.get();
+            if (const auto held = later(p.current, v.current))
+                return { held, true };
+            return { later(p.last, v.last), false };
+        }
+
+        FileChannel photo;
+        FileChannel video;
+    } mutable file_channels;
+
+    // The acceptance sequence across both channels, which orders their tasks for rule info.
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<uint64_t> file_task_sequence = 0;
+
+    // The owner of the last dispatch, whatever the channels did with it (docs/PLAN.md section 6.2). Rule info
+    // reports it with the multi-action API of Phase 4D.
+    struct LastDispatchedOwner
+    {
+    public:
+        void set(std::shared_ptr<EventOwner> owner) noexcept
+        {
+            const std::unique_lock lock(_mutex);
+            _owner = std::move(owner);
+        }
+
+        std::shared_ptr<EventOwner> get() const noexcept
+        {
+            const std::shared_lock lock(_mutex);
+            return _owner;
+        }
+
+    private:
+        mutable std::shared_mutex _mutex;
+        std::shared_ptr<EventOwner> _owner;
+    } mutable last_dispatched_owner;
 
     // Shared video/audio frame buffers
     template<size_t PeriodLimit>
@@ -740,7 +859,8 @@ struct Context
     } mutable sound_executor; // last member: it starts after everything it uses exists, and stops first
 
     // Constructor. `run_sound_worker` is the test seam of SoundActionExecutor.
-    Context(const vg_config_t &cfg, bool run_sound_worker = true) : c_api(cfg), sound_executor(*this, run_sound_worker)
+    Context(const vg_config_t &cfg, bool run_sound_worker = true)
+        : c_api(cfg), file_channels(*this), sound_executor(*this, run_sound_worker)
     {
         action_settings.sync(c_api.media);
     }

@@ -65,8 +65,8 @@ Get the information about the rule system.
 
 ```json
 {
-    "bReadyForNewEvent": true, // Boolean, whether a new recording event can be started (false while a channel holds a task: pending, writing, or finished but still within its interval and failure cooldown)
-    "dLastRuleEvent": { // Object or null: the current writer event while a channel holds one, otherwise the last finished one
+    "bReadyForNewEvent": true, // Boolean, whether a new recording event can be started (false while a file channel holds a task: pending, writing, or finished but still within its interval and failure cooldown)
+    "dLastRuleEvent": { // Object or null: the most recently accepted file task: the held one while a file channel holds a task (the one accepted last when both do), otherwise the last retired one
         "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED" (a gate, pause, stop, or settings change stopped a task that had started; its file is kept), "CANCELED" (nothing was recorded: retired before a writer claimed it, or the gate was already closed when the writer started), "UNKNOWN"
         "iTimestamp": 1735574000, // Integer, Unix timestamp in milliseconds
         "iOwnerUID": 1735574400123 // Integer, UID of the owner that created the event (exact 64-bit value)

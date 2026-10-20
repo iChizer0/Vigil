@@ -1119,6 +1119,29 @@ private:
     }
 };
 
+// One automatic file task (docs/PLAN.md section 7.2): the owner it serves, the channel settings bound at
+// acceptance with the revision they were published under, its place in the acceptance sequence across both
+// channels, and the WriteEvent that carries its status, which manual capture and CacheFileInfo share.
+// Immutable after acceptance; the status lives on the event.
+struct FileTask
+{
+    const CaptureType type;
+    const std::shared_ptr<EventOwner> owner;
+    const std::shared_ptr<FileWriterSettings> settings;
+    const size_t settings_revision;
+    const uint64_t sequence;
+    const std::shared_ptr<WriteEvent> event;
+
+    FileTask(CaptureType tp, std::shared_ptr<EventOwner> o, std::shared_ptr<FileWriterSettings> s, size_t rev,
+        uint64_t seq, std::shared_ptr<WriteEvent> e) noexcept
+        : type(tp), owner(std::move(o)), settings(std::move(s)), settings_revision(rev), sequence(seq),
+          event(std::move(e))
+    {
+    }
+
+    ~FileTask() = default;
+};
+
 struct GPIOHelpers final
 {
     static inline std::optional<std::string_view> StateToString(vg_gpio_pin_mod_e state) noexcept

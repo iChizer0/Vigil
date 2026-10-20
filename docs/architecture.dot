@@ -160,8 +160,8 @@ digraph G {
       color=gray60;
       shared_time [label="SharedTime\nsteady_clock Time\nUnix Timestamp (ms)\nLocalTime (weekday/hour)", shape=note];
       shared_infer_result [label="SharedInferenceResult\nDetectionResultVec\nClassificationResultVec", shape=note];
-      shared_rule_evt [label="SharedRuleEvent\nLast/Current WriteEvent\nEventOwner (type/id/ts)", shape=note];
-      shared_writer_cfg [label="SharedWriterSettings\nRevision Counter\nshared_ptr<FileWriterSettings>\n(Immutable, Factory Created)\nWaterMarks", shape=note];
+      shared_rule_evt [label="FileChannels\nPhoto / Video FileChannel\nCurrent / Last FileTask\n(Owner, Settings, Revision, Sequence)", shape=note];
+      shared_writer_cfg [label="SharedActionSettings\nGlobal + Per-Channel Revisions\nshared_ptr<const ActionSettings>\n(Immutable, Factory Created)\nWaterMarks", shape=note];
       slot_check [label="Slot Check Callback\nSelected Slot Owner\nReady-To-Write Predicate", shape=note];
     }
   }
@@ -319,7 +319,7 @@ digraph G {
   record_ep -> rule_thread [color=blue, xlabel="swap rule"];
   record_ep -> rule_http [color=blue, xlabel="activate"];
   record_ep -> slot_check [color=blue, xlabel="HTTP precheck"];
-  rule_info_ep -> shared_rule_evt [color=blue, xlabel="last/current event"];
+  rule_info_ep -> shared_rule_evt [color=blue, xlabel="latest()"];
   rule_info_ep -> ctrl_rule_enabled [color=blue, xlabel="read"];
   rule_info_ep -> ctrl_media_paused [color=blue, xlabel="read"];
   rule_info_ep -> slot_check [color=blue, xlabel="record slot status"];
@@ -354,7 +354,7 @@ digraph G {
   ctx -> slot_check [color=blue];
   infer_q -> shared_infer_result [color=orange, style=dashed, xlabel="pop & move", weight=2];
   rule_thread -> ctx [color=blue, xlabel="tick()", weight=3];
-  rule_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="tryUpdateRuleEvent()"];
+  rule_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="dispatchRuleEvent()"];
 
   // ============================================================
   // EDGES: Rule Framework Relationships
@@ -389,8 +389,8 @@ digraph G {
 
   slot_media_buf -> slot_adapter [color=orange, style=dashed, xlabel="frames", weight=2];
   capture_media_buf -> capture_adapter [color=orange, style=dashed, xlabel="frames", weight=2];
-  shared_rule_evt -> writer_thread [color=orange, style=dashed, xlabel="getCurrent()", weight=2];
-  writer_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="reset()", constraint=false];
+  shared_rule_evt -> writer_thread [color=orange, style=dashed, xlabel="claim()", weight=2];
+  writer_thread -> shared_rule_evt [color=orange, style=dashed, xlabel="complete()", constraint=false];
 
   // Writer thread reads shared settings
   writer_thread -> shared_writer_cfg [color=blue, xlabel="get()"];

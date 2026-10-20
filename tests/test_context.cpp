@@ -30,13 +30,33 @@ using namespace vigil::tests;
 
 namespace {
 
+// The settings of one file channel, as a configuration with that action enabled would publish them.
+std::shared_ptr<FileWriterSettings> ChannelSettings(const Context &ctx, CaptureType type,
+    std::chrono::milliseconds interval = kRecordWriterDefaultIntervalMs)
+{
+    return FileWriterSettings::create(type, type == CaptureType::Video ? kRecordWriterDefaultFormat : "JPG", interval,
+        kRecordWriterPrefixDefault, kVideoClipLengthDefault, &ctx.c_api.media);
+}
+
+// Publishes a snapshot with the given file channels, built directly: the parser accepts at most one enabled
+// file action until Phase 4D.
+void Publish(Context &ctx, std::shared_ptr<FileWriterSettings> photo, std::shared_ptr<FileWriterSettings> video)
+{
+    auto &shared = ctx.action_settings;
+    VG_REQUIRE(shared.update(shared.getRevision(),
+        ActionSettings::create(false, false, std::move(photo), std::move(video), &ctx.c_api.media)));
+}
+
 struct Fixture
 {
     Context ctx;
 
+    // With the Video channel enabled: a dispatch accepts into enabled channels only, and the system enables one
+    // whenever rules are enabled (docs/PLAN.md section 4.1).
     Fixture() : ctx(MakeFakeConfig())
     {
         RuleEventRecorder::clear();
+        Publish(ctx, nullptr, ChannelSettings(ctx, CaptureType::Video));
     }
 };
 
@@ -65,10 +85,11 @@ std::shared_ptr<EventOwner> Owner(vg_rule_type_e type, const std::string &id = "
     return std::make_shared<EventOwner>(type, id, source, delivery);
 }
 
-// What the writer thread does at the end of its task.
+// What the worker does at the end of its task: completes the task its channel holds.
 void CompleteCurrent(Context &ctx, WriteEvent::Status status)
 {
-    ctx.shared_rule_event.complete(ctx.shared_rule_event.getCurrent(), status);
+    if (const auto [task, held] = ctx.file_channels.latest(); held)
+        ctx.file_channels.of(task->type).complete(task, status);
 }
 
 } // namespace
@@ -155,8 +176,8 @@ VG_TEST_CASE(tick_while_disabled_resets_input_and_cancels_the_current_event)
     f.ctx.tick();
     VG_CHECK(f.ctx.shared_inference_result.has_value());
     const auto owner = Owner(VG_RULE_TYPE_TIMER);
-    VG_CHECK(f.ctx.tryCreateWriterEvent(owner));
-    VG_CHECK(f.ctx.shared_rule_event.getCurrent() != nullptr);
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner));
+    VG_CHECK(f.ctx.file_channels.video.current() != nullptr);
 
     f.ctx.record_rule_enabled.store(false);
     const auto before = f.ctx.shared_time.steadyTime();
@@ -164,11 +185,12 @@ VG_TEST_CASE(tick_while_disabled_resets_input_and_cancels_the_current_event)
     VG_CHECK(f.ctx.shared_time.steadyTime() > before); // the clocks advance on a disabled tick too (since 2026-10-19)
     VG_CHECK_EQ(f.ctx.inference_queue.size(), size_t { 0 });
     VG_CHECK(!f.ctx.shared_inference_result.has_value());
-    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == nullptr);
-    const auto last = f.ctx.shared_rule_event.getLast();
+    VG_CHECK(f.ctx.file_channels.video.current() == nullptr);
+    const auto last = f.ctx.file_channels.video.last();
     VG_REQUIRE(last != nullptr);
-    VG_CHECK(last->status.load() == WriteEvent::Status::Canceled);
-    VG_CHECK_EQ(last->owner_uid, owner->uid);
+    VG_CHECK(last->event->status.load() == WriteEvent::Status::Canceled);
+    VG_CHECK_EQ(last->event->owner_uid, owner->uid);
+    VG_CHECK(last->owner == owner);
 }
 
 VG_TEST_CASE(reset_inference_clears_everything_or_only_one_source)
@@ -195,20 +217,27 @@ VG_TEST_CASE(reset_inference_clears_everything_or_only_one_source)
 VG_TEST_CASE(rule_event_is_reported_on_every_dispatch_but_the_writer_event_is_created_once)
 {
     Fixture f;
+    auto &video = f.ctx.file_channels.video;
     const auto owner1
         = std::make_shared<EventOwner>(VG_RULE_TYPE_TIMER, "", "", EventOwner::SourceDelivery::Event, int64_t { 5000 });
-    VG_CHECK(f.ctx.tryCreateWriterEvent(owner1));
-    const auto current = f.ctx.shared_rule_event.getCurrent();
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner1));
+    const auto current = video.current();
     VG_REQUIRE(current != nullptr);
-    VG_CHECK_EQ(current->owner_uid, owner1->uid);
-    VG_CHECK(current->status.load() == WriteEvent::Status::Pending);
-    VG_CHECK_EQ(current->timestamp, int64_t { 5000 }); // the owner's event time (the context clock before 2026-10-19)
+    VG_CHECK(current->type == CaptureType::Video);
+    VG_CHECK(current->owner == owner1);
+    VG_CHECK(current->settings == f.ctx.action_settings.get().settings->video); // bound at acceptance
+    VG_CHECK_EQ(current->settings_revision, f.ctx.action_settings.get().video_revision);
+    VG_CHECK_EQ(current->event->owner_uid, owner1->uid);
+    VG_CHECK(current->event->status.load() == WriteEvent::Status::Pending);
+    VG_CHECK_EQ(current->event->timestamp, int64_t { 5000 }); // the owner's event time (the clock before 2026-10-19)
+    VG_CHECK(f.ctx.last_dispatched_owner.get() == owner1);
 
-    // A second owner while one event is pending: reported, but no new writer event.
+    // A second owner while one task is held: reported and recorded as the last dispatched owner, but no new task.
     const auto owner2
         = std::make_shared<EventOwner>(VG_RULE_TYPE_HTTP, "", "", EventOwner::SourceDelivery::Event, int64_t { 6000 });
-    VG_CHECK(!f.ctx.tryCreateWriterEvent(owner2));
-    VG_CHECK_EQ(f.ctx.shared_rule_event.getCurrent()->owner_uid, owner1->uid);
+    VG_CHECK(!f.ctx.dispatchRuleEvent(owner2));
+    VG_CHECK(video.current() == current);
+    VG_CHECK(f.ctx.last_dispatched_owner.get() == owner2);
 
     const auto events = RuleEventRecorder::take();
     VG_REQUIRE(events.size() == size_t { 2 });
@@ -227,62 +256,159 @@ VG_TEST_CASE(rule_event_is_reported_on_every_dispatch_but_the_writer_event_is_cr
     VG_CHECK(!events[1].writer_created);
     VG_CHECK_EQ(events[1].uid, owner2->uid);
 
-    // Completing the event frees the slot and keeps the previous owner as "last".
+    // Completing the task frees the channel and keeps the task as "last".
     CompleteCurrent(f.ctx, WriteEvent::Status::Completed);
-    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == nullptr);
-    const auto last = f.ctx.shared_rule_event.getLast();
+    VG_CHECK(video.current() == nullptr);
+    const auto last = video.last();
     VG_REQUIRE(last != nullptr);
-    VG_CHECK(last->status.load() == WriteEvent::Status::Completed);
-    VG_CHECK_EQ(last->owner_uid, owner1->uid);
-    const auto [last_evt, last_owner, current_evt, current_owner] = f.ctx.shared_rule_event.get();
-    VG_CHECK(last_evt == last);
-    VG_CHECK(last_owner == owner1);
-    VG_CHECK(current_evt == nullptr);
-    VG_CHECK(current_owner == nullptr);
+    VG_CHECK(last == current);
+    VG_CHECK(last->event->status.load() == WriteEvent::Status::Completed);
+    {
+        const auto [task, held] = f.ctx.file_channels.latest();
+        VG_CHECK(task == last);
+        VG_CHECK(!held);
+    }
 
     const auto owner3 = Owner(VG_RULE_TYPE_TIMER);
-    VG_CHECK(f.ctx.tryCreateWriterEvent(owner3));
-    VG_CHECK_EQ(f.ctx.shared_rule_event.getCurrent()->owner_uid, owner3->uid);
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner3));
+    VG_CHECK(video.current()->owner == owner3);
+    VG_CHECK(video.current()->sequence > last->sequence);
 
     // A null owner is ignored without a callback.
-    VG_CHECK(!f.ctx.tryCreateWriterEvent(nullptr));
+    VG_CHECK(!f.ctx.dispatchRuleEvent(nullptr));
     VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 1 });
+    VG_CHECK(f.ctx.last_dispatched_owner.get() == owner3);
 }
 
 VG_TEST_CASE(claim_cancel_and_complete_are_identity_aware)
 {
     Fixture f;
-    VG_CHECK(f.ctx.shared_rule_event.claim() == nullptr); // nothing pending
-    VG_CHECK(f.ctx.tryCreateWriterEvent(Owner(VG_RULE_TYPE_TIMER)));
-    const auto a = f.ctx.shared_rule_event.claim();
+    auto &video = f.ctx.file_channels.video;
+    VG_CHECK(video.claim() == nullptr); // nothing pending
+    VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER)));
+    const auto a = video.claim();
     VG_REQUIRE(a != nullptr);
-    VG_CHECK(a->status.load() == WriteEvent::Status::Writing);
-    VG_CHECK(f.ctx.shared_rule_event.claim() == nullptr); // claimed once
-    f.ctx.shared_rule_event.cancelPending();              // a claimed event belongs to its writer
-    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == a);
+    VG_CHECK(a->event->status.load() == WriteEvent::Status::Writing);
+    VG_CHECK(video.claim() == nullptr); // claimed once
+    video.cancelPending();              // a claimed task belongs to its worker
+    VG_CHECK(video.current() == a);
     f.ctx.record_rule_enabled.store(false);
-    f.ctx.tick(); // the disabled tick cancels only a pending event
-    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == a);
-    f.ctx.shared_rule_event.complete(a, WriteEvent::Status::Interrupted);
-    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == nullptr);
-    VG_CHECK(f.ctx.shared_rule_event.getLast() == a);
-    VG_CHECK(a->status.load() == WriteEvent::Status::Interrupted);
+    f.ctx.tick(); // the disabled tick cancels only a pending task
+    VG_CHECK(video.current() == a);
+    video.complete(a, WriteEvent::Status::Interrupted);
+    VG_CHECK(video.current() == nullptr);
+    VG_CHECK(video.last() == a);
+    VG_CHECK(a->event->status.load() == WriteEvent::Status::Interrupted);
 
-    // A newer event B is never touched by the stale completion of A.
-    VG_CHECK(f.ctx.tryCreateWriterEvent(Owner(VG_RULE_TYPE_HTTP)));
-    const auto b = f.ctx.shared_rule_event.getCurrent();
+    // A newer task B is never touched by the stale completion of A.
+    VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_HTTP)));
+    const auto b = video.current();
     VG_REQUIRE(b != nullptr);
-    f.ctx.shared_rule_event.complete(a, WriteEvent::Status::Failed);
-    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == b);
-    VG_CHECK(a->status.load() == WriteEvent::Status::Interrupted);
-    f.ctx.shared_rule_event.complete(nullptr, WriteEvent::Status::Failed);
-    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == b);
+    video.complete(a, WriteEvent::Status::Failed);
+    VG_CHECK(video.current() == b);
+    VG_CHECK(a->event->status.load() == WriteEvent::Status::Interrupted);
+    video.complete(nullptr, WriteEvent::Status::Failed);
+    VG_CHECK(video.current() == b);
 
-    // A pending event is what cancelPending (the disabled tick) retires.
-    f.ctx.shared_rule_event.cancelPending();
-    VG_CHECK(f.ctx.shared_rule_event.getCurrent() == nullptr);
-    VG_CHECK(f.ctx.shared_rule_event.getLast() == b);
-    VG_CHECK(b->status.load() == WriteEvent::Status::Canceled);
+    // A pending task is what cancelPending (the disabled tick) retires.
+    f.ctx.file_channels.cancelPending();
+    VG_CHECK(video.current() == nullptr);
+    VG_CHECK(video.last() == b);
+    VG_CHECK(b->event->status.load() == WriteEvent::Status::Canceled);
+}
+
+VG_TEST_CASE(channels_hold_tasks_independently_and_a_stale_task_never_touches_a_newer_one)
+{
+    // Two enabled channels, built directly (docs/PLAN.md section 7.2; the parser allows one until Phase 4D).
+    Fixture f;
+    auto &photo = f.ctx.file_channels.photo;
+    auto &video = f.ctx.file_channels.video;
+    Publish(f.ctx, ChannelSettings(f.ctx, CaptureType::Image), ChannelSettings(f.ctx, CaptureType::Video));
+
+    const auto owner1 = Owner(VG_RULE_TYPE_TIMER);
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner1));
+    const auto a = photo.current(), b = video.current();
+    VG_REQUIRE(a != nullptr && b != nullptr);
+    VG_CHECK(a->type == CaptureType::Image && b->type == CaptureType::Video);
+    VG_CHECK(a->owner == owner1 && b->owner == owner1);
+    VG_CHECK(a->event != b->event); // one task per channel, each with its own event
+    VG_CHECK_EQ(a->event->owner_uid, owner1->uid);
+    VG_CHECK_EQ(b->event->owner_uid, owner1->uid);
+    VG_CHECK(b->sequence > a->sequence); // accepted in channel order: Photo, then Video
+    {
+        const auto [task, held] = f.ctx.file_channels.latest();
+        VG_CHECK(task == b && held); // the held task accepted last
+    }
+
+    // Completing the Video task leaves the Photo task held; completing Photo frees everything.
+    VG_CHECK(photo.claim() == a);
+    video.complete(b, WriteEvent::Status::Completed);
+    VG_CHECK(video.current() == nullptr && photo.current() == a);
+    VG_CHECK(f.ctx.file_channels.holdsTask());
+    {
+        const auto [task, held] = f.ctx.file_channels.latest();
+        VG_CHECK(task == a && held);
+    }
+    photo.complete(a, WriteEvent::Status::Completed);
+    VG_CHECK(!f.ctx.file_channels.holdsTask());
+    {
+        const auto [task, held] = f.ctx.file_channels.latest();
+        VG_CHECK(task == b && !held); // of the retired tasks, the one accepted last
+    }
+
+    // Newer tasks A2 and B2: a stale completion of A, a completion addressed to the wrong channel, and a
+    // cancellation in one channel never touch the other channel's task.
+    VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER)));
+    const auto a2 = photo.current(), b2 = video.current();
+    VG_REQUIRE(a2 != nullptr && b2 != nullptr);
+    photo.complete(a, WriteEvent::Status::Failed);
+    video.complete(a2, WriteEvent::Status::Failed);
+    VG_CHECK(photo.current() == a2 && video.current() == b2);
+    VG_CHECK(a->event->status.load() == WriteEvent::Status::Completed);
+    video.cancelPending();
+    VG_CHECK(photo.current() == a2 && video.current() == nullptr);
+    VG_CHECK(a2->event->status.load() == WriteEvent::Status::Pending);
+    VG_CHECK(b2->event->status.load() == WriteEvent::Status::Canceled);
+    f.ctx.file_channels.cancelPending();
+    VG_CHECK(photo.current() == nullptr);
+    VG_CHECK(a2->event->status.load() == WriteEvent::Status::Canceled);
+    VG_CHECK(photo.last() == a2 && video.last() == b2);
+}
+
+VG_TEST_CASE(dispatch_accepts_into_every_enabled_channel_and_reports_either_acceptance)
+{
+    Fixture f;
+    auto &photo = f.ctx.file_channels.photo;
+    auto &video = f.ctx.file_channels.video;
+    Publish(f.ctx, ChannelSettings(f.ctx, CaptureType::Image), ChannelSettings(f.ctx, CaptureType::Video));
+
+    // writer_created is file acceptance in at least one channel (docs/PLAN.md section 6.2).
+    const auto owner1 = Owner(VG_RULE_TYPE_TIMER);
+    const auto owner2 = Owner(VG_RULE_TYPE_HTTP);
+    const auto owner3 = Owner(VG_RULE_TYPE_TIMER);
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner1));             // both channels accept
+    VG_CHECK(!f.ctx.dispatchRuleEvent(owner2));            // both hold a task
+    VG_CHECK(f.ctx.last_dispatched_owner.get() == owner2); // recorded whatever the channels did
+    video.complete(video.current(), WriteEvent::Status::Completed);
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner3)); // Video accepts; Photo still holds owner1's task
+    VG_CHECK(photo.current()->owner == owner1);
+    VG_CHECK(video.current()->owner == owner3);
+    const auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 3 });
+    VG_CHECK(events[0].writer_created && !events[1].writer_created && events[2].writer_created);
+    VG_CHECK_EQ(events[1].uid, owner2->uid);
+
+    // A task is bound to the settings the dispatcher loaded: a channel whose settings were republished since
+    // refuses it, and the other channel is unaffected.
+    f.ctx.file_channels.cancelPending();
+    const auto loaded = f.ctx.action_settings.get();
+    Publish(f.ctx, loaded.settings->photo, ChannelSettings(f.ctx, CaptureType::Video, std::chrono::milliseconds(1234)));
+    VG_CHECK(video.tryAccept(owner1, loaded.settings->video, loaded.video_revision) == nullptr);
+    VG_CHECK(photo.tryAccept(owner1, loaded.settings->photo, loaded.photo_revision) != nullptr);
+    VG_CHECK(video.current() == nullptr);
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner1)); // the current snapshot: Video accepts with the new settings
+    VG_CHECK_EQ(video.current()->settings->interval.count(), 1234L);
+    VG_CHECK(photo.current()->settings == loaded.settings->photo);
 }
 
 VG_TEST_CASE(source_less_owners_report_event_delivery)
@@ -293,13 +419,13 @@ VG_TEST_CASE(source_less_owners_report_event_delivery)
         VG_RULE_TYPE_GPIO, VG_RULE_TYPE_TTY };
     for (const auto type: types)
     {
-        VG_CHECK(f.ctx.tryCreateWriterEvent(Owner(type)));
+        VG_CHECK(f.ctx.dispatchRuleEvent(Owner(type)));
         CompleteCurrent(f.ctx, WriteEvent::Status::Completed);
     }
     // The direct EVENT owner as the rule loop builds it, and a FRAME owner as an inference member builds it.
-    VG_CHECK(f.ctx.tryCreateWriterEvent(Owner(VG_RULE_TYPE_UNKNOWN, "", "cam0")));
+    VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_UNKNOWN, "", "cam0")));
     CompleteCurrent(f.ctx, WriteEvent::Status::Completed);
-    VG_CHECK(f.ctx.tryCreateWriterEvent(
+    VG_CHECK(f.ctx.dispatchRuleEvent(
         Owner(VG_RULE_TYPE_INFERENCE_SET, "person", "cam0", EventOwner::SourceDelivery::Frame)));
 
     const auto events = RuleEventRecorder::take();
@@ -369,10 +495,16 @@ VG_TEST_CASE(always_on_waits_for_the_current_event_and_for_media)
         VG_CHECK(rule(f.ctx) == nullptr); // the 5000 ms default interval has not elapsed on this tick
     }
     {
-        VG_CHECK(f.ctx.tryCreateWriterEvent(Owner(VG_RULE_TYPE_HTTP)));
+        VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_HTTP)));
         const AlwaysOnRule rule(AlwaysOnRuleConfig {}, f.ctx);
-        VG_CHECK(rule(f.ctx) == nullptr); // a pending writer event blocks it without consuming its interval
-        CompleteCurrent(f.ctx, WriteEvent::Status::Completed);
+        VG_CHECK(rule(f.ctx) == nullptr); // a pending task blocks it without consuming its interval
+        const auto task = f.ctx.file_channels.video.claim();
+        VG_REQUIRE(task != nullptr);
+        VG_CHECK(rule(f.ctx) == nullptr); // a running one too
+        // The write finished: the worker holds the channel through the interval, and so does the rule.
+        task->event->status.store(WriteEvent::Status::Completed);
+        VG_CHECK(rule(f.ctx) == nullptr);
+        f.ctx.file_channels.video.complete(task, WriteEvent::Status::Completed);
         VG_CHECK(rule(f.ctx) != nullptr);
     }
     {
