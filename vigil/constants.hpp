@@ -34,6 +34,12 @@ static inline constexpr const size_t kInferenceQueueSize = 60 * 1;
 
 static inline constexpr const size_t kHTTPAPIRequestMaxBytes = 1024 * 1024; // largest request body the C API parses
 
+// The automatic file channel worker (docs/PLAN.md section 7.2): its probe period, and the production defaults of
+// the failure cooldown and the consecutive failure limit, which are its constructor parameters (section 13).
+static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);
+static inline constexpr const std::chrono::seconds kWriterFailureCooldown = std::chrono::seconds(3);
+static inline constexpr const size_t kWriterConsecutiveFailureMax = 10;
+
 static inline constexpr const std::chrono::seconds kVideoClipLengthDefault = std::chrono::seconds(60);
 static inline constexpr const size_t kSlotMediaMuxerBufferPeriod = 10;
 static inline constexpr const size_t kCaptureMediaMuxerBufferPeriod = 10;
