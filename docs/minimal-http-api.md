@@ -70,11 +70,11 @@ Get the information about the rule system.
 
 ```json
 {
-    "bReadyForNewEvent": true, // Boolean, whether a new recording event can be started (false while a file channel holds a task: pending, writing, or finished but still within its interval and failure cooldown)
-    "dLastRuleEvent": { // Object or null: the most recently accepted file task: the held one while a file channel holds a task (the one accepted last when both do), otherwise the last retired one
+    "bReadyForNewEvent": true, // Boolean, whether a new recording event can be started (false while a file channel holds a triggered task: pending, writing, or finished but still within its interval and failure cooldown; a continuous clip does not count)
+    "dLastRuleEvent": { // Object or null: the most recently accepted triggered file task: the held one while a file channel holds one (the one accepted last when both do), otherwise the last retired one; a continuous clip is no rule event and shows under dActionStates.dVideo only
         "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED" (a gate, pause, stop, settings change, or input loss stopped a task that had started; its file is kept), "CANCELED" (nothing was recorded, so no file exists: retired before a writer claimed it, the gate was already closed when the writer started, or no key frame arrived before the clip's key frame wait, gate, or end), "UNKNOWN"
         "iTimestamp": 1735574000, // Integer, Unix timestamp in milliseconds
-        "iOwnerUID": 1735574400123 // Integer, UID of the owner that created the event (exact 64-bit value)
+        "iOwnerUID": 1735574400123 // Integer, UID of the owner that created the event (exact 64-bit value); 0 for a continuous clip (dActionStates.dVideo.dEvent)
     },
     "dLastRuleEventOwner": { // Object or null: the owner of dLastRuleEvent
         "sRuleType": "TIMER", // String, rule type; "UNKNOWN" for a direct EVENT delivered without a rule
@@ -100,7 +100,8 @@ Get the information about the rule system.
             }
         },
         "dVideo": {
-            // ... The same fields as dPhoto
+            // ... The same fields as dPhoto, where bReady is false while continuous recording is configured, plus:
+            "bContinuous": false // Boolean, whether continuous recording is configured: the channel then records clips without an owner (iOwnerUID 0) while the schedule is open, whatever bRuleEnabled is, and admits no triggered video, while bEnabled still reports dVideo.bEnabled as configured; not accepted yet (bContinuousRecordEnabled must be false)
         },
         "dSound": {
             "bEnabled": false, // Boolean, whether the action is enabled in the general rule configuration

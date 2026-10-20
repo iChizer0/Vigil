@@ -720,6 +720,67 @@ VG_TEST_CASE(rule_info_reports_the_last_dispatched_owner_and_the_state_of_each_a
     VG_CHECK_EQ(sound.at("sState").get<std::string>(), "UNAVAILABLE");
 }
 
+VG_TEST_CASE(rule_info_reports_a_continuous_clip_as_the_video_state_and_not_as_a_rule_event)
+{
+    // docs/PLAN.md sections 6.2 and 8.2 (Phase 5A-2): a continuous clip shows in dActionStates.dVideo, with
+    // bContinuous, the configured switch unchanged, no readiness for a rule event, and the held event with
+    // UID 0; bReadyForNewEvent, dLastRuleEvent, and dLastRuleEventOwner see triggered tasks only. The parser
+    // still rejects the switch, so the snapshot is published directly over the posted Video configuration.
+    Fixture f;
+    f.start();
+    VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0);
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
+    const auto triggered = f.ctx->action_settings.get().settings;
+    VG_REQUIRE(triggered != nullptr && triggered->video != nullptr);
+    auto &shared = f.ctx->action_settings;
+    VG_REQUIRE(shared.update(shared.getRevision(),
+        ActionSettings::create(true, false, nullptr, triggered->video, &f.ctx->c_api.media)));
+
+    // The Timer tick dispatches an owner that no channel accepts (triggered Video is suppressed): reported,
+    // and rule info shows no rule event, the configured switch, and the suppression.
+    f.evaluate();
+    const auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(!events[0].writer_created);
+    auto info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), true);
+    VG_CHECK(info.at("dLastRuleEvent").is_null());
+    VG_CHECK(info.at("dLastRuleEventOwner").is_null());
+    VG_CHECK_EQ(info.at("dLastDispatchedOwner").at("iUID").get<uint64_t>(), events[0].uid);
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bEnabled").get<bool>(), true); // as configured
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bContinuous").get<bool>(), true);
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bReady").get<bool>(), false); // suppressed
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "IDLE");
+    VG_CHECK(!info.at("dActionStates").at("dPhoto").contains("bContinuous"));
+
+    // The clip is admitted and claimed: PENDING, then WRITING, with UID 0; the triggered view stays empty.
+    VG_CHECK(f.ctx->dispatchContinuous());
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), true);
+    VG_CHECK(info.at("dLastRuleEvent").is_null());
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "PENDING");
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("dEvent").at("iOwnerUID").get<uint64_t>(), uint64_t { 0 });
+    auto &video = f.ctx->file_channels.video;
+    const auto clip = video.claim(f.slot->registration());
+    VG_REQUIRE(clip != nullptr);
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "WRITING");
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bReady").get<bool>(), false);
+    video.complete(clip, WriteEvent::Status::Completed);
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "IDLE");
+    VG_CHECK(info.at("dLastRuleEvent").is_null()); // a completed clip is no rule event either
+
+    // Without the Video action configured, continuous recording still runs the channel: not enabled, continuous.
+    VG_REQUIRE(shared.update(shared.getRevision(),
+        ActionSettings::create(true, false, nullptr, nullptr, &f.ctx->c_api.media)));
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bEnabled").get<bool>(), false);
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bContinuous").get<bool>(), true);
+    VG_CHECK(f.ctx->dispatchContinuous());
+    VG_CHECK_EQ(f.endpoint->getRuleInfo().at("dActionStates").at("dVideo").at("sState").get<std::string>(), "PENDING");
+}
+
 VG_TEST_CASE(record_rule_config_switches_rules_persists_and_rolls_back_failures)
 {
     Fixture f;

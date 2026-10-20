@@ -588,8 +588,9 @@ struct RecordConfig
 
         // Any combination of actions is a configuration, including none with rules enabled (every rule event
         // is reported and nothing else happens); what ALWAYS_ON can pace is the endpoint's check against the
-        // selected rule (satisfiesAlwaysOnInvariant). Continuous recording comes with Phase 5A and is rejected
-        // rather than accepted as a no-op until then.
+        // selected rule (satisfiesAlwaysOnInvariant). Continuous recording is accepted in Phase 5A-3 and is
+        // rejected rather than accepted as a no-op until then (the runtime already runs it from a snapshot
+        // built with the switch, docs/PLAN.md section 8.2).
         if (continuous_enabled)
             throw Exception("bContinuousRecordEnabled is not supported yet");
     }
@@ -648,7 +649,8 @@ struct RecordConfig
     // refresh or another commit); the caller prepares again and retries. A file channel whose settings changed
     // cancels its pending task, which was bound to the old ones, after the publish and outside the settings
     // mutex (docs/PLAN.md section 7.1); its running task finalizes on its own revision check, as today. A
-    // disabled Sound cancels a pending trigger; a playing one finishes (section 7.3).
+    // Video mode switch is such a change (section 8.2): the pending task of the old mode, of either kind, is
+    // canceled. A disabled Sound cancels a pending trigger; a playing one finishes (section 7.3).
     vg_sta_e sync(Context &ctx, const Prepared &prepared) const noexcept
     {
         const auto before = ctx.action_settings.get(); // the channel revisions under the base revision

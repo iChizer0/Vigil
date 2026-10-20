@@ -84,8 +84,9 @@ struct Context
         {
             resetInference();
             shared_inference_result.reset();
-            file_channels.cancelPending();  // a claimed task is completed by its worker
-            sound_executor.cancelPending(); // a playing callback finishes on its own
+            file_channels.cancelPendingTriggered(); // a claimed task is completed by its worker; a continuous
+                                                    // clip is no rule event (docs/PLAN.md section 8.2)
+            sound_executor.cancelPending();         // a playing callback finishes on its own
             return;
         }
 
@@ -163,7 +164,8 @@ struct Context
     }
 
     // Dispatches one owner after attribution (docs/PLAN.md sections 5.1, 6.2, 7.1, and 8.1): records it as the
-    // last dispatched owner, attempts a task in every file channel the snapshot enables and a Sound trigger
+    // last dispatched owner, attempts a task in every file channel the snapshot enables for rule events
+    // (triggered Video is suppressed while continuous recording is configured, section 8.2) and a Sound trigger
     // when it enables Sound, then reports the owner through the RULE callback, whose `writer_created` is file
     // acceptance only: at least one channel accepted a task. A channel accepts nothing while it holds a task,
     // when its settings changed since the snapshot was loaded, when a gate closed since the caller evaluated
@@ -217,6 +219,28 @@ struct Context
             return false;
         }
         return accepted || !file_action_enabled;
+    }
+
+    // Admits one continuous clip on the Video channel when the snapshot configures continuous recording
+    // (docs/PLAN.md section 8.2): no owner, no RULE callback, and no change to the last dispatched owner, since
+    // a continuous clip is no rule event; its gates are the schedule and the media pause, not `bRuleEnabled`,
+    // and it needs the same usable Slot with headroom. Returns whether a clip was accepted, which the channel
+    // refuses while it holds a task of either kind. The rule loop calls it on every tick, before the enable
+    // check (Phase 5A-3).
+    bool dispatchContinuous() const noexcept
+    {
+        const auto loaded = action_settings.get();
+        if (!loaded.settings || !loaded.settings->continuous)
+            return false;
+        try
+        {
+            return file_channels.video.tryAcceptContinuous(loaded) != nullptr;
+        }
+        catch (const std::exception &e)
+        {
+            VG_LOG(log, VG_LOG_LEVEL_ERROR, "Failed to admit a continuous clip: ", e.what());
+            return false;
+        }
     }
 
     // Shared data
@@ -317,7 +341,9 @@ struct Context
     // detects configuration-commit conflicts: `update` publishes only for a caller that saw the current one, so
     // a commit and a media refresh cannot interleave. Each file channel has its own revision, bumped only when
     // that channel's recording settings change, which is what its writer watches: a change to the other
-    // channel, to Sound, or to the watermarks (admission state, section 9) does not stop it.
+    // channel, to Sound, or to the watermarks (admission state, section 9) does not stop it. The Video channel's
+    // recording is the continuous clip while continuous recording is configured (section 8.2), so a mode switch
+    // moves the Video revision and a change to the suppressed triggered Video settings does not.
     struct SharedActionSettings
     {
     public:
@@ -349,7 +375,7 @@ struct Context
                 return true;
             if (!settings || !ActionSettings::SameRecording(settings->photo, next->photo))
                 photo_revision.fetch_add(1, std::memory_order_release);
-            if (!settings || !ActionSettings::SameRecording(settings->video, next->video))
+            if (!settings || !ActionSettings::SameRecording(settings->videoRecording(), next->videoRecording()))
                 video_revision.fetch_add(1, std::memory_order_release);
             settings = std::move(next);
             revision.store(cur + 1, std::memory_order_release);
@@ -404,8 +430,9 @@ struct Context
     // meanwhile. Acceptance is admission (section 8.1): the gates, the channel, and the registered Slot are
     // checked in one critical section, and a task carries the Slot it is bound to and its budget reservation.
     // Every operation is identity-aware: completing or canceling task A never touches a newer task B, and a
-    // worker claims only a task bound to its Slot. `requestStop` on a running task comes with its first caller,
-    // the continuous-mode handover of Phase 5A.
+    // worker claims only a task bound to its Slot. The Video channel runs a task of either kind (section 8.2):
+    // a triggered one for a rule event, or a continuous clip without an owner; a running task of either kind
+    // is stopped through its gate (`isOpenFor`), never by a request.
     struct FileChannel
     {
     public:
@@ -423,35 +450,28 @@ struct Context
         }
 
         // Accepts a task for `owner` on this channel, from the snapshot the dispatcher loaded, in one critical
-        // section (docs/PLAN.md section 8.1): the snapshot enables the channel, the channel is idle (its last
-        // task completed, after its hold), its settings revision is still the loaded one, the gates are open
-        // (rules enabled, the schedule open, media not paused), and the registered Slot is usable and has
-        // headroom, whose reservation the task carries with the Slot's registration. Null otherwise: nothing is
-        // left pending, and the next owner is tried afresh. A task bound to old settings, an old Slot, or a
-        // closed gate is never created.
+        // section (docs/PLAN.md section 8.1): the snapshot enables the channel for rule events (triggered Video
+        // is suppressed while continuous recording is configured), the channel is idle (its last task
+        // completed, after its hold), its settings revision is still the loaded one, the gates are open (rules
+        // enabled, the schedule open, media not paused), and the registered Slot is usable and has headroom,
+        // whose reservation the task carries with the Slot's registration. Null otherwise: nothing is left
+        // pending, and the next owner is tried afresh. A task bound to old settings, an old Slot, or a closed
+        // gate is never created.
         std::shared_ptr<FileTask> tryAccept(const std::shared_ptr<EventOwner> &owner,
             const SharedActionSettings::Loaded &loaded)
         {
-            const auto settings = loaded.settings ? loaded.settings->channel(_type) : nullptr;
-            if (!settings)
-                return nullptr;
-            const auto steady_time = _ctx.shared_time.steadyTime();
-            const std::unique_lock lock(_mutex);
-            if (_current || _ctx.action_settings.channelRevision(_type) != loaded.channelRevision(_type))
-                return nullptr;
-            if (!_ctx.record_rule_enabled.load(std::memory_order_relaxed)
-                || !_ctx.schedule_open.load(std::memory_order_acquire) || _ctx.media_barrier.isPaused())
-                return nullptr;
-            auto admitted = _ctx.slot_admission.tryAdmit(loaded.settings->watermarks, settings->watermarks.task_bytes);
-            if (!admitted.registration)
-                return nullptr;
-            // The task carries its owner's event time (the input's timestamp for FRAME and direct EVENT owners),
-            // not the current time.
-            _current = std::make_shared<FileTask>(_type, owner, settings, loaded.channelRevision(_type),
-                _ctx.file_task_sequence.fetch_add(1, std::memory_order_relaxed) + 1, admitted.registration,
-                std::move(admitted.reservation),
-                std::make_shared<WriteEvent>(steady_time, owner->timestamp, owner->uid));
-            return _current;
+            return accept(FileTask::Kind::Triggered, owner, loaded.settings ? loaded.settings->channel(_type) : nullptr,
+                loaded);
+        }
+
+        // Accepts a continuous clip on the Video channel (docs/PLAN.md section 8.2) under the same conditions
+        // but for the rule flag, which is not a continuous clip's gate: the schedule open, media not paused, the
+        // channel idle, the revision current, and the Slot usable with headroom. The clip has no owner; its
+        // event carries UID 0 and the current time. Null on the Photo channel and without continuous recording.
+        std::shared_ptr<FileTask> tryAcceptContinuous(const SharedActionSettings::Loaded &loaded)
+        {
+            return accept(FileTask::Kind::Continuous, nullptr,
+                loaded.settings && _type == CaptureType::Video ? loaded.settings->continuous : nullptr, loaded);
         }
 
         // Claims the pending task for the worker of the Slot registered as `registration`: Pending becomes
@@ -476,6 +496,16 @@ struct Context
                 retireUnsafe(WriteEvent::Status::Canceled);
         }
 
+        // Cancels the pending task if it is triggered: what disabling rules does (docs/PLAN.md section 8.1). A
+        // pending continuous clip is left for its worker, since the rule flag is not its gate.
+        void cancelPendingTriggered() noexcept
+        {
+            const std::unique_lock lock(_mutex);
+            if (_current && _current->kind == FileTask::Kind::Triggered
+                && _current->event->status.load(std::memory_order_acquire) == WriteEvent::Status::Pending)
+                retireUnsafe(WriteEvent::Status::Canceled);
+        }
+
         // Cancels the pending task if it is bound to the Slot registered as `registration`, whose admission is
         // closing (docs/PLAN.md section 9). A claimed task is finished by its worker.
         void cancelPendingBoundTo(uint64_t registration) noexcept
@@ -495,13 +525,18 @@ struct Context
                 retireUnsafe(status);
         }
 
-        // The gate of a running task of this channel (docs/PLAN.md section 8.1): rules are enabled and the
-        // settings revision the task was bound to is still the current one. The writer checks the media pause
-        // and its Slot's own continuation condition besides.
-        bool isOpenFor(size_t settings_revision) const noexcept
+        // The gate of a running task of this channel, by its kind (docs/PLAN.md sections 8.1 and 8.2): a
+        // triggered task runs while rules are enabled, a continuous clip while the schedule is open (the rule
+        // flag is not its condition, and a schedule closure finishes it), and either while the settings
+        // revision the task was bound to is still the current one, which a mode switch moves, so the running
+        // clip of the old mode finishes before the new mode's first clip starts. The writer checks the media
+        // pause and its Slot's own continuation condition besides.
+        bool isOpenFor(FileTask::Kind kind, size_t settings_revision) const noexcept
         {
-            return _ctx.record_rule_enabled.load(std::memory_order_relaxed)
-                   && _ctx.action_settings.channelRevision(_type) == settings_revision;
+            const bool gate = kind == FileTask::Kind::Continuous
+                                  ? _ctx.schedule_open.load(std::memory_order_acquire)
+                                  : _ctx.record_rule_enabled.load(std::memory_order_relaxed);
+            return gate && _ctx.action_settings.channelRevision(_type) == settings_revision;
         }
 
         // Whether the channel holds a task: from acceptance until completion, through the hold.
@@ -530,6 +565,35 @@ struct Context
         }
 
     private:
+        // The admission section of both kinds (docs/PLAN.md sections 8.1 and 8.2). A continuous clip's gates
+        // are the schedule and the pause; a triggered task's also the rule flag.
+        std::shared_ptr<FileTask> accept(FileTask::Kind kind, const std::shared_ptr<EventOwner> &owner,
+            const std::shared_ptr<FileWriterSettings> &settings, const SharedActionSettings::Loaded &loaded)
+        {
+            if (!settings)
+                return nullptr;
+            const bool continuous = kind == FileTask::Kind::Continuous;
+            const auto steady_time = _ctx.shared_time.steadyTime();
+            const std::unique_lock lock(_mutex);
+            if (_current || _ctx.action_settings.channelRevision(_type) != loaded.channelRevision(_type))
+                return nullptr;
+            if ((!continuous && !_ctx.record_rule_enabled.load(std::memory_order_relaxed))
+                || !_ctx.schedule_open.load(std::memory_order_acquire) || _ctx.media_barrier.isPaused())
+                return nullptr;
+            auto admitted = _ctx.slot_admission.tryAdmit(loaded.settings->watermarks, settings->watermarks.task_bytes);
+            if (!admitted.registration)
+                return nullptr;
+            // The task carries its owner's event time (the input's timestamp for FRAME and direct EVENT owners),
+            // not the current time; a continuous clip, which has no owner, the current time and UID 0.
+            auto event = continuous
+                             ? std::make_shared<WriteEvent>(steady_time, _ctx.shared_time.unixTime(), uint64_t { 0 })
+                             : std::make_shared<WriteEvent>(steady_time, owner->timestamp, owner->uid);
+            _current = std::make_shared<FileTask>(kind, _type, owner, settings, loaded.channelRevision(_type),
+                _ctx.file_task_sequence.fetch_add(1, std::memory_order_relaxed) + 1, admitted.registration,
+                std::move(admitted.reservation), std::move(event));
+            return _current;
+        }
+
         // Retires the held task with its terminal status; the reservation of a task retired unrun goes with it
         // (a claimed task's reservation is its worker's). Call with the lock held.
         void retireUnsafe(WriteEvent::Status status) noexcept
@@ -553,8 +617,8 @@ struct Context
     public:
         struct Latest
         {
-            std::shared_ptr<FileTask> task; // null before the first acceptance
-            bool held;                      // whether any channel holds a task
+            std::shared_ptr<FileTask> task; // null before the first triggered acceptance
+            bool held;                      // whether any channel holds a triggered task
         };
 
         explicit FileChannels(const Context &ctx) noexcept
@@ -579,11 +643,18 @@ struct Context
             return photo.holdsTask() || video.holdsTask();
         }
 
-        // Cancels the pending task of each channel (rule disable, shutdown).
+        // Cancels the pending task of each channel (shutdown).
         void cancelPending() noexcept
         {
             photo.cancelPending();
             video.cancelPending();
+        }
+
+        // Cancels the pending triggered task of each channel (rule disable); a pending continuous clip stays.
+        void cancelPendingTriggered() noexcept
+        {
+            photo.cancelPendingTriggered();
+            video.cancelPendingTriggered();
         }
 
         // Cancels the pending task of each channel that is bound to the Slot registered as `registration`.
@@ -593,18 +664,23 @@ struct Context
             video.cancelPendingBoundTo(registration);
         }
 
-        // What rule info reports: the most recently accepted task across both channels, that is the held task
-        // accepted last if any channel holds one, else the retired task accepted last.
+        // What rule info reports: the most recently accepted triggered task across both channels, that is the
+        // held task accepted last if any channel holds one, else the retired task accepted last. A continuous
+        // clip is no rule event (docs/PLAN.md section 8.2): it is reported as its channel's state only, and it
+        // replaces the Video channel's retired triggered task, which the report then no longer falls back to.
         Latest latest() const noexcept
         {
+            const auto triggered = [](const std::shared_ptr<FileTask> &t) -> std::shared_ptr<FileTask> {
+                return t && t->kind == FileTask::Kind::Triggered ? t : nullptr;
+            };
             const auto later = [](const std::shared_ptr<FileTask> &a,
                                    const std::shared_ptr<FileTask> &b) -> std::shared_ptr<FileTask> {
                 return !a ? b : !b ? a : a->sequence > b->sequence ? a : b;
             };
             const auto p = photo.get(), v = video.get();
-            if (const auto held = later(p.current, v.current))
+            if (const auto held = later(triggered(p.current), triggered(v.current)))
                 return { held, true };
-            return { later(p.last, v.last), false };
+            return { later(triggered(p.last), triggered(v.last)), false };
         }
 
         FileChannel photo;
@@ -758,6 +834,14 @@ struct Context
                 }
             }
             queue.erase(queue.begin(), s.base());
+        }
+
+        // Prepares the backlog for a continuous clip (docs/PLAN.md section 8.2): kept from the boundary key frame
+        // the previous clip left, when it is still buffered, dropped otherwise (MediaFrame::KeepFrom).
+        void keepFrom(std::optional<std::chrono::steady_clock::time_point> boundary) noexcept
+        {
+            const std::unique_lock lock(mutex);
+            MediaFrame::KeepFrom(queue, boundary);
         }
 
         template<typename T, std::enable_if_t<std::is_same_v<std::remove_cvref_t<T>, MediaFrame>, bool> = true>

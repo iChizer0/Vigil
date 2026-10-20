@@ -40,12 +40,14 @@ std::shared_ptr<FileWriterSettings> ChannelSettings(const Context &ctx, CaptureT
         kRecordWriterPrefixDefault, kVideoClipLengthDefault, &ctx.c_api.media);
 }
 
-// Publishes a snapshot with the given file channels, built directly with the intervals each case needs.
-void Publish(Context &ctx, std::shared_ptr<FileWriterSettings> photo, std::shared_ptr<FileWriterSettings> video)
+// Publishes a snapshot with the given file channels, built directly with the intervals each case needs, and
+// with continuous recording configured when `continuous` is set (the parser still rejects the switch).
+void Publish(Context &ctx, std::shared_ptr<FileWriterSettings> photo, std::shared_ptr<FileWriterSettings> video,
+    bool continuous = false)
 {
     auto &shared = ctx.action_settings;
     VG_REQUIRE(shared.update(shared.getRevision(),
-        ActionSettings::create(false, false, std::move(photo), std::move(video), &ctx.c_api.media)));
+        ActionSettings::create(continuous, false, std::move(photo), std::move(video), &ctx.c_api.media)));
 }
 
 struct Fixture
@@ -500,6 +502,134 @@ VG_TEST_CASE(admission_rejects_when_a_gate_closed_between_evaluation_and_dispatc
     VG_CHECK(f.ctx.file_channels.holdsTask());
     VG_CHECK_EQ(f.ctx.in_flight_budgets.inFlight(FakeSlotAdmission::kFilesystem),
         f.ctx.action_settings.get().settings->watermarks.task_bytes);
+}
+
+VG_TEST_CASE(continuous_admission_needs_no_owner_and_no_rule_flag_and_counts_as_no_rule_event)
+{
+    // docs/PLAN.md section 8.2 (Phase 5A-2): with continuous recording configured, dispatchContinuous admits a
+    // UID-zero clip without an owner on the Video channel, against the schedule, the pause, and the Slot, not
+    // the rule flag; nothing is reported, the last dispatched owner stays, and the triggered view rule info
+    // reads ignores the clip. Triggered Video is suppressed meanwhile; Photo is not.
+    Fixture f;
+    f.ctx.tick(); // the shared clocks, which a clip's event time comes from
+    auto &photo = f.ctx.file_channels.photo;
+    auto &video = f.ctx.file_channels.video;
+    Publish(f.ctx, ChannelSettings(f.ctx, CaptureType::Image), ChannelSettings(f.ctx, CaptureType::Video), true);
+    const auto settings = f.ctx.action_settings.get().settings;
+    VG_REQUIRE(settings->continuous != nullptr);
+
+    // A rule event is admitted into Photo only, and reported as accepted.
+    const auto owner = Owner(VG_RULE_TYPE_TIMER);
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner));
+    VG_CHECK(photo.current() != nullptr && video.current() == nullptr);
+    VG_CHECK_EQ(RuleEventRecorder::take().size(), size_t { 1 });
+
+    // The continuous clip, admitted with rules disabled.
+    f.ctx.record_rule_enabled.store(false);
+    VG_CHECK(f.ctx.dispatchContinuous());
+    const auto clip = video.current();
+    VG_REQUIRE(clip != nullptr);
+    VG_CHECK(clip->kind == FileTask::Kind::Continuous);
+    VG_CHECK(clip->owner == nullptr);
+    VG_CHECK(clip->settings == settings->continuous);
+    VG_CHECK_EQ(clip->settings_revision, f.ctx.action_settings.channelRevision(CaptureType::Video));
+    VG_CHECK_EQ(clip->event->owner_uid, uint64_t { 0 });
+    VG_CHECK_EQ(clip->event->timestamp, f.ctx.shared_time.unixTime());
+    VG_CHECK(clip->event->status.load() == WriteEvent::Status::Pending);
+    VG_CHECK_EQ(clip->slot_registration, f.slot.registration());
+    VG_CHECK_EQ(clip->reservation.bytes(), settings->continuous->watermarks.task_bytes);
+    VG_CHECK(RuleEventRecorder::take().empty());
+    VG_CHECK(f.ctx.last_dispatched_owner.get() == owner);
+    VG_CHECK(f.ctx.file_channels.holdsTask());
+    {
+        const auto [task, held] = f.ctx.file_channels.latest(); // the triggered view: Photo's task
+        VG_CHECK(task == photo.current() && held);
+    }
+    VG_CHECK(!f.ctx.dispatchContinuous()); // the channel holds a task
+
+    // The disabled tick cancels the pending triggered task and leaves the clip.
+    f.ctx.tick();
+    VG_CHECK(photo.current() == nullptr);
+    VG_CHECK(photo.last()->event->status.load() == WriteEvent::Status::Canceled);
+    VG_CHECK(video.current() == clip && clip->event->status.load() == WriteEvent::Status::Pending);
+    {
+        const auto [task, held] = f.ctx.file_channels.latest();
+        VG_CHECK(task == photo.last() && !held);
+    }
+    video.complete(clip, WriteEvent::Status::Completed);
+    {
+        const auto [task, held] = f.ctx.file_channels.latest(); // a completed clip is no rule event either
+        VG_CHECK(task == photo.last() && !held);
+    }
+
+    // The gates of a continuous clip: the schedule, the pause, and a usable Slot with headroom.
+    f.ctx.schedule_open.store(false);
+    VG_CHECK(!f.ctx.dispatchContinuous());
+    f.ctx.schedule_open.store(true);
+    f.ctx.media_barrier.pause(false);
+    VG_CHECK(!f.ctx.dispatchContinuous());
+    f.ctx.media_barrier.resume();
+    f.slot.ready = false;
+    VG_CHECK(!f.ctx.dispatchContinuous());
+    f.slot.ready = true;
+    f.slot.free_bytes = settings->watermarks.critical_remain_bytes;
+    VG_CHECK(!f.ctx.dispatchContinuous());
+    f.slot.free_bytes = std::numeric_limits<FileSize>::max() / 2;
+    VG_CHECK(!f.ctx.file_channels.holdsTask());
+    VG_CHECK(f.ctx.dispatchContinuous());
+    VG_CHECK_EQ(f.ctx.in_flight_budgets.inFlight(FakeSlotAdmission::kFilesystem),
+        settings->continuous->watermarks.task_bytes);
+    video.cancelPending();
+
+    // Without a Photo channel a rule event has no file action: it is reported with nothing accepted, and the
+    // dispatch answers as a rule-only configuration does (docs/PLAN.md section 5.2).
+    f.ctx.record_rule_enabled.store(true);
+    Publish(f.ctx, nullptr, ChannelSettings(f.ctx, CaptureType::Video), true);
+    VG_CHECK(!f.ctx.action_settings.get().settings->fileChannel());
+    const auto owner2 = Owner(VG_RULE_TYPE_HTTP);
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner2));
+    VG_CHECK(!f.ctx.file_channels.holdsTask());
+    VG_CHECK(f.ctx.last_dispatched_owner.get() == owner2);
+    {
+        const auto events = RuleEventRecorder::take();
+        VG_REQUIRE(events.size() == size_t { 1 });
+        VG_CHECK(!events[0].writer_created);
+    }
+    Publish(f.ctx, nullptr, ChannelSettings(f.ctx, CaptureType::Video)); // continuous off: nothing to admit
+    VG_CHECK(!f.ctx.dispatchContinuous());
+    VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER))); // triggered Video accepts again
+    VG_CHECK(video.current() != nullptr && video.current()->kind == FileTask::Kind::Triggered);
+}
+
+VG_TEST_CASE(the_continuation_gate_of_a_running_task_depends_on_its_kind)
+{
+    // docs/PLAN.md section 8.2: a triggered task runs while rules are enabled, a continuous clip while the
+    // schedule is open, and either while the Video revision it was bound to is current, which a mode switch
+    // moves, so a handover finishes the running clip of the old mode.
+    Fixture f;
+    const auto &video = f.ctx.file_channels.video;
+    const auto rev = f.ctx.action_settings.channelRevision(CaptureType::Video);
+    using Kind = FileTask::Kind;
+
+    VG_CHECK(video.isOpenFor(Kind::Triggered, rev) && video.isOpenFor(Kind::Continuous, rev));
+    f.ctx.record_rule_enabled.store(false);
+    VG_CHECK(!video.isOpenFor(Kind::Triggered, rev) && video.isOpenFor(Kind::Continuous, rev));
+    f.ctx.schedule_open.store(false);
+    VG_CHECK(!video.isOpenFor(Kind::Triggered, rev) && !video.isOpenFor(Kind::Continuous, rev));
+    f.ctx.record_rule_enabled.store(true);
+    VG_CHECK(video.isOpenFor(Kind::Triggered, rev) && !video.isOpenFor(Kind::Continuous, rev));
+    f.ctx.schedule_open.store(true);
+    VG_CHECK(!video.isOpenFor(Kind::Triggered, rev + 1) && !video.isOpenFor(Kind::Continuous, rev + 1));
+
+    // A mode switch moves the Video revision: the settings bound into a running task of either mode are stale.
+    Publish(f.ctx, nullptr, ChannelSettings(f.ctx, CaptureType::Video), true);
+    const auto continuous_rev = f.ctx.action_settings.channelRevision(CaptureType::Video);
+    VG_CHECK(continuous_rev != rev);
+    VG_CHECK(!video.isOpenFor(Kind::Triggered, rev) && !video.isOpenFor(Kind::Continuous, rev));
+    VG_CHECK(video.isOpenFor(Kind::Continuous, continuous_rev));
+    Publish(f.ctx, nullptr, ChannelSettings(f.ctx, CaptureType::Video));
+    VG_CHECK(!video.isOpenFor(Kind::Continuous, continuous_rev));
+    VG_CHECK(video.isOpenFor(Kind::Triggered, f.ctx.action_settings.channelRevision(CaptureType::Video)));
 }
 
 VG_TEST_CASE(source_less_owners_report_event_delivery)

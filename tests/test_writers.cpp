@@ -120,6 +120,7 @@ VG_TEST_CASE(video_writer_writes_from_the_first_key_frame_and_finishes_on_the_ne
         VG_CHECK_EQ(f.media.thumbnails, 1);
         VG_CHECK_EQ(f.media.active_while_writing, size_t { 1 });
         VG_CHECK_EQ(f.media.queue.size(), size_t { 1 }); // the closing key frame starts the next clip
+        VG_CHECK(writer->boundaryKeyFrame() == f.media.queue.front().time_stamp); // and is reported as the boundary
     }
     VG_CHECK_EQ(f.media.finishes, 1); // the destructor does not finish the sink again
     VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
@@ -250,6 +251,7 @@ VG_TEST_CASE(video_writer_bounds_its_waits_for_key_frames_and_input)
         VG_CHECK_EQ(f.media.video_frames, 3);
         VG_CHECK_EQ(f.media.finishes, 1);
         VG_CHECK(f.media.queue.empty());
+        VG_CHECK(!writer->boundaryKeyFrame()); // no boundary key frame was left
     }
     // The closing key frame arrives: the clip ends on it at once and leaves it queued for the next clip.
     {

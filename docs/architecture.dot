@@ -151,7 +151,7 @@ digraph G {
       style="rounded,dashed";
       color=gray60;
       infer_q [label="Inference Queue\nstd::queue<InferenceResult>\nBounded Pop-on-Full", shape=note];
-      slot_media_buf [label="Slot Media Buffer\nRule-Based Recording\nSorted by PTS\nKeyframe-Aware Drop", shape=note];
+      slot_media_buf [label="Slot Media Buffer\nRule-Based + Continuous Recording\nSorted by PTS\nKeyframe-Aware Drop\nkeepFrom(boundary)", shape=note];
       capture_media_buf [label="Capture Media Buffer\nManual Capture\nSorted by PTS\nKeyframe-Aware Drop", shape=note];
     }
 
@@ -161,7 +161,7 @@ digraph G {
       color=gray60;
       shared_time [label="SharedTime\nsteady_clock Time\nUnix Timestamp (ms)\nLocalTime (weekday/hour)", shape=note];
       shared_infer_result [label="SharedInferenceResult\nDetectionResultVec\nClassificationResultVec", shape=note];
-      shared_rule_evt [label="FileChannels\nPhoto / Video FileChannel\nCurrent / Last FileTask\n(Owner, Settings, Revision, Sequence)", shape=note];
+      shared_rule_evt [label="FileChannels\nPhoto / Video FileChannel\nCurrent / Last FileTask\n(Kind, Owner, Settings, Revision, Sequence)\nTriggered / Continuous (UID 0)", shape=note];
       shared_writer_cfg [label="SharedActionSettings\nGlobal + Per-Channel Revisions\nshared_ptr<const ActionSettings>\n(Immutable, Factory Created)\nWaterMarks", shape=note];
       slot_admission [label="SlotAdmissionRegistry\nEnabled Slot: Ready / tryAdmit\nRegistration (Task Identity)", shape=note];
     }

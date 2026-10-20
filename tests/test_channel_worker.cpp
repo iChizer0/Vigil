@@ -2,8 +2,10 @@
 // section 7.2; matrix W1): claim, write, publish outside the media operation and before the hold, complete; the
 // failure cooldown and the consecutive failure limit with injected constants; Canceled and Interrupted do not
 // hold; a stale task never touches a newer one through the loop; the thread body with its stop; two workers over
-// one Slot, each on its own channel with its own budget and failure count, serving both channels at once; and
-// the admission at dispatch that binds a task to the registered Slot with its budget (section 8.1).
+// one Slot, each on its own channel with its own budget and failure count, serving both channels at once; the
+// admission at dispatch that binds a task to the registered Slot with its budget (section 8.1); and the
+// continuous clip (section 8.2): no owner, no hold, the backlog dropped at entry and kept from the boundary
+// key frame between adjacent clips, the rule flag ignored, the schedule and a mode switch finishing it.
 
 #include <atomic>
 #include <cerrno>
@@ -11,9 +13,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -71,13 +75,32 @@ struct FakeSlot: FakeSlotAdmission
         return stop.load();
     }
 
+    std::optional<VideoWriter<FakeAdapter>::WaitBounds> wait_bounds; // injected into every video writer
+    std::atomic<int> prepared = 0;                                   // continuous clips whose backlog was prepared
+    std::function<void()> on_prepare; // runs after the backlog was prepared: what arrives after the claim
+
     std::unique_ptr<FakeAdapter> createWriter(const std::shared_ptr<FileTask> &task)
     {
         if (task->type == CaptureType::Image)
             return std::make_unique<ImageWriter<FakeAdapter>>(std::ref(media), std::ref(ctx), task->settings,
-                task->event, task->settings_revision);
-        return std::make_unique<VideoWriter<FakeAdapter>>(std::ref(media), std::ref(ctx), task->settings, task->event,
-            task->settings_revision);
+                task->event, task->settings_revision, task->kind);
+        auto writer = std::make_unique<VideoWriter<FakeAdapter>>(std::ref(media), std::ref(ctx), task->settings,
+            task->event, task->settings_revision, task->kind);
+        if (wait_bounds)
+            writer->setWaitBounds(*wait_bounds);
+        return writer;
+    }
+
+    // What the Slot does to its media buffer before a continuous clip (docs/PLAN.md section 8.2).
+    void prepareContinuousClip(std::optional<Clock::time_point> boundary) noexcept
+    {
+        {
+            const std::lock_guard lock(media.mutex);
+            MediaFrame::KeepFrom(media.queue, boundary);
+        }
+        ++prepared;
+        if (on_prepare)
+            on_prepare();
     }
 
     void publish(CacheFileInfo &&info) noexcept
@@ -160,6 +183,24 @@ struct Fixture
     void enableBoth(std::chrono::milliseconds photo_interval, std::chrono::milliseconds video_interval)
     {
         publish(settingsOf(CaptureType::Image, photo_interval), settingsOf(CaptureType::Video, video_interval));
+    }
+
+    // Publishes a snapshot with continuous recording configured and no other action (docs/PLAN.md section 8.2):
+    // the parser still rejects the switch, so the snapshot is built directly.
+    void enableContinuous()
+    {
+        auto &shared = ctx.action_settings;
+        VG_REQUIRE(shared.update(shared.getRevision(),
+            ActionSettings::create(true, false, nullptr, nullptr, &ctx.c_api.media)));
+    }
+
+    // Admits a continuous clip and returns it.
+    std::shared_ptr<FileTask> dispatchContinuous()
+    {
+        VG_REQUIRE(ctx.dispatchContinuous());
+        const auto task = ctx.file_channels.video.current();
+        VG_REQUIRE(task != nullptr);
+        return task;
     }
 
     Context::FileChannel &channel(CaptureType type)
@@ -710,6 +751,185 @@ VG_TEST_CASE(closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_ser
     VG_CHECK_EQ(f.media.captures, 1);
     VG_CHECK_EQ(f.media.video_frames, 3);
     VG_CHECK_EQ(f.media.finishes, 1);
+    VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
+    VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
+}
+
+VG_TEST_CASE(a_continuous_clip_runs_without_an_owner_or_a_hold_and_an_entry_drops_the_backlog)
+{
+    // docs/PLAN.md section 8.2 (Phase 5A-2): a continuous clip is a Video task without an owner, admitted by
+    // dispatchContinuous with rules disabled, run through the same loop, published with UID 0, and completed
+    // at once (no interval). Its entry drops the backlog, so the clip starts at a key frame enqueued after the
+    // claim; an adjacent clip keeps the boundary key frame the previous clip left; after a clip that ended
+    // without one the next clip is an entry again. A triggered clip keeps its pre-roll.
+    Fixture f;
+    f.slot.wait_bounds
+        = VideoWriter<FakeAdapter>::WaitBounds { std::chrono::milliseconds(100), std::chrono::seconds(10) };
+    auto &video = f.channel(CaptureType::Video);
+    Worker worker(f.ctx, f.slot, CaptureType::Video);
+
+    // A triggered clip first: its pre-roll is written (the backlog is not prepared) and its closing key frame
+    // stays queued.
+    f.enable(CaptureType::Video, std::chrono::milliseconds(20));
+    f.pushKeyFrame();
+    f.pushFrame(false);
+    f.pushKeyFrame();
+    f.media.finish_after_frames = 2;
+    const auto triggered = f.dispatch();
+    VG_CHECK_EQ(RuleEventRecorder::take().size(), size_t { 1 });
+    VG_CHECK(worker.step() == Step::Ran);
+    VG_CHECK(triggered->kind == FileTask::Kind::Triggered);
+    VG_CHECK(triggered->event->status.load() == WriteEvent::Status::Completed);
+    VG_CHECK_EQ(f.media.video_frames, 2);
+    VG_CHECK_EQ(f.slot.prepared.load(), 0);
+    VG_CHECK_EQ(f.media.queue.size(), size_t { 1 });
+
+    // Continuous recording configured and rules disabled: the entry drops the backlog (the triggered clip's
+    // closing key frame and a frame after it) and records from the first key frame enqueued after the claim.
+    // The clip is finished after two frames and ends on the next key frame, which stays queued.
+    f.enableContinuous();
+    f.ctx.record_rule_enabled.store(false);
+    f.pushFrame(false);
+    f.slot.on_prepare = [&] {
+        f.pushKeyFrame();
+        f.pushFrame(false);
+        f.pushKeyFrame();
+    };
+    f.media.finish_after_frames = 4;
+    const auto first = f.dispatchContinuous();
+    VG_CHECK(first->kind == FileTask::Kind::Continuous);
+    VG_CHECK(first->owner == nullptr);
+    VG_CHECK_EQ(first->event->owner_uid, uint64_t { 0 });
+    VG_CHECK_EQ(first->settings->interval.count(), 0L);
+    VG_CHECK(RuleEventRecorder::take().empty()); // no rule event
+    auto before = Clock::now();
+    VG_CHECK(worker.step() == Step::Ran);
+    VG_CHECK(Clock::now() - before < kBound); // no hold
+    VG_CHECK(first->event->status.load() == WriteEvent::Status::Completed);
+    VG_CHECK(video.current() == nullptr); // completed at once
+    VG_CHECK(video.last() == first);
+    VG_CHECK_EQ(f.slot.prepared.load(), 1);
+    VG_CHECK_EQ(f.media.video_frames, 4); // the dropped frames were not written
+    VG_CHECK_EQ(f.media.creates, 2);
+    VG_CHECK_EQ(f.media.queue.size(), size_t { 1 }); // the boundary key frame
+    VG_REQUIRE(f.slot.publications.size() == size_t { 2 });
+    VG_CHECK(f.slot.publications[1].status == WriteEvent::Status::Completed);
+    VG_CHECK_EQ(f.slot.publications[1].event->owner_uid, uint64_t { 0 });
+    VG_CHECK(f.slot.publications[1].held); // published before the completion, as any task
+    VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
+
+    // The adjacent clip keeps the boundary key frame and the frames after it, and ends at the key frame wait
+    // without a closing key frame.
+    f.slot.on_prepare = nullptr;
+    f.pushFrame(false);
+    f.pushFrame(false);
+    f.media.finish_after_frames = 7;
+    const auto second = f.dispatchContinuous();
+    before = Clock::now();
+    VG_CHECK(worker.step() == Step::Ran);
+    VG_CHECK(Clock::now() - before >= std::chrono::milliseconds(100)); // the closing key frame wait
+    VG_CHECK(second->event->status.load() == WriteEvent::Status::Completed);
+    VG_CHECK_EQ(f.slot.prepared.load(), 2);
+    VG_CHECK_EQ(f.media.video_frames, 7); // the boundary key frame and both frames
+    VG_CHECK(f.media.queue.empty());
+
+    // After a clip that ended without a boundary key frame the next one is an entry again: what was queued
+    // before the claim is dropped.
+    f.pushKeyFrame();
+    f.pushFrame(false);
+    f.slot.on_prepare = [&] { f.pushKeyFrame(); };
+    f.media.finish_after_frames = 8;
+    const auto third = f.dispatchContinuous();
+    VG_CHECK(worker.step() == Step::Ran);
+    VG_CHECK(third->event->status.load() == WriteEvent::Status::Completed);
+    VG_CHECK_EQ(f.slot.prepared.load(), 3);
+    VG_CHECK_EQ(f.media.video_frames, 8);
+    VG_CHECK_EQ(f.media.creates, 4);
+    VG_CHECK(f.media.queue.empty());
+    VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
+    VG_CHECK_EQ(f.slot.failure_marks.load(), 0);
+    VG_CHECK(worker.step() == Step::Idle); // nothing admitted: the rule loop admits the next clip
+}
+
+VG_TEST_CASE(a_continuous_clip_ignores_the_rule_flag_and_is_finished_by_the_schedule_or_a_mode_switch)
+{
+    // docs/PLAN.md section 8.2: bRuleEnabled is not a continuous clip's continuation condition; the schedule
+    // closing finishes it (Interrupted, its file published with UID 0), and so does a mode switch, which moves
+    // the Video revision. A failed clip holds through the cooldown and counts toward the limit like any task.
+    Fixture f;
+    f.slot.wait_bounds
+        = VideoWriter<FakeAdapter>::WaitBounds { std::chrono::milliseconds(100), std::chrono::seconds(10) };
+    auto &video = f.channel(CaptureType::Video);
+    f.enableContinuous();
+    Worker worker(f.ctx, f.slot, CaptureType::Video, std::chrono::milliseconds(40), 2); // injected: 40 ms, 2
+    // Every clip here is an entry (none completes on a key frame), so its frames arrive after the claim.
+    f.slot.on_prepare = [&] {
+        f.pushKeyFrame();
+        f.pushFrame(false);
+        f.pushFrame(false);
+    };
+
+    // Rules disabled after the first frame: the clip writes its three frames and completes.
+    f.media.finish_after_frames = 3;
+    f.media.on_write = [&] {
+        if (f.media.video_frames == 1)
+            f.ctx.record_rule_enabled.store(false);
+    };
+    auto task = f.dispatchContinuous();
+    VG_CHECK(worker.step() == Step::Ran);
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Completed);
+    VG_CHECK_EQ(f.media.video_frames, 3);
+    VG_CHECK(!f.ctx.record_rule_enabled.load());
+
+    // The schedule closes after the first frame of the next clip: Interrupted at the next check, published
+    // with UID 0, and no clip is admitted while closed.
+    f.media.finish_after_frames = SIZE_MAX;
+    f.media.on_write = [&] {
+        if (f.media.video_frames == 4)
+            f.ctx.schedule_open.store(false);
+    };
+    task = f.dispatchContinuous();
+    VG_CHECK(worker.step() == Step::Ran);
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Interrupted);
+    VG_CHECK_EQ(f.media.video_frames, 4);
+    VG_REQUIRE(f.slot.publications.size() == size_t { 2 });
+    VG_CHECK(f.slot.publications[1].status == WriteEvent::Status::Interrupted);
+    VG_CHECK_EQ(f.slot.publications[1].event->owner_uid, uint64_t { 0 });
+    VG_CHECK(!f.ctx.dispatchContinuous());
+    f.ctx.schedule_open.store(true);
+
+    // A mode switch while a clip runs (triggered Video published, continuous off): the Video revision moves,
+    // the clip is interrupted at the next check, and no continuous clip is admitted afterwards.
+    f.media.on_write = [&] {
+        if (f.media.video_frames == 5)
+            f.enable(CaptureType::Video, std::chrono::milliseconds(20));
+    };
+    task = f.dispatchContinuous();
+    VG_CHECK(worker.step() == Step::Ran);
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Interrupted);
+    VG_CHECK_EQ(f.media.video_frames, 5);
+    VG_CHECK(f.ctx.action_settings.channelRevision(CaptureType::Video) != task->settings_revision);
+    VG_CHECK(!f.ctx.dispatchContinuous());
+    VG_CHECK(video.current() == nullptr);
+    VG_REQUIRE(f.slot.publications.size() == size_t { 3 });
+    VG_CHECK(f.slot.publications[2].status == WriteEvent::Status::Interrupted);
+
+    // A failed clip (the sink cannot be created) holds through the cooldown; the second failure reaches the
+    // limit and stops the worker.
+    f.enableContinuous();
+    f.media.on_write = nullptr;
+    f.media.create_result = EIO;
+    task = f.dispatchContinuous();
+    const auto before = Clock::now();
+    VG_CHECK(worker.step() == Step::Ran);
+    VG_CHECK(Clock::now() - before >= std::chrono::milliseconds(40));
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Failed);
+    VG_CHECK(video.current() == nullptr);
+    task = f.dispatchContinuous();
+    VG_CHECK(worker.step() == Step::Stop);
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Failed);
+    VG_CHECK_EQ(f.slot.failure_marks.load(), 1);
+    VG_CHECK_EQ(f.slot.publications.size(), size_t { 3 });
     VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
     VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
 }

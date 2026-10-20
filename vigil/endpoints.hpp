@@ -637,9 +637,10 @@ public:
                     return obj;
                 };
 
-                // The most recently accepted file task across both channels (docs/PLAN.md section 6.2): the
-                // held one if any channel holds a task, else the last retired one. With one enabled channel
-                // this is its current task if any, else its last one.
+                // The most recently accepted triggered file task across both channels (docs/PLAN.md section
+                // 6.2): the held one if any channel holds a task, else the last retired one. With one enabled
+                // channel this is its current task if any, else its last one. A continuous clip is no rule
+                // event (section 8.2): it shows in the Video channel's state only.
                 const auto [task, held] = _ctx->file_channels.latest();
 
                 res_j["bReadyForNewEvent"] = !held;
@@ -647,23 +648,27 @@ public:
                 res_j["dLastRuleEventOwner"] = fmt_evt_owner(task ? task->owner : nullptr);
 
                 // The last dispatched owner, whatever the actions did with it, and each action's own state
-                // (docs/PLAN.md section 6.2): the switch from the published snapshot, readiness, and for a file
-                // channel the task it holds, for Sound the executor state.
+                // (docs/PLAN.md section 6.2): the switch as configured, readiness, and for a file channel the
+                // task it holds, of either kind, for Sound the executor state. Continuous recording suppresses
+                // triggered Video without rewriting its switch (section 8.1): the Video channel then reports
+                // bContinuous, is never ready for a rule event, and holds the continuous clip with UID 0.
                 res_j["dLastDispatchedOwner"] = fmt_evt_owner(_ctx->last_dispatched_owner.get());
                 const auto settings = _ctx->action_settings.get().settings;
-                const auto channel_state = [&](const Context::FileChannel &channel) {
+                const bool continuous = settings && settings->continuous;
+                const auto channel_state = [&](const Context::FileChannel &channel, bool suppressed) {
                     const auto current = channel.current();
-                    const bool enabled = settings && settings->channel(channel.type());
+                    const bool enabled = settings && settings->configured(channel.type());
                     auto obj = nlohmann::json::object();
                     obj["bEnabled"] = enabled;
-                    obj["bReady"] = enabled && !current;
+                    obj["bReady"] = enabled && !suppressed && !current;
                     obj["sState"] = ChannelStateString(current);
                     obj["dEvent"] = fmt_evt(current ? current->event : nullptr);
                     return obj;
                 };
                 auto states = nlohmann::json::object();
-                states["dPhoto"] = channel_state(_ctx->file_channels.photo);
-                states["dVideo"] = channel_state(_ctx->file_channels.video);
+                states["dPhoto"] = channel_state(_ctx->file_channels.photo, false);
+                states["dVideo"] = channel_state(_ctx->file_channels.video, continuous);
+                states["dVideo"]["bContinuous"] = continuous;
                 {
                     using Sound = Context::SoundActionExecutor;
                     const auto &sound = _ctx->sound_executor;
@@ -809,7 +814,8 @@ public:
 private:
     friend struct RuleEndpointTestAccess; // defined by the module tests only
 
-    // Reads the published snapshot, not the stored configuration, so it takes no lock.
+    // Whether a rule event has a file action to run (triggered Video is suppressed while continuous recording
+    // is configured). Reads the published snapshot, not the stored configuration, so it takes no lock.
     bool hasEnabledFileAction() const noexcept
     {
         const auto settings = _ctx->action_settings.get().settings;
