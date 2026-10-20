@@ -31,6 +31,49 @@ static inline std::mutex vigil_instance_scoped_suspend_mutex;
 static inline size_t vigil_instance_scoped_suspend_count = 0;
 static inline std::unique_ptr<vigil::Vigil> vigil_instance = nullptr;
 
+// The shared hold on the instance pointer that every call but init and deinit keeps for its duration
+// (docs/PLAN.md section 8.3). A std::shared_mutex may not be locked twice by one thread, so a C API call made
+// from a callback that runs on the thread of another C API call (the RULE callback of an HTTP activation, for
+// one) borrows that call's hold, which outlives it. Init and deinit refuse such a thread with EDEADLK: deinit
+// would wait for the exclusive lock against the hold the thread itself keeps, and init would lock shared again
+// for its existence check. Before 2026-10-20 every nested call locked again, which the standard leaves
+// undefined (glibc tolerates it).
+class InstanceHold final
+{
+public:
+    InstanceHold() noexcept : _outermost(depth() == 0)
+    {
+        if (_outermost)
+            vigil_instance_mutex.lock_shared();
+        ++depth();
+    }
+
+    ~InstanceHold() noexcept
+    {
+        --depth();
+        if (_outermost)
+            vigil_instance_mutex.unlock_shared();
+    }
+
+    InstanceHold(const InstanceHold &) = delete;
+    InstanceHold &operator=(const InstanceHold &) = delete;
+
+    // Whether the calling thread is inside a C API call, where init and deinit cannot proceed.
+    static bool held() noexcept
+    {
+        return depth() > 0;
+    }
+
+private:
+    static int &depth() noexcept
+    {
+        thread_local int d = 0;
+        return d;
+    }
+
+    const bool _outermost;
+};
+
 } // namespace vigil_c_api
 
 using namespace vigil_c_api;
@@ -53,6 +96,8 @@ vg_sta_e vg_service_init(vg_config_t *config)
 {
     if (!config || !config->basic.config_directory) // the one string the runtime cannot do without
         return EINVAL;
+    if (InstanceHold::held()) // a callback on the thread of a C API call: that call holds the instance shared
+        return EDEADLK;
 
     const std::lock_guard lifecycle(vigil_instance_lifecycle_mutex);
     {
@@ -86,6 +131,8 @@ vg_sta_e vg_service_init(vg_config_t *config)
 
 vg_sta_e vg_service_deinit()
 {
+    if (InstanceHold::held()) // a callback on the thread of a C API call: that call holds the instance shared
+        return EDEADLK;
     const std::lock_guard lifecycle(vigil_instance_lifecycle_mutex);
     std::unique_ptr<vigil::Vigil> instance;
     {
@@ -101,7 +148,7 @@ vg_sta_e vg_media_enqueue_video_frame(const vg_video_frame_t *frame)
     if (!frame || !frame->data || frame->bytes_len == 0) // a frame is its payload, copied below
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -122,7 +169,7 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame)
     if (!frame || !frame->data || frame->bytes_len == 0)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -143,16 +190,17 @@ vg_sta_e vg_media_scoped_suspend_write(bool wait)
     std::shared_ptr<vigil::Context> ctx;
     uint64_t generation = 0;
     {
-        const std::shared_lock lock(vigil_instance_mutex);
+        const InstanceHold hold;
         if (!vigil_instance)
             return ESRCH;
         ctx = vigil_instance->contextPtr();
         generation = vigil_instance_generation.load(std::memory_order_acquire);
     }
 
-    // Drained with no instance lock held: a media callback may reenter the C API, and deinit may detach the
-    // runtime meanwhile (its workers leave the barrier as they are joined). `ctx` keeps the barrier alive. A
-    // runtime published since the capture is another instance, whose count must not be touched.
+    // Drained with no instance hold of its own (a nested call drains under the hold of the call it runs in): a
+    // media callback may reenter the C API, and deinit may detach the runtime meanwhile (its workers leave the
+    // barrier as they are joined). `ctx` keeps the barrier alive. A runtime published since the capture is
+    // another instance, whose count must not be touched.
     const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
     if (vigil_instance_generation.load(std::memory_order_acquire) != generation)
         return ESRCH;
@@ -163,7 +211,7 @@ vg_sta_e vg_media_scoped_suspend_write(bool wait)
 
 vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue)
 {
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -200,7 +248,7 @@ vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len)
     if (data_len > static_cast<size_t>(std::numeric_limits<int>::max()))
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -313,7 +361,7 @@ vg_sta_e vg_inference_queue_reset(const char *source_id)
     if (!source_id)
         source_id = "";
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -361,7 +409,7 @@ vg_sta_e vg_http_api_rule_config_get(vg_http_api_response_t *response)
     if (!response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -382,7 +430,7 @@ vg_sta_e vg_http_api_rule_config_post(const vg_http_api_request_t *request, vg_h
     if (!request || !response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -404,7 +452,7 @@ vg_sta_e vg_http_api_rule_schedule_config_get(vg_http_api_response_t *response)
     if (!response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -425,7 +473,7 @@ vg_sta_e vg_http_api_rule_schedule_config_post(const vg_http_api_request_t *requ
     if (!request || !response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -447,7 +495,7 @@ vg_sta_e vg_http_api_rule_info_get(vg_http_api_response_t *response)
     if (!response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -468,7 +516,7 @@ vg_sta_e vg_http_api_rule_record_config_get(vg_http_api_response_t *response)
     if (!response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -489,7 +537,7 @@ vg_sta_e vg_http_api_rule_record_config_post(const vg_http_api_request_t *reques
     if (!request || !response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -512,7 +560,7 @@ vg_sta_e vg_http_api_rule_http_rule_activate_post(const vg_http_api_request_t *r
     if (!request || !response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -534,7 +582,7 @@ vg_sta_e vg_http_api_storage_config_get(vg_http_api_response_t *response)
     if (!response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -555,7 +603,7 @@ vg_sta_e vg_http_api_storage_config_post(const vg_http_api_request_t *request, v
     if (!request || !response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -577,7 +625,7 @@ vg_sta_e vg_http_api_storage_status_get(vg_http_api_response_t *response)
     if (!response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -598,7 +646,7 @@ vg_sta_e vg_http_api_storage_control_post(const vg_http_api_request_t *request, 
     if (!request || !response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -620,7 +668,7 @@ vg_sta_e vg_http_api_capture_status_get(vg_http_api_response_t *response)
     if (!response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -641,7 +689,7 @@ vg_sta_e vg_http_api_capture_start_post(const vg_http_api_request_t *request, vg
     if (!request || !response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 
@@ -663,7 +711,7 @@ vg_sta_e vg_http_api_capture_stop_post(const vg_http_api_request_t *request, vg_
     if (!request || !response || response->free_cb || response->body)
         return EINVAL;
 
-    const std::shared_lock lock(vigil_instance_mutex);
+    const InstanceHold hold;
     if (!vigil_instance)
         return ESRCH;
 

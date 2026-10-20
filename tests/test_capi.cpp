@@ -1,5 +1,6 @@
 // Characterization tests for the C API lifecycle (docs/PLAN.md section 8.3): the instance guard, nested
-// scoped suspension, and reentry from a callback while the runtime is being built or torn down. The runtime
+// scoped suspension, reentry from a callback while the runtime is being built or torn down, and a nested C API
+// call from a callback on the thread of a C API call. The runtime
 // is real (rule, storage, and capture threads, plus the selected Slot's manager and channel workers) over the
 // fake configuration: the internal "device" is a path that does not exist, every scanned block device is
 // hidden, and no media sink is reachable, so nothing here touches a device or needs privileges.
@@ -399,6 +400,77 @@ VG_TEST_CASE(init_validates_the_configuration_and_the_api_refuses_empty_frames_a
     VG_CHECK_EQ(vg_http_api_rule_info_get(&response), 0); // reusable once released
     VG_HTTP_API_SAFE_RELEASE_RESPONSE(&response);
     VG_CHECK_EQ(vg_service_deinit(), 0);
+}
+
+VG_TEST_CASE(a_callback_on_the_thread_of_a_c_api_call_can_call_the_c_api_but_not_the_lifecycle)
+{
+    // The RULE callback of an HTTP activation runs on the activation's thread, inside the C API call. A nested
+    // C API call from it borrows the activation's hold on the instance instead of locking it again (undefined
+    // before 2026-10-20), so it can read rule info and post a configuration; deinit, which would wait for the
+    // exclusive lock against the hold the thread itself keeps, and init, which would lock shared again for its
+    // existence check, return EDEADLK instead.
+    Fixture f;
+    RuleEventRecorder::clear();
+    struct HookGuard
+    {
+        ~HookGuard()
+        {
+            RuleEventRecorder::hook = nullptr;
+        }
+    } hook_guard; // the hook captures this frame by reference
+    VG_REQUIRE(vg_service_init(&f.config) == 0);
+    nlohmann::json http;
+    http["sCurrentSelected"] = "HTTP";
+    VG_CHECK_EQ(Post(&vg_http_api_rule_record_config_post, http), 0);
+    auto record = nlohmann::json::parse(R"({
+        "iSchemaVersion": 2, "bRuleEnabled": true, "bContinuousRecordEnabled": false,
+        "dActions": { "dPhoto": { "bEnabled": false, "sFormat": "JPG", "iIntervalMs": 5000 },
+                      "dVideo": { "bEnabled": false, "iIntervalMs": 5000 }, "dSound": { "bEnabled": false } }
+    })");
+    VG_CHECK_EQ(Post(&vg_http_api_rule_config_post, record), 0);
+
+    int nested = 0;
+    vg_sta_e info_status = -1, config_status = -1, deinit_status = -1, init_status = -1;
+    int config_code = -1;
+    nlohmann::json info;
+    RuleEventRecorder::hook = [&](const vg_rule_evt_t &) {
+        ++nested;
+        vg_http_api_response_t response {};
+        info_status = vg_http_api_rule_info_get(&response);
+        if (info_status == 0)
+        {
+            const auto *text = static_cast<const char *>(response.body);
+            info = nlohmann::json::parse(text, text + response.body_len);
+        }
+        VG_HTTP_API_SAFE_RELEASE_RESPONSE(&response);
+        auto changed = record;
+        changed["dActions"]["dPhoto"]["iIntervalMs"] = 777;
+        std::string body = changed.dump(); // the C API directly: a failing VG_REQUIRE would unwind the callback
+        const vg_http_api_request_t request { .free_cb = nullptr, .payload = body.data(), .payload_len = body.size() };
+        config_status = vg_http_api_rule_config_post(&request, &response);
+        if (config_status == 0)
+        {
+            const auto *text = static_cast<const char *>(response.body);
+            config_code = nlohmann::json::parse(text, text + response.body_len).at("code").get<int>();
+        }
+        VG_HTTP_API_SAFE_RELEASE_RESPONSE(&response);
+        deinit_status = vg_service_deinit();
+        init_status = vg_service_init(&f.config);
+    };
+    VG_CHECK_EQ(Post(&vg_http_api_rule_http_rule_activate_post, nlohmann::json::object()), 0);
+    RuleEventRecorder::hook = nullptr;
+    VG_CHECK_EQ(nested, 1);
+    VG_CHECK_EQ(info_status, 0);
+    VG_CHECK_EQ(info.at("dLastDispatchedOwner").at("sRuleType").get<std::string>(), "HTTP"); // the event reported
+    VG_CHECK_EQ(config_status, 0);
+    VG_CHECK_EQ(config_code, 0);
+    VG_CHECK_EQ(deinit_status, EDEADLK);
+    VG_CHECK_EQ(init_status, EDEADLK);
+    VG_CHECK_EQ(Get(&vg_http_api_rule_config_get).at("dActions").at("dPhoto").at("iIntervalMs").get<int>(), 777);
+    const auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_HTTP);
+    VG_CHECK_EQ(vg_service_deinit(), 0); // outside any call, the runtime still exists
 }
 
 VG_TEST_MAIN()

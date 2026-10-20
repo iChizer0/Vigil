@@ -25,7 +25,8 @@ extern "C" {
  * borrowed until vg_service_deinit returns. config_directory is required; every callback is optional unless its
  * field says otherwise, and a rule or an action that needs a missing callback is refused or fails when it runs.
  * @return vg_sta_e 0 on success; EINVAL for a null config or config_directory, EALREADY while a runtime exists,
- * EFAULT when the runtime could not be built (the cause is logged).
+ * EDEADLK from a callback on the thread of another C API call (see vg_service_deinit), EFAULT when the runtime
+ * could not be built (the cause is logged).
  * @note May launch child threads for media processing and HTTP serving, and the Unix socket path used for TTY should be
  * created by the caller.
  */
@@ -34,11 +35,14 @@ vg_sta_e vg_service_init(vg_config_t *config);
 /**
  * @brief Shuts down the Vigil runtime and releases any allocated resources (thread-safe).
  *
- * @return vg_sta_e 0 when teardown succeeds; error status otherwise.
+ * @return vg_sta_e 0 when teardown succeeds; EDEADLK from a callback on the thread of another C API call.
  * @note Blocks until all child threads have exited and resources are cleaned up. The callbacks, user_data, strings,
  * and arrays given to vg_service_init must stay valid until this call returns. Neither this function nor
- * vg_service_init may be called from a callback, since the call would wait for the thread it runs on; a callback that
- * calls another C API function while the runtime is being built or torn down receives ESRCH.
+ * vg_service_init may be called from a callback: on the thread of another C API call they return EDEADLK, and on a
+ * Vigil thread this function would have to join the thread it runs on, which terminates the process, while
+ * vg_service_init returns EALREADY. Any other C API function may be called from a callback, also on the thread of
+ * the C API call that invoked it, unless the callback's own description says otherwise; while the runtime is being
+ * built or torn down such a call receives ESRCH.
  */
 vg_sta_e vg_service_deinit();
 
