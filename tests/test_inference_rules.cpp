@@ -278,6 +278,16 @@ VG_TEST_CASE(rule_config_rejects_malformed_filters)
     auto missing_id = RuleJson("r", 1, { "person" });
     missing_id.erase("sID");
     VG_CHECK_THROWS(InferenceRuleConfig(missing_id, f.ctx));
+    // iDebounceTimes feeds an int counter: a negative or an oversized value is rejected since 2026-10-20 (it was
+    // narrowed silently before), while zero and the largest int are accepted as they are (docs/PLAN.md section 2).
+    VG_CHECK_THROWS(InferenceRuleConfig(RuleJson("r", -1, { "person" }), f.ctx));
+    auto oversized = RuleJson("r", 1, { "person" });
+    oversized["iDebounceTimes"] = int64_t { 2147483648 };
+    VG_CHECK_THROWS(InferenceRuleConfig(oversized, f.ctx));
+    VG_CHECK_EQ(InferenceRuleConfig(RuleJson("r", 0, { "person" }), f.ctx).debounce_times, size_t { 0 });
+    auto largest = RuleJson("r", 1, { "person" });
+    largest["iDebounceTimes"] = int64_t { 2147483647 };
+    VG_CHECK_EQ(InferenceRuleConfig(largest, f.ctx).debounce_times, size_t { 2147483647 });
 }
 
 VG_TEST_CASE(rule_set_returns_the_first_match_and_skips_later_members_on_that_tick)

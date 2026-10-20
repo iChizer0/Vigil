@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -88,7 +89,16 @@ struct InferenceRuleConfig
     InferenceRuleConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
         j.at("sID").get_to(id);
-        j.at("iDebounceTimes").get_to(debounce_times);
+        {
+            // The activation threshold of the rule's int counter: zero keeps its meaning (every frame from a
+            // consumed source activates), and only a negative or an oversized value is rejected (docs/PLAN.md
+            // section 2, decided 2026-10-19); before 2026-10-20 both were narrowed silently.
+            int64_t debounce;
+            j.at("iDebounceTimes").get_to(debounce);
+            if (debounce < 0 || debounce > std::numeric_limits<int>::max())
+                throw Exception("Invalid debounce times " + std::to_string(debounce) + " while parsing inference rule");
+            debounce_times = static_cast<size_t>(debounce);
+        }
         if (j.contains("lSourceFilter"))
         {
             const auto &src_arr = j.at("lSourceFilter");
