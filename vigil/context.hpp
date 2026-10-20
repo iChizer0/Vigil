@@ -226,7 +226,7 @@ struct Context
     // a continuous clip is no rule event; its gates are the schedule and the media pause, not `bRuleEnabled`,
     // and it needs the same usable Slot with headroom. Returns whether a clip was accepted, which the channel
     // refuses while it holds a task of either kind. The rule loop calls it on every tick, before the enable
-    // check (Phase 5A-3).
+    // check (RuleEndpoint::ruleTaskLoop).
     bool dispatchContinuous() const noexcept
     {
         const auto loaded = action_settings.get();

@@ -258,10 +258,11 @@ public:
             throw Exception("Context pointer cannot be null in RuleEndpoint");
 
         // Startup (docs/PLAN.md section 4.3): a missing file keeps the defaults. A file that exists but cannot
-        // be loaded or applied is left untouched and keeps rules disabled until a valid record configuration
-        // is posted, so that neither the default ALWAYS_ON rule nor the default open schedule runs in its
-        // place. The loaded pair is validated against the ALWAYS_ON invariant once both files are in (section
-        // 4.4), and a violation fails closed the same way, with both files left in place and both reported.
+        // be loaded or applied is left untouched and keeps rules disabled, and continuous recording off, until
+        // a valid record configuration is posted, so that neither the default ALWAYS_ON rule nor the default
+        // open schedule runs in its place. The loaded pair is validated against the ALWAYS_ON invariant once
+        // both files are in (section 4.4), and a violation fails closed the same way, with both files left in
+        // place and both reported.
         bool fail_closed = false;
         const auto load = [&fail_closed](ConfigStore &store, const auto &apply) {
             nlohmann::json j;
@@ -297,10 +298,16 @@ public:
         {
             VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR,
                 "A stored configuration could not be applied (an unusable file, or a pair the selected ALWAYS_ON "
-                "rule cannot pace); the files are left untouched and rules stay disabled until a valid record "
-                "configuration is posted");
+                "rule cannot pace); the files are left untouched, and rules stay disabled and continuous recording "
+                "off, until a valid record configuration is posted");
             const std::unique_lock lock(_record_config_mutex);
             _record_config.rule_enabled = false;
+            // Continuous recording ignores the rule flag (docs/PLAN.md section 8.2), so a stored switch is
+            // withdrawn from the published snapshot as well; both switches read false until a valid
+            // configuration is posted.
+            _record_config.continuous_enabled = false;
+            if (_record_config.sync(*_ctx, _record_config.prepare(*_ctx)) != 0)
+                VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Failed to withdraw the stored continuous recording switch");
             _ctx->record_rule_enabled.store(false, std::memory_order_release);
         }
 
@@ -780,7 +787,8 @@ public:
                 throw Exception("Activating HTTP rule required schedule rule to be ready in current configuration");
             }
             // The storage precheck applies only when a file action is enabled (docs/PLAN.md section 5.2): a
-            // rule-only or Sound-only activation needs no storage.
+            // rule-only or Sound-only activation needs no storage, nor does one whose Video action continuous
+            // recording suppresses (section 8.2).
             if (hasEnabledFileAction() && !_ctx->slot_admission.isReadyToWrite())
             {
                 ret = EBUSY;
@@ -892,6 +900,10 @@ private:
             const std::shared_lock lock(_schedule_rule_mutex);
             publishScheduleGateUnsafe();
         }
+        // Continuous recording is admitted on every tick, before the enable check: its gates are the schedule
+        // just published, the pause, and the Slot, not bRuleEnabled (docs/PLAN.md section 8.2). Nothing happens
+        // unless the snapshot configures it, and a held clip refuses the next one until it is completed.
+        _ctx->dispatchContinuous();
         if (!_ctx->record_rule_enabled.load(std::memory_order_relaxed)
             || !_ctx->schedule_open.load(std::memory_order_acquire))
             return;

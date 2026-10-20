@@ -23,7 +23,7 @@ and stores it in canonical form; every field is required (see below).
 {
     "iSchemaVersion": 2, // Integer, required, must be 2
     "bRuleEnabled": true, // Boolean, required, enable or disable the evaluation of all rules, evaluate precedence: schedule rule > record rule
-    "bContinuousRecordEnabled": false, // Boolean, required, standalone continuous MP4 recording; not supported yet, must be false
+    "bContinuousRecordEnabled": false, // Boolean, required, continuous MP4 recording (see below): clips of the target length back to back while the schedule is open, whatever bRuleEnabled is
     "dActions": { // Object, required, the post-trigger actions
         "dPhoto": {
             "bEnabled": false, // Boolean, required
@@ -47,7 +47,15 @@ The document is always complete: `GET` returns every field, and `POST` takes the
 and post it). Any combination of actions may be enabled, and `bRuleEnabled: true` with every action disabled is accepted:
 every rule event is reported and nothing else happens. Photo and Video run independently, each on its own interval, and
 may both publish a file for one rule event; Sound plays through the host's callback and is never queued (a trigger while
-one is pending or playing is dropped). `bContinuousRecordEnabled` is rejected when true until continuous recording lands.
+one is pending or playing is dropped). `bContinuousRecordEnabled` records MP4 clips of the target length
+(`bVideoClipLengthSeconds` in Rule Info) back to back on the video channel whenever the schedule is open and storage and
+media allow, whatever `bRuleEnabled` is; it is no rule event, so no rule callback reports it and its files carry
+`event_uid` 0. While it is set, `dVideo` keeps its stored value but no triggered video is admitted for a rule event
+(Photo and Sound are unaffected, and an HTTP activation then needs storage only when Photo is enabled); switching it
+either way finishes the running clip first, under its own identity, before the other mode's first clip starts. A clip
+that loses the schedule, media, or storage ends early and is kept, and the next clip starts at the first key frame
+after it is admitted, so nothing from a closed interval is recorded. `ALWAYS_ON`, the default record rule, cannot be
+combined with it even while `bRuleEnabled` is false (see Always-On Rule): select another record rule first.
 With `ALWAYS_ON` selected (the default), the actions are limited to what it paces (see Always-On Rule): a payload outside
 that limit is rejected with `EINVAL`; select another record rule first. A missing field, a field of the wrong type, a
 non-positive or non-integer interval, an unknown photo format, and any other `iSchemaVersion` are rejected with `EINVAL`
@@ -101,7 +109,7 @@ Get the information about the rule system.
         },
         "dVideo": {
             // ... The same fields as dPhoto, where bReady is false while continuous recording is configured, plus:
-            "bContinuous": false // Boolean, whether continuous recording is configured: the channel then records clips without an owner (iOwnerUID 0) while the schedule is open, whatever bRuleEnabled is, and admits no triggered video, while bEnabled still reports dVideo.bEnabled as configured; not accepted yet (bContinuousRecordEnabled must be false)
+            "bContinuous": false // Boolean, whether continuous recording is configured: the channel then records clips without an owner (iOwnerUID 0) while the schedule is open, whatever bRuleEnabled is, and admits no triggered video, while bEnabled still reports dVideo.bEnabled as configured
         },
         "dSound": {
             "bEnabled": false, // Boolean, whether the action is enabled in the general rule configuration
@@ -285,11 +293,12 @@ file action's `iIntervalMs` pacing (see General Rule Configuration): the next re
 interval after the previous one started, and only once the previous write has finished.
 
 Because it paces one file action, selecting `ALWAYS_ON` requires the stored general rule configuration to satisfy its
-invariant: `dSound` disabled, at most one of `dPhoto` and `dVideo` enabled, and exactly one while `bRuleEnabled` is true
-(the first-start configuration satisfies it). The record rule `POST` that selects it is rejected with `EINVAL` otherwise,
-and while it is selected the general rule configuration `POST` is held to the same limit, so simplify the actions first
-or select another rule first. The two checks share one lock, so neither ordering nor concurrent posts bypass it. At
-startup a stored pair that violates it keeps rules disabled (`bRuleEnabled` reads false) with both files left in place.
+invariant: `dSound` and `bContinuousRecordEnabled` false, at most one of `dPhoto` and `dVideo` enabled, and exactly one
+while `bRuleEnabled` is true (the first-start configuration satisfies it). The record rule `POST` that selects it is
+rejected with `EINVAL` otherwise, and while it is selected the general rule configuration `POST` is held to the same
+limit, so simplify the actions first or select another rule first. The two checks share one lock, so neither ordering
+nor concurrent posts bypass it. At startup a stored pair that violates it keeps rules disabled and continuous recording
+off (`bRuleEnabled` and `bContinuousRecordEnabled` read false) with both files left in place.
 
 ```json
 {

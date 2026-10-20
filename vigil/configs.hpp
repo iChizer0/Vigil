@@ -558,7 +558,8 @@ struct RecordConfig
     };
 
     bool rule_enabled = false;
-    bool continuous_enabled = false;
+    bool continuous_enabled = false; // continuous Video (docs/PLAN.md section 8.2): schedule-gated, whatever
+                                     // rule_enabled is, and triggered Video suppressed while it is set
     PhotoAction photo;
     VideoAction video;
     SoundAction sound;
@@ -587,12 +588,9 @@ struct RecordConfig
         sound.enabled = actions.at("dSound").at("bEnabled").get<bool>();
 
         // Any combination of actions is a configuration, including none with rules enabled (every rule event
-        // is reported and nothing else happens); what ALWAYS_ON can pace is the endpoint's check against the
-        // selected rule (satisfiesAlwaysOnInvariant). Continuous recording is accepted in Phase 5A-3 and is
-        // rejected rather than accepted as a no-op until then (the runtime already runs it from a snapshot
-        // built with the switch, docs/PLAN.md section 8.2).
-        if (continuous_enabled)
-            throw Exception("bContinuousRecordEnabled is not supported yet");
+        // is reported and nothing else happens) and continuous recording with or without a Video action
+        // (docs/PLAN.md section 8.2); what ALWAYS_ON can pace is the endpoint's check against the selected
+        // rule (satisfiesAlwaysOnInvariant).
     }
 
     // The canonical document: every field, with no extras.
