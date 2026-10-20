@@ -193,7 +193,7 @@ The payload depends on the `sCurrentSelected` field.
         {
             "sID": "person_detection", // String, rule ID (uniqueness not enforced but recommended)
             "lSourceFilter": ["builtin", "fall-detection"], // Optional; array of source ids to consume, empty or absent matches every source. "builtin" is the on-device inference pipeline
-            "iDebounceTimes": 3, // Integer, number of consecutive frames to confirm the activation
+            "iDebounceTimes": 3, // Integer, 0 to 2147483647, the threshold of the saturating counter described below
             "lConfidenceFilter": [0.5, 1.0], // Array of number [min, max], confidence range to filter, configurable range between 0.0 and 1.0 for each part
             "lClassFilter": ["person", "car"], // Array of strings, class names to filter
             "lRegionFilter": [ // Optional, list of regions to filter, empty list means no region filtering
@@ -214,7 +214,9 @@ The payload depends on the `sCurrentSelected` field.
 
 `lSourceFilter` selects the result sources this rule consumes, matched against the canonical source id. Source ids are stamped by the receiving ingress from the peer identity; a producer's self-reported `source_id` is never honored verbatim. An absent or empty filter matches every source, preserving the pre-source-filter contract under which rules consumed builtin and validated ResultSink traffic. Results from unlisted sources neither advance nor decay this rule's debounce state.
 
-Applications whose post-processing does not fit the detection/classification result formats decide on recording internally and emit a discrete event (`INFERENCE_DELIVERY_EVENT` with no result payload) instead. Subject to the schedule rule, such an event triggers recording immediately with the source id as the event id, bypassing rule filters and debounce entirely.
+`iDebounceTimes` is the threshold of a saturating counter rather than a count of consecutive frames: a consumed frame with a matching detection raises the counter by one, up to the threshold, a consumed frame without one lowers it by one, down to zero, and a frame activates the rule when the counter stands at the threshold afterwards. A single non-matching frame therefore deactivates the rule and a single matching one re-activates it, while a run of non-matching frames as long as the threshold empties the counter, so that as many matching frames are needed again. Frames from unlisted sources and ticks without a frame leave the counter alone. A threshold of zero activates on every consumed frame, matching or not. A negative or oversized threshold is rejected with `EINVAL`.
+
+Applications whose post-processing does not fit the detection/classification result formats decide on recording internally and emit a discrete event (`INFERENCE_DELIVERY_EVENT` with no result payload) instead. Subject to rule enablement and the schedule, such an event owns the tick it is consumed on and dispatches at once, bypassing the selected rule, its filters, and the debounce counter; it is reported with rule type `UNKNOWN`, an empty rule id, the source id as `sSourceID`, delivery `EVENT`, and the input's timestamp as the event time.
 
 #### Sound Event Rule
 
@@ -225,12 +227,14 @@ Applications whose post-processing does not fit the detection/classification res
         "sID": "00000000-0000-0000-0000-000000000000", // String, AcousticsLab head/model ID to match against inference head_id; empty string accepts any model
         "iConsecutiveWindowMs": 1000, // Integer, required consecutive active duration in milliseconds before activation, must be >= 0
         "lConfidenceFilter": [0.5, 1.0], // Array of number [min, max], confidence range to filter, configurable range between 0.0 and 1.0
-        "lClassFilter": ["doorbell", "baby_cry"] // Array of strings, class labels to filter; empty array accepts any label
+        "lClassFilter": ["doorbell", "baby_cry"] // Array of strings, class labels to filter; an empty array matches no label, so the rule never activates
     },
     "code": 0,
     "message": ""
 }
 ```
+
+The rule reads AcousticsLab inference frames from the Unix socket `/dev/shm/acousticslabd-result.sock`: each frame is a little-endian 32-bit payload length, between 1 and 65536 bytes, followed by an `acousticslab.v1.Envelope`. A frame is active when its inference carries the configured head id (any head with an empty `sID`) and a top-k entry whose label is in `lClassFilter` and whose probability lies within `lConfidenceFilter`; an envelope without an inference payload is ignored and changes nothing. The rule activates on the first active frame at least `iConsecutiveWindowMs` after the run of active frames it belongs to began, and on every active frame after that; an inactive frame ends the run, and silence ends nothing, since the window is measured on frames rather than by a timer (with a window of 0 every active frame activates). An activation is latched until the next rule evaluation consumes it, however long that takes, and several activations before an evaluation count once; rules are evaluated only while `bRuleEnabled` is true and the schedule is open, so an activation during a closure is reported once after reopening. A zero or oversized frame length, a malformed payload, a frame whose bytes stop arriving for 5 seconds, or the peer closing the socket ends the connection; the rule reconnects after a backoff that doubles from 100 ms to 5 s across connections that delivered no valid frame and returns to 100 ms once one did, and it waits without limit for the next frame while connected. The rule plays no sound: `dSound` in the general rule configuration does, through the host's callback.
 
 #### Timer Rule
 

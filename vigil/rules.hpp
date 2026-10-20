@@ -130,10 +130,13 @@ private:
 class SoundEventRule final: public BaseRule
 {
 public:
-    SoundEventRule(const SoundEventRuleConfig &cfg, const Context &ctx)
+    // `socket_path` is the AcousticsLab result socket, the production path by default; the module tests pass a
+    // socket of their own (docs/PLAN.md section 5.2).
+    SoundEventRule(const SoundEventRuleConfig &cfg, const Context &ctx,
+        std::string socket_path = kRuleSoundEventUDSPath)
         : BaseRule(VG_RULE_TYPE_SED, 0), _id(cfg.id), _consecutive_window(cfg.consecutive_window),
           _conf_rg(cfg.confidence_filter), _cls_set(cfg.class_filter.begin(), cfg.class_filter.end()),
-          _last_active(false), _stop_token(false)
+          _socket_path(std::move(socket_path)), _last_active(false), _stop_token(false)
     {
         VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Initialized sound event rule: '", _id,
             "', consecutive_window: ", _consecutive_window.count(), "ms, confidence_filter: [", _conf_rg.lb(), ", ",
@@ -168,6 +171,8 @@ public:
     }
 
 private:
+    friend struct SoundEventRuleTestAccess; // defined by the module tests only
+
     enum class DecodeStatus { Ignored, Inactive, Active, Malformed };
     enum class WaitStatus { Ready, Timeout, Stopped, Error };
 
@@ -189,8 +194,8 @@ private:
                 const auto fd = openSocket(ctx);
                 if (fd) [[likely]]
                 {
-                    VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Connected to sound event UDS at '", kRuleSoundEventUDSPath,
-                        "' with fd ", fd.get());
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Connected to sound event UDS at '", _socket_path, "' with fd ",
+                        fd.get());
                     processConnection(ctx, fd, connection_healthy);
                 }
             }
@@ -224,12 +229,12 @@ private:
 
         ::sockaddr_un addr {};
         addr.sun_family = AF_UNIX;
-        if (std::strlen(kRuleSoundEventUDSPath) >= sizeof(addr.sun_path)) [[unlikely]]
+        if (_socket_path.size() >= sizeof(addr.sun_path)) [[unlikely]]
         {
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Sound event UDS path too long: '", kRuleSoundEventUDSPath, "'");
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Sound event UDS path too long: '", _socket_path, "'");
             return {};
         }
-        std::strncpy(addr.sun_path, kRuleSoundEventUDSPath, sizeof(addr.sun_path) - 1);
+        std::strncpy(addr.sun_path, _socket_path.c_str(), sizeof(addr.sun_path) - 1);
 
         if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) [[likely]]
             return fd;
@@ -239,10 +244,9 @@ private:
             if (err != EINPROGRESS && err != EAGAIN && err != EWOULDBLOCK)
             {
                 if (err == ENOENT || err == ECONNREFUSED)
-                    VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Sound event UDS at '", kRuleSoundEventUDSPath,
-                        "' is not ready: ", err);
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Sound event UDS at '", _socket_path, "' is not ready: ", err);
                 else
-                    VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Failed to connect sound event UDS at '", kRuleSoundEventUDSPath,
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Failed to connect sound event UDS at '", _socket_path,
                         "': ", err);
                 return {};
             }
@@ -250,8 +254,7 @@ private:
             if (waitForFd(fd, POLLOUT, kSoundEventConnectTimeout, ctx) != WaitStatus::Ready)
             {
                 if (!_stop_token.load(std::memory_order_acquire))
-                    VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Timed out connecting sound event UDS at '",
-                        kRuleSoundEventUDSPath, "'");
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Timed out connecting sound event UDS at '", _socket_path, "'");
                 return {};
             }
         }
@@ -263,10 +266,10 @@ private:
             {
                 const auto final_err = so_error != 0 ? so_error : errno;
                 if (final_err == ENOENT || final_err == ECONNREFUSED)
-                    VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Sound event UDS at '", kRuleSoundEventUDSPath,
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "Sound event UDS at '", _socket_path,
                         "' is not ready: ", strerror(final_err));
                 else
-                    VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Failed to connect sound event UDS at '", kRuleSoundEventUDSPath,
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Failed to connect sound event UDS at '", _socket_path,
                         "': ", strerror(final_err));
                 return {};
             }
@@ -291,7 +294,7 @@ private:
             if (frame_len == 0 || frame_len > kSoundEventMaxFrameBytes)
             {
                 VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Invalid sound event UDS frame length ", frame_len, " from '",
-                    kRuleSoundEventUDSPath, "', closing connection");
+                    _socket_path, "', closing connection");
                 break;
             }
 
@@ -303,8 +306,8 @@ private:
             const auto status = filterEnvelope(frame.data(), frame.size());
             if (status == DecodeStatus::Malformed)
             {
-                VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Malformed sound event protobuf frame from '",
-                    kRuleSoundEventUDSPath, "', closing connection");
+                VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Malformed sound event protobuf frame from '", _socket_path,
+                    "', closing connection");
                 break;
             }
 
@@ -352,7 +355,7 @@ private:
             else if (n == 0)
             {
                 if (!_stop_token.load(std::memory_order_acquire))
-                    VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Sound event UDS at '", kRuleSoundEventUDSPath,
+                    VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Sound event UDS at '", _socket_path,
                         "' closed by peer while reading ", what);
                 return false;
             }
@@ -362,7 +365,7 @@ private:
             {
                 if (!_stop_token.load(std::memory_order_acquire))
                     VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to read ", what, " from sound event UDS at '",
-                        kRuleSoundEventUDSPath, "': ", err);
+                        _socket_path, "': ", err);
                 return false;
             }
 
@@ -373,7 +376,7 @@ private:
                 if (now >= *deadline)
                 {
                     VG_LOG(ctx.log, VG_LOG_LEVEL_WARN, "Timed out reading ", what, " from sound event UDS at '",
-                        kRuleSoundEventUDSPath, "'");
+                        _socket_path, "'");
                     return false;
                 }
                 wait_time = std::min(wait_time, std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - now));
@@ -423,8 +426,7 @@ private:
                 continue;
             if (errno == EINTR)
                 continue;
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Poll failed for sound event UDS at '", kRuleSoundEventUDSPath,
-                "': ", errno);
+            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Poll failed for sound event UDS at '", _socket_path, "': ", errno);
             return WaitStatus::Error;
         }
         return WaitStatus::Stopped;
@@ -484,6 +486,7 @@ private:
     std::chrono::milliseconds _consecutive_window;
     Range<float> _conf_rg;
     std::unordered_set<std::string> _cls_set;
+    std::string _socket_path;
 
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _last_active;
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _stop_token;
