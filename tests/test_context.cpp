@@ -564,6 +564,40 @@ VG_TEST_CASE(media_barrier_refuses_admission_while_paused_and_a_waiting_pause_dr
     VG_CHECK(static_cast<bool>(Context::MediaBarrier::Operation(barrier)));
 }
 
+VG_TEST_CASE(in_flight_budgets_admit_against_the_free_space_minus_reservations_and_release)
+{
+    // docs/PLAN.md section 9: an admission counts what earlier admissions may still write to the same
+    // filesystem, reserves its own bytes in the same critical section, and releases them when its holder goes.
+    Fixture f;
+    auto &budgets = f.ctx.in_flight_budgets;
+    constexpr Context::InFlightBudgets::FilesystemId fs = 7, other = 8;
+    VG_CHECK_EQ(budgets.inFlight(fs), FileSize { 0 });
+    auto a = budgets.tryReserve(fs, 100, /* free */ 1000, /* critical */ 500);
+    VG_CHECK(static_cast<bool>(a));
+    VG_CHECK_EQ(a.bytes(), FileSize { 100 });
+    VG_CHECK_EQ(budgets.inFlight(fs), FileSize { 100 });
+    auto b = budgets.tryReserve(fs, 300, 1000, 500); // 1000 - 100 is above the mark
+    VG_CHECK(static_cast<bool>(b));
+    VG_CHECK_EQ(budgets.inFlight(fs), FileSize { 400 });
+    VG_CHECK(!budgets.tryReserve(fs, 50, 1000, 600)); // 1000 - 400 is not: refused, nothing reserved
+    VG_CHECK_EQ(budgets.inFlight(fs), FileSize { 400 });
+    VG_CHECK(static_cast<bool>(budgets.tryReserve(other, 50, 1000, 600))); // another filesystem is independent
+    VG_CHECK_EQ(budgets.inFlight(other), FileSize { 0 });                  // and that one was released at once
+    a.release();
+    VG_CHECK(!a);
+    VG_CHECK_EQ(a.bytes(), FileSize { 0 });
+    VG_CHECK_EQ(budgets.inFlight(fs), FileSize { 300 });
+    a.release(); // idempotent
+    VG_CHECK_EQ(budgets.inFlight(fs), FileSize { 300 });
+    {
+        const auto moved = std::move(b); // a moved reservation is released once, by its new holder
+        VG_CHECK(!b && static_cast<bool>(moved));
+        VG_CHECK_EQ(budgets.inFlight(fs), FileSize { 300 });
+    }
+    VG_CHECK_EQ(budgets.inFlight(fs), FileSize { 0 });
+    VG_CHECK(static_cast<bool>(budgets.tryReserve(fs, 50, 1000, 600))); // it was the reservations, not the space
+}
+
 VG_TEST_CASE(owners_carry_an_event_time_and_a_dispatch_time)
 {
     const auto before = EventOwner::NowMs();

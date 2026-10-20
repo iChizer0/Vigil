@@ -237,6 +237,21 @@ VG_TEST_CASE(action_settings_carry_the_enabled_file_channel_and_the_effective_wa
     VG_CHECK(
         none->watermarks == WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), nullptr));
 
+    // Both channels (built directly: the parser allows one until Phase 4D): the effective watermarks are the
+    // aggregate of one Photo plus one Video task (docs/PLAN.md section 9).
+    const auto both = ActionSettings::create(false, false, photo->photo, video->video, &f.ctx.c_api.media);
+    VG_REQUIRE(both != nullptr);
+    const auto &pw = photo->photo->watermarks, &vw = video->video->watermarks;
+    VG_CHECK(both->watermarks == WaterMarks::aggregate(pw, vw));
+    VG_CHECK_EQ(both->watermarks.task_bytes, pw.task_bytes + vw.task_bytes);
+    VG_CHECK_EQ(both->watermarks.critical_remain_bytes,
+        static_cast<FileSize>(kStorageCriticalWaterMarkFactor) * both->watermarks.task_bytes
+            + static_cast<FileSize>(kStorageMinFileSystemFreeBytes));
+    VG_CHECK_EQ(both->watermarks.high_remain_bytes,
+        static_cast<FileSize>(kStorageHighWaterMarkFactor) * both->watermarks.task_bytes
+            + static_cast<FileSize>(kStorageMinFileSystemFreeBytes));
+    VG_CHECK(both->watermarks.critical_remain_bytes > vw.critical_remain_bytes);
+
     // Snapshots compare by content.
     VG_CHECK(*none == *Snapshot(f.ctx));
     VG_CHECK(!(*photo == *video) && !(*video == *none));
@@ -368,6 +383,24 @@ VG_TEST_CASE(publishing_bumps_only_the_revisions_of_the_channels_that_changed)
     VG_CHECK_EQ(after.video_revision, before.video_revision);
     VG_CHECK_EQ(after.photo_revision, before.photo_revision);
 
+    // A change of a channel's watermarks alone (what a media refresh does) moves the global revision and the
+    // snapshot, which admission reads, but not the channel revision a running task is bound to (docs/PLAN.md
+    // section 9, decided 2026-10-19).
+    before = after;
+    {
+        const auto &v = *before.settings->video;
+        VG_CHECK(publish(ActionSettings::create(false, true, before.settings->photo,
+            FileWriterSettings::create(v.type, v.format, v.interval, v.file_name_prefix, v.video_clip_length,
+                WaterMarks::from(v.format, 2 * kVideoClipLengthDefault.count(), nullptr)),
+            &f.ctx.c_api.media)));
+    }
+    after = shared.get();
+    VG_CHECK_EQ(after.revision, before.revision + 1);
+    VG_CHECK(!(after.settings->video->watermarks == before.settings->video->watermarks));
+    VG_CHECK(after.settings->watermarks == after.settings->video->watermarks);
+    VG_CHECK_EQ(after.video_revision, before.video_revision);
+    VG_CHECK_EQ(after.photo_revision, before.photo_revision);
+
     // Switching the file action from Video to Photo changes both channels.
     before = after;
     VG_CHECK(publish(photo(1500)));
@@ -469,12 +502,13 @@ VG_TEST_CASE(a_media_refresh_re_estimates_every_channel_coherently)
     VG_CHECK(before.settings->video->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), nullptr));
 
     // The host now estimates one clip at 1 MiB: the channel's and the effective watermarks change together in
-    // one snapshot, the Video revision moves, and the disabled Photo channel is untouched.
+    // one snapshot. No channel revision moves (since Phase 4C-3 a running task keeps its own watermark; before,
+    // a refresh interrupted it), and the disabled Photo channel is untouched.
     g_estimate = 1024 * 1024;
     shared.sync(*media);
     const auto after = shared.get();
     VG_CHECK_EQ(after.revision, before.revision + 1);
-    VG_CHECK_EQ(after.video_revision, before.video_revision + 1);
+    VG_CHECK_EQ(after.video_revision, before.video_revision);
     VG_CHECK_EQ(after.photo_revision, before.photo_revision);
     VG_REQUIRE(after.settings->video != nullptr);
     VG_CHECK(after.settings->video->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), media));
@@ -509,12 +543,14 @@ VG_TEST_CASE(watermarks_follow_the_format_table_unless_the_host_estimates)
     constexpr FileSize kMinFree = static_cast<FileSize>(kStorageMinFileSystemFreeBytes);
 
     const auto jpg = WaterMarks::from("JPG", 1, nullptr); // 10 MiB per image
+    VG_CHECK_EQ(jpg.task_bytes, 10 * kMiB);
     VG_CHECK_EQ(jpg.critical_remain_bytes, 2 * 10 * kMiB + kMinFree);
     VG_CHECK_EQ(jpg.high_remain_bytes, 5 * 10 * kMiB + kMinFree);
     VG_CHECK_EQ(jpg.recycle_bytes, 10 * 10 * kMiB + kMinFree);
     VG_CHECK(WaterMarks::from("JPG", 0, nullptr) == jpg); // batch is at least one
 
     const auto mp4 = WaterMarks::from("MP4", 60, nullptr); // 3 MiB per second, one 60-second clip
+    VG_CHECK_EQ(mp4.task_bytes, 180 * kMiB);
     VG_CHECK_EQ(mp4.critical_remain_bytes, 2 * 180 * kMiB + kMinFree);
     VG_CHECK_EQ(mp4.high_remain_bytes, 5 * 180 * kMiB + kMinFree);
 
@@ -528,6 +564,7 @@ VG_TEST_CASE(watermarks_follow_the_format_table_unless_the_host_estimates)
     vg_config_media_t media {};
     media.max_bytes_estimate_cb = &EstimateOneMiB;
     const auto estimated = WaterMarks::from("MP4", 60, &media);
+    VG_CHECK_EQ(estimated.task_bytes, kMiB);
     VG_CHECK_EQ(estimated.critical_remain_bytes, 2 * kMiB + kMinFree);
     media.max_bytes_estimate_cb = &EstimateNothing; // a non-positive estimate keeps the table value
     VG_CHECK(WaterMarks::from("MP4", 60, &media) == mp4);

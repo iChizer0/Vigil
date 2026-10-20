@@ -607,34 +607,52 @@ protected:
         return _stop_token.load(std::memory_order_acquire);
     }
 
-    // The quota and free-space probes of a new task against `watermarks`: false while the index or the stats are
-    // not usable, and when the Slot is saturated (logged when rotation is on, as before).
-    bool hasHeadroom(const WaterMarks &watermarks) noexcept
+    // Admission of a new task against `watermarks`, the aggregate of the enabled channels (docs/PLAN.md section
+    // 9): empty while the index or the stats are not usable, and when the Slot is saturated by its quota or by
+    // its free space minus what admitted tasks may still write to this filesystem (logged when rotation is on,
+    // as before). The task's own bytes are reserved in the same critical section as the free-space check; the
+    // worker releases them once the file is published.
+    Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &watermarks) noexcept
     {
+        Context::InFlightBudgets::Reservation reservation;
         bool saturated = false;
         if (const auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit >= 0)
         {
             const auto idx_mgr = _index_manager.load(std::memory_order_acquire);
             if (!idx_mgr)
-                return false;
+                return {};
             const auto index_result = idx_mgr->size();
             if (!index_result.valid)
-                return false;
+                return {};
             saturated = index_result.size + watermarks.critical_remain_bytes > limit;
         }
         if (!saturated)
         {
             if (!doStats())
-                return false;
-            saturated = _stats.load(std::memory_order_acquire).free_bytes
-                        <= (isInternal()
-                                ? static_cast<FileSize>(watermarks.critical_remain_bytes + GetInternalPreservedLimit())
-                                : watermarks.critical_remain_bytes);
+                return {};
+            reservation = _ctx.in_flight_budgets.tryReserve(_filesystem_id.load(std::memory_order_acquire),
+                watermarks.task_bytes, _stats.load(std::memory_order_acquire).free_bytes,
+                criticalRemainBytes(watermarks));
+            saturated = !reservation;
         }
         if (saturated && _quota_rotate.load())
             VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Writer thread for ", _dev_path,
                 " reached critical watermark, skipping new writer task start");
-        return !saturated;
+        return reservation;
+    }
+
+    // Whether a running task may continue (docs/PLAN.md section 9): the Slot is not stopping, its filesystem is
+    // mounted and ready or saturated, and the free space exceeds the task's own critical watermark, bound at
+    // acceptance. Saturation under the aggregate admission watermark does not stop a running task; a write or
+    // device failure does.
+    bool canContinue(const WaterMarks &own) const noexcept
+    {
+        if (_stop_token.load(std::memory_order_acquire))
+            return false;
+        if (const auto state = _state.load(std::memory_order_acquire);
+            state != SlotState::Ready && state != SlotState::Saturated)
+            return false;
+        return _stats.load(std::memory_order_acquire).free_bytes > criticalRemainBytes(own);
     }
 
     // The writer of a claimed task, from the settings and the channel revision bound into it; throws when it
@@ -1410,6 +1428,8 @@ private:
                 static_cast<int>(errno));
             return false;
         }
+        if (const auto filesystem = FilesystemIdOf(_mount_path))
+            _filesystem_id.store(*filesystem, std::memory_order_release);
         const auto new_stats = SlotStats(static_cast<FileSize>(vfs.f_blocks * vfs.f_frsize),
             static_cast<FileSize>(vfs.f_bfree * vfs.f_frsize));
         while (true)
@@ -1659,6 +1679,14 @@ private:
         return false;
     }
 
+    // The critical free-space mark of `watermarks` on this Slot: an internal filesystem keeps its preserved bytes
+    // on top.
+    FileSize criticalRemainBytes(const WaterMarks &watermarks) const noexcept
+    {
+        return isInternal() ? static_cast<FileSize>(watermarks.critical_remain_bytes + GetInternalPreservedLimit())
+                            : watermarks.critical_remain_bytes;
+    }
+
     SlotState probeStateReadyOrSaturated(const WaterMarks &watermarks, const IndexManager::IndexResult *index_result,
         const SlotStats &stats) noexcept
     {
@@ -1668,9 +1696,7 @@ private:
                 limit >= 0 && (index_result->size + watermarks.critical_remain_bytes > limit))
                 return SlotState::Saturated;
         }
-        if (stats.free_bytes
-            <= (isInternal() ? static_cast<FileSize>(watermarks.critical_remain_bytes + GetInternalPreservedLimit())
-                             : watermarks.critical_remain_bytes))
+        if (stats.free_bytes <= criticalRemainBytes(watermarks))
             return SlotState::Saturated;
         return SlotState::Ready;
     }
@@ -1794,6 +1820,7 @@ private:
 
     // Partition and quota stats
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<SlotStats> _stats;
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<std::uintmax_t> _filesystem_id = 0;
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<FileSize> _quota_limit_bytes;
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> _quota_rotate;
 
