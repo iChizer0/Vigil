@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -170,10 +171,21 @@ public:
 
     virtual ~SlotAdaptedWriter() noexcept
     {
-        if (const auto sta = this->event()->status.load(std::memory_order_acquire);
-            sta == WriteEvent::Status::Completed || sta == WriteEvent::Status::Interrupted)
-            _slot.moveAndAddCacheFile(_cache_file_info);
         _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    // After the task ran: the recorded file for the channel worker to publish, with its thumbnail generated into
+    // the cache directory while this writer still holds its media operation (docs/PLAN.md section 8.3). Empty
+    // when nothing is published: a Canceled task recorded nothing, and a Failed task's file is not usable. Called
+    // once; the worker publishes after releasing the writer, so the rename and the FILE callback run outside the
+    // operation.
+    std::optional<CacheFileInfo> takePublication() noexcept
+    {
+        if (const auto sta = this->event()->status.load(std::memory_order_acquire);
+            sta != WriteEvent::Status::Completed && sta != WriteEvent::Status::Interrupted)
+            return std::nullopt;
+        _slot.generateThumbnail(_cache_file_info);
+        return std::optional<CacheFileInfo>(std::move(_cache_file_info));
     }
 
 protected:

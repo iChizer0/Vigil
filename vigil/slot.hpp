@@ -30,6 +30,7 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 
+#include "channel_worker.hpp"
 #include "constants.hpp"
 #include "context.hpp"
 #include "index_manager.hpp"
@@ -50,6 +51,7 @@ using namespace vigil::index_manager;
 using namespace vigil::write_stats;
 using namespace vigil::relay;
 using namespace vigil::writers;
+using namespace vigil::workers;
 using namespace vigil::utils;
 
 using CancellationCheck = std::function<bool()>;
@@ -565,6 +567,7 @@ public:
 
 protected:
     friend SlotAdaptedWriter<Slot>;
+    friend FileChannelWorker<Slot>;
 
     inline Context &ctxRef() const
     {
@@ -576,7 +579,86 @@ protected:
         return _writer_task_count;
     }
 
-    void moveAndAddCacheFile(const CacheFileInfo &cache_file_info) noexcept
+    // Generates the thumbnail of a recorded file into the cache directory, from the frame its writer kept, and
+    // records its path for the publication. A media callback: the writer calls it while it still holds its media
+    // operation (docs/PLAN.md section 8.3), before the channel worker publishes.
+    void generateThumbnail(CacheFileInfo &cache_file_info) noexcept
+    {
+        if (!cache_file_info.thumbnail || !_ctx.c_api.media.thumbnail_generate_cb || cache_file_info.path.empty())
+            return;
+        const auto thumbnail_cache_path
+            = getRecordCachePath() / (cache_file_info.path.filename().string() + std::string(kStorageThumbnailFileExt));
+        if (const auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
+                cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_cache_path.c_str(),
+                kStorageThumbnailFileType, kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
+            ret != 0) [[unlikely]]
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to generate thumbnail for cache file ", cache_file_info.path,
+                ", code: ", static_cast<int>(ret));
+            return;
+        }
+        cache_file_info.thumbnail_path = thumbnail_cache_path;
+    }
+
+    // - MARK: Slot Channel Worker Adapter (docs/PLAN.md section 7.2)
+
+    bool stopRequested() const noexcept
+    {
+        return _stop_token.load(std::memory_order_acquire);
+    }
+
+    // The quota and free-space probes of a new task against `watermarks`: false while the index or the stats are
+    // not usable, and when the Slot is saturated (logged when rotation is on, as before).
+    bool hasHeadroom(const WaterMarks &watermarks) noexcept
+    {
+        bool saturated = false;
+        if (const auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit >= 0)
+        {
+            const auto idx_mgr = _index_manager.load(std::memory_order_acquire);
+            if (!idx_mgr)
+                return false;
+            const auto index_result = idx_mgr->size();
+            if (!index_result.valid)
+                return false;
+            saturated = index_result.size + watermarks.critical_remain_bytes > limit;
+        }
+        if (!saturated)
+        {
+            if (!doStats())
+                return false;
+            saturated = _stats.load(std::memory_order_acquire).free_bytes
+                        <= (isInternal()
+                                ? static_cast<FileSize>(watermarks.critical_remain_bytes + GetInternalPreservedLimit())
+                                : watermarks.critical_remain_bytes);
+        }
+        if (saturated && _quota_rotate.load())
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Writer thread for ", _dev_path,
+                " reached critical watermark, skipping new writer task start");
+        return !saturated;
+    }
+
+    // The writer of a claimed task, from the settings and the channel revision bound into it; throws when it
+    // cannot be built, which the worker treats as a failed task.
+    std::unique_ptr<SlotAdaptedWriter<Slot>> createWriter(const std::shared_ptr<FileTask> &task)
+    {
+        switch (task->type)
+        {
+            case CaptureType::Image:
+                return std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), task->settings_revision,
+                    std::ref(_ctx), task->settings, task->event);
+            case CaptureType::Video:
+                return std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this), task->settings_revision,
+                    std::ref(_ctx), task->settings, task->event);
+            default:
+                throw Exception("Unsupported writer type");
+        }
+    }
+
+    // Publishes a recorded file: moves it and its thumbnail from the cache directory to their final places,
+    // accounts for it, and reports it through the FILE callback. Pure filesystem work (docs/PLAN.md section 8.3):
+    // the worker calls it after releasing the writer, so no media operation is held, and the callback runs
+    // outside the publication lock.
+    void publish(CacheFileInfo &&cache_file_info) noexcept
     {
         if (cache_file_info.path.empty())
         {
@@ -585,24 +667,7 @@ protected:
             return;
         }
 
-        // The thumbnail is generated into the cache directory before the publication lock is taken, so the
-        // callback never runs under it.
-        std::filesystem::path thumbnail_cache_path;
-        if (cache_file_info.thumbnail && _ctx.c_api.media.thumbnail_generate_cb)
-        {
-            thumbnail_cache_path = getRecordCachePath()
-                                   / (cache_file_info.path.filename().string() + std::string(kStorageThumbnailFileExt));
-            if (const auto ret = _ctx.c_api.media.thumbnail_generate_cb(cache_file_info.thumbnail.data,
-                    cache_file_info.thumbnail.size, cache_file_info.thumbnail.format, thumbnail_cache_path.c_str(),
-                    kStorageThumbnailFileType, kStorageThumbnailMaxWH, _ctx.c_api.media.user_data);
-                ret != 0) [[unlikely]]
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to generate thumbnail for cache file ",
-                    cache_file_info.path, ", code: ", static_cast<int>(ret));
-                thumbnail_cache_path.clear();
-            }
-        }
-
+        auto thumbnail_cache_path = std::move(cache_file_info.thumbnail_path);
         size_t size = 0;
         std::filesystem::path target_file_path;
         {
@@ -692,6 +757,16 @@ protected:
         if (!thumbnail_cache_path.empty())
             std::filesystem::remove_all(thumbnail_cache_path, ec);
         return;
+    }
+
+    void markFailed() noexcept
+    {
+        _failure.store(true, std::memory_order_release);
+    }
+
+    std::string_view name() const noexcept
+    {
+        return _dev_path.native();
     }
 
     std::filesystem::path getRecordQuotaLimitPath() const noexcept
@@ -894,146 +969,12 @@ private:
         }
     }
 
+    // The writer thread: one channel worker over this Slot (docs/PLAN.md section 7.2) with the production
+    // cooldown and failure limit, serving the enabled channel until Phase 4C-4 gives each channel its own.
     void writerThreadTask() noexcept
     {
-        size_t consecutive_error_count = 0;
-
-        // Ends one task: the channel holds it through the interval (plus the cooldown after a failure), as
-        // today, and only then is it completed. Returns false when the thread must stop.
-        const auto finish_task = [this, &consecutive_error_count](const std::shared_ptr<FileTask> &task,
-                                     WriteEvent::Status status, std::chrono::steady_clock::time_point end) -> bool {
-            // Completed and Failed hold the channel until the interval (plus the failure cooldown) has elapsed.
-            // Canceled and Interrupted (a closed gate) do not: the loop re-checks the gates on its next probe.
-            if (status == WriteEvent::Status::Completed || status == WriteEvent::Status::Failed)
-            {
-                if (status == WriteEvent::Status::Failed)
-                {
-                    end += kWriterFailureCooldown;
-                    ++consecutive_error_count;
-                }
-                else
-                    consecutive_error_count = 0;
-                while (std::chrono::steady_clock::now() < end && !_stop_token.load(std::memory_order_acquire))
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            _ctx.file_channels.of(task->type).complete(task, status);
-            if (_stop_token.load(std::memory_order_acquire))
-                return false;
-            if (consecutive_error_count >= kWriterConsecutiveFailureMax)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Writer thread for device path ", _dev_path,
-                    " has reached maximum consecutive error count, stopping writer thread");
-                _failure.store(true, std::memory_order_release);
-                return false;
-            }
-            return true;
-        };
-
-        _ctx.file_channels.cancelPending(); // A task from before this thread started is stale
-        while (!_stop_token.load(std::memory_order_acquire))
-        {
-            const auto start = std::chrono::steady_clock::now();
-            const auto loaded = _ctx.action_settings.get();
-            if (!loaded.settings)
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
-                    "ActionSettings is null in storage slot writer thread for device path ", _dev_path,
-                    ", cannot start new writer task");
-                goto l_continue;
-            }
-
-            {
-                const auto watermarks = loaded.settings->watermarks;
-                // The single enabled file channel (docs/PLAN.md section 7.1), which this Slot's one worker serves
-                // until Phase 4C-4 gives each channel its own. Nothing to write without one; a pending task is
-                // retired by the rule loop, since rules cannot stay enabled without a file action (section 4.1).
-                const auto channel = loaded.settings->fileChannel();
-                if (!channel)
-                    goto l_continue;
-
-                // Check if slot status is ready to write
-                if (!isReadyToWrite())
-                    goto l_continue;
-
-                // Check if quota limit is exceeded
-                if (const auto limit = _quota_limit_bytes.load(std::memory_order_acquire); limit >= 0)
-                {
-                    if (const auto idx_mgr = _index_manager.load(std::memory_order_acquire); !idx_mgr)
-                        goto l_continue;
-                    else if (const auto index_result = idx_mgr->size(); !index_result.valid)
-                        goto l_continue;
-                    else if (index_result.size + watermarks.critical_remain_bytes > limit)
-                        goto l_continue_saturated;
-                }
-
-                // Check if free space is sufficient
-                if (!doStats())
-                    goto l_continue;
-                if (_stats.load(std::memory_order_acquire).free_bytes
-                    <= (isInternal()
-                            ? static_cast<FileSize>(watermarks.critical_remain_bytes + GetInternalPreservedLimit())
-                            : watermarks.critical_remain_bytes))
-                    goto l_continue_saturated;
-
-                // Check if media is paused (the writer's admission is the linearization point; this is the
-                // cheap pre-check that keeps the event unclaimed)
-                if (_ctx.media_barrier.isPaused())
-                    goto l_continue;
-
-                // Claim the channel's pending task, if any. It is bound to the settings and the channel revision
-                // the dispatcher loaded (docs/PLAN.md section 7.2); the writer stops when that revision moves.
-                const auto task = _ctx.file_channels.of(channel->type).claim();
-                if (!task)
-                    goto l_continue;
-
-                // One task: create, write, finish, publish, release, then back off and complete the task. The
-                // writer is destroyed before the cooldown, so the file is published right after the write. A
-                // constructor failure is a failed task like any other and enters the same cooldown and failure
-                // count instead of being retried immediately.
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting new writer task, dev path ", _dev_path);
-                auto status = WriteEvent::Status::Failed;
-                auto end = start + task->settings->interval; // a constructor failure holds from the probe
-                try
-                {
-                    std::unique_ptr<SlotAdaptedWriter<Slot>> writer;
-                    switch (task->type)
-                    {
-                        case CaptureType::Image:
-                            writer = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
-                                task->settings_revision, std::ref(_ctx), task->settings, task->event);
-                            break;
-                        case CaptureType::Video:
-                            writer = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
-                                task->settings_revision, std::ref(_ctx), task->settings, task->event);
-                            break;
-                        default:
-                            throw Exception("Unsupported writer type");
-                    }
-                    end = writer->endTime(); // the interval counts from the writer's start, as before Phase 2A
-                    status = (*writer)()->status.load(std::memory_order_acquire);
-                }
-                catch (const std::exception &e)
-                {
-                    VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Writer task failed for storage slot with device path ",
-                        _dev_path, ": ", e.what());
-                }
-                if (!finish_task(task, status, end))
-                    return;
-                continue;
-            }
-
-        l_continue_saturated:
-            if (_quota_rotate.load())
-            {
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Writer thread for ", _dev_path,
-                    " reached critical watermark, skipping new writer task start");
-            }
-
-        l_continue:
-            if (const auto elapsed = std::chrono::steady_clock::now() - start; elapsed < kWriterProbeInterval)
-                std::this_thread::sleep_for(kWriterProbeInterval - elapsed);
-            continue;
-        }
+        FileChannelWorker<Slot> worker(_ctx, *this);
+        worker.run();
     }
 
     // - MARK: Slot Private Methods
@@ -1802,10 +1743,7 @@ private:
     static inline constexpr const size_t kManagerRecoveryMaxAttempts = 5;
     static inline constexpr const std::chrono::seconds kManagerRecoverDelay = std::chrono::seconds(3);
     static inline constexpr const std::chrono::minutes kManagerEstimatedWriteBytesPeriod = std::chrono::minutes(30);
-    static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);
     static inline constexpr const std::chrono::milliseconds kWriterRotatePullDelay = std::chrono::milliseconds(50);
-    static inline constexpr const size_t kWriterConsecutiveFailureMax = 10;
-    static inline constexpr const std::chrono::seconds kWriterFailureCooldown = std::chrono::seconds(3);
     static inline constexpr const std::chrono::milliseconds kIndexSyncInterval = std::chrono::milliseconds(100);
     static inline constexpr const std::string_view kRecordCacheDirName = ".cache";
     static inline constexpr const std::string_view kRecordQuotaLimitFileName = ".quota_limit";

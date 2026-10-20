@@ -140,9 +140,8 @@ typedef struct vg_config_basic_t
     vg_sta_e (*log_cb)(vg_log_level_e level, const char *msg, size_t bytes_len); /**< Optional logging callback. */
     void (*on_rule_event_cb)(const vg_rule_evt_t *evt); /**< Optional callback invoked when a rule is activated. */
     void (*on_file_event_cb)(const vg_file_evt_t *evt); /**< Optional callback invoked on file events, from the worker
-                         that published the file while it still holds its media operation: return promptly, and do
-                         not call vg_media_scoped_suspend_write with wait=true (it would wait for itself) or
-                         vg_service_deinit from it. */
+                         that published the file, after it released its media operation and the publication lock:
+                         return promptly, and do not call vg_service_deinit from it. */
     const char *config_directory;                       /**< Filesystem path to the configuration root. */
 } vg_config_basic_t;
 

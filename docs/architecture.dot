@@ -225,7 +225,7 @@ digraph G {
       video_writer [label="VideoWriter<T>\nKeyframe Clip Boundaries\nClip Length Control\nFrame-by-Frame Write\nvideo_file_*_cb", shape=box];
     }
 
-    writer_thread [label="Slot Writer Thread (50ms)\nSlot Ready Check\nQuota/Watermark Check\nMedia Pause Check\nWrite Event Dispatch", shape=box, style=filled, fillcolor=lightsalmon];
+    writer_thread [label="Slot Writer Thread\nFileChannelWorker<Slot> (50ms)\nReady / Headroom / Pause Probes\nClaim, Write, Publish, Hold, Complete", shape=box, style=filled, fillcolor=lightsalmon];
 
     capture_thread [label="Capture Thread (50ms)\nCaptureEvent Check\nSpace Check\nMedia Pause Check\nDirect File Write", shape=box, style=filled, fillcolor=lightsalmon];
   }

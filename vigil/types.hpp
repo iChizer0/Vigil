@@ -914,20 +914,26 @@ struct MediaFrame
     };
 };
 
+// A recorded file in a Slot's cache directory on its way to publication: the writer fills it in, and the channel
+// worker hands it to the Slot once the writer is released (docs/PLAN.md section 7.2).
 struct CacheFileInfo final
 {
     std::filesystem::path path;
     std::string first_level_dir_name;
     std::filesystem::file_time_type creation_time;
     std::shared_ptr<WriteEvent> event;
-    ThumbnailBuffer thumbnail;
+    ThumbnailBuffer thumbnail;            // the frame the thumbnail is generated from
+    std::filesystem::path thumbnail_path; // the generated thumbnail, in the cache directory; empty without one
 
-    CacheFileInfo() : path(), first_level_dir_name(), creation_time(), event(), thumbnail() { }
+    CacheFileInfo() : path(), first_level_dir_name(), creation_time(), event(), thumbnail(), thumbnail_path() { }
 
     CacheFileInfo(std::shared_ptr<WriteEvent> evt)
-        : path(), first_level_dir_name(), creation_time(), event(evt), thumbnail()
+        : path(), first_level_dir_name(), creation_time(), event(evt), thumbnail(), thumbnail_path()
     {
     }
+
+    CacheFileInfo(CacheFileInfo &&) noexcept = default;
+    CacheFileInfo &operator=(CacheFileInfo &&) noexcept = default;
 
     ~CacheFileInfo() = default;
 };
