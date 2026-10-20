@@ -164,24 +164,28 @@ struct Context
 
     // Dispatches one owner after attribution (docs/PLAN.md sections 5.1, 6.2, 7.1, and 8.1): records it as the
     // last dispatched owner, attempts a task in every file channel the snapshot enables and a Sound trigger
-    // when it enables Sound, then reports the owner through the RULE callback. The result, which is also
-    // `writer_created`, is file acceptance only: at least one channel accepted a task. A channel accepts
-    // nothing while it holds a task, when its settings changed since the snapshot was loaded, when a gate
-    // closed since the caller evaluated it, or without a usable Slot with headroom; a rejected file action
-    // leaves nothing pending, so the next owner proceeds, and a rejected or failed Sound trigger changes nothing
-    // else. No configuration enables two channels or Sound before Phase 4D. Runs on the rule thread and on the
-    // HTTP request thread.
+    // when it enables Sound, then reports the owner through the RULE callback, whose `writer_created` is file
+    // acceptance only: at least one channel accepted a task. A channel accepts nothing while it holds a task,
+    // when its settings changed since the snapshot was loaded, when a gate closed since the caller evaluated
+    // it, or without a usable Slot with headroom; a rejected file action leaves nothing pending, so the next
+    // owner proceeds. Sound is admitted by its executor against the same gates, and a rejected or failed
+    // trigger changes nothing else. Returns whether the owner's file work was admitted: true when a channel
+    // accepted a task or the snapshot enables no file action (a rule-only or Sound-only configuration), which
+    // is what the HTTP activation answers 0 for (section 5.2); false when every enabled channel refused. Runs
+    // on the rule thread and on the HTTP request thread.
     bool dispatchRuleEvent(std::shared_ptr<EventOwner> owner) const noexcept
     {
         if (!owner)
             return false;
         const auto loaded = action_settings.get();
         bool accepted = false;
+        bool file_action_enabled = false;
         try
         {
             last_dispatched_owner.set(owner);
             if (loaded.settings)
             {
+                file_action_enabled = loaded.settings->fileChannel() != nullptr;
                 if (file_channels.photo.tryAccept(owner, loaded))
                     accepted = true;
                 if (file_channels.video.tryAccept(owner, loaded))
@@ -212,7 +216,7 @@ struct Context
             VG_LOG(log, VG_LOG_LEVEL_ERROR, "Unknown exception occurred while dispatching rule event");
             return false;
         }
-        return accepted;
+        return accepted || !file_action_enabled;
     }
 
     // Shared data
@@ -902,13 +906,17 @@ struct Context
             return _available;
         }
 
-        // Accepts a trigger from Idle. False when Sound is unavailable or stopping, media is paused, or a trigger
-        // is pending or playing; the caller checks the configuration and the rule gates.
+        // Accepts a trigger from Idle, in one critical section with the gates file admission reads (docs/PLAN.md
+        // section 8.1): rules enabled, the schedule open, media not paused. False when Sound is unavailable or
+        // stopping, a gate is closed, or a trigger is pending or playing; the caller checks that the
+        // configuration enables Sound.
         bool tryTrigger() noexcept
         {
             {
                 const std::lock_guard lock(_mutex);
-                if (!_available || _stop || _state != State::Idle || _ctx.media_barrier.isPaused())
+                if (!_available || _stop || _state != State::Idle
+                    || !_ctx.record_rule_enabled.load(std::memory_order_relaxed)
+                    || !_ctx.schedule_open.load(std::memory_order_acquire) || _ctx.media_barrier.isPaused())
                     return false;
                 _state = State::Pending;
             }

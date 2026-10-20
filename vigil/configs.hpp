@@ -586,14 +586,12 @@ struct RecordConfig
         video.interval = IntervalFrom(video_j.at("iIntervalMs"));
         sound.enabled = actions.at("dSound").at("bEnabled").get<bool>();
 
-        // Limits of the single-writer runtime, lifted in Phase 4D: one file action, no Sound, no continuous
-        // recording. Rules without a file action would have nothing to do, so that is rejected as well.
-        if (continuous_enabled || sound.enabled)
-            throw Exception("bContinuousRecordEnabled and dActions.dSound are not supported yet");
-        if (photo.enabled && video.enabled)
-            throw Exception("Only one of dActions.dPhoto and dActions.dVideo can be enabled for now");
-        if (rule_enabled && !photo.enabled && !video.enabled)
-            throw Exception("bRuleEnabled requires an enabled file action (dActions.dPhoto or dActions.dVideo)");
+        // Any combination of actions is a configuration, including none with rules enabled (every rule event
+        // is reported and nothing else happens); what ALWAYS_ON can pace is the endpoint's check against the
+        // selected rule (satisfiesAlwaysOnInvariant). Continuous recording comes with Phase 5A and is rejected
+        // rather than accepted as a no-op until then.
+        if (continuous_enabled)
+            throw Exception("bContinuousRecordEnabled is not supported yet");
     }
 
     // The canonical document: every field, with no extras.
@@ -606,6 +604,16 @@ struct RecordConfig
             = { { "bEnabled", photo.enabled }, { "sFormat", photo.format }, { "iIntervalMs", photo.interval.count() } };
         j["dActions"]["dVideo"] = { { "bEnabled", video.enabled }, { "iIntervalMs", video.interval.count() } };
         j["dActions"]["dSound"] = { { "bEnabled", sound.enabled } };
+    }
+
+    // The ALWAYS_ON invariant (docs/PLAN.md section 4.4): ALWAYS_ON paces one file channel, so with it selected
+    // at most one of Photo and Video is enabled, exactly one while rules are enabled, and Sound and continuous
+    // recording are disabled. The first-start state satisfies it. The endpoint checks it against the selected
+    // rule under its commit mutex, in both configuration POSTs and for the pair loaded at startup.
+    bool satisfiesAlwaysOnInvariant() const noexcept
+    {
+        const int channels = (photo.enabled ? 1 : 0) + (video.enabled ? 1 : 0);
+        return !continuous_enabled && !sound.enabled && channels <= 1 && (!rule_enabled || channels == 1);
     }
 
     // A commit prepared outside the commit lock (docs/PLAN.md section 4.3): the action settings snapshot of this

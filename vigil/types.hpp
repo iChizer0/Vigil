@@ -1126,9 +1126,9 @@ struct ActionSettings
         return type == CaptureType::Image ? photo : video;
     }
 
-    // The single enabled file channel, null when none is enabled: the interval ALWAYS_ON paces on, and what the
-    // HTTP precheck tests for a file action. Both cannot be enabled until Phase 4D, whose invariant keeps
-    // ALWAYS_ON to one channel.
+    // The enabled file channel, null when none is enabled: the interval ALWAYS_ON paces on, whose invariant
+    // keeps its configuration to one channel (docs/PLAN.md section 4.4), and what the HTTP precheck tests for an
+    // enabled file action. With both enabled, which another rule may pace, this is the Photo channel.
     const std::shared_ptr<FileWriterSettings> &fileChannel() const noexcept
     {
         return photo ? photo : video;

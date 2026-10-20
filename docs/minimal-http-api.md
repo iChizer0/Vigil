@@ -35,7 +35,7 @@ and stores it in canonical form; every field is required (see below).
             "iIntervalMs": 5000 // Integer, required, positive, the delay between recordings in milliseconds including the write duration
         },
         "dSound": {
-            "bEnabled": false // Boolean, required, sound playback on trigger; not supported yet, must be false
+            "bEnabled": false // Boolean, required, play a sound on trigger through the host's playback callback; without one the action is unavailable and a trigger plays nothing
         }
     },
     "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
@@ -44,10 +44,15 @@ and stores it in canonical form; every field is required (see below).
 ```
 
 The document is always complete: `GET` returns every field, and `POST` takes the whole document back (edit the `GET` response
-and post it). Until multi-action support lands, at most one of `dPhoto` and `dVideo` may be enabled, `bRuleEnabled: true`
-requires one of them, and `dSound` and `bContinuousRecordEnabled` are rejected when enabled. A missing field, a field of
-the wrong type, a non-positive or non-integer interval, an unknown photo format, and any other `iSchemaVersion` are
-rejected with `EINVAL` (`30022`); a rejected payload changes neither the runtime nor the stored file. Unknown fields are
+and post it). Any combination of actions may be enabled, and `bRuleEnabled: true` with every action disabled is accepted:
+every rule event is reported and nothing else happens. Photo and Video run independently, each on its own interval, and
+may both publish a file for one rule event; Sound plays through the host's callback and is never queued (a trigger while
+one is pending or playing is dropped). `bContinuousRecordEnabled` is rejected when true until continuous recording lands.
+With `ALWAYS_ON` selected (the default), the actions are limited to what it paces (see Always-On Rule): a payload outside
+that limit is rejected with `EINVAL`; select another record rule first. A missing field, a field of the wrong type, a
+non-positive or non-integer interval, an unknown photo format, and any other `iSchemaVersion` are rejected with `EINVAL`
+(`30022`); a rejected payload changes neither the runtime nor the stored file. A SED rule with Sound enabled can
+retrigger itself through the microphone; any guard time belongs to the host's playback. Unknown fields are
 ignored and dropped from the stored document. `EAGAIN` (`30011`) means the action settings changed (a media refresh or
 another commit) while the document was being prepared or applied; post it again. Request bodies are limited to 1 MiB; a
 larger body is rejected before parsing (the C API returns `EFAULT` with no JSON body). A first start without
@@ -255,6 +260,13 @@ The always-on rule requires no additional configuration. When selected, it conti
 file action's `iIntervalMs` pacing (see General Rule Configuration): the next recording starts no earlier than the
 interval after the previous one started, and only once the previous write has finished.
 
+Because it paces one file action, selecting `ALWAYS_ON` requires the stored general rule configuration to satisfy its
+invariant: `dSound` disabled, at most one of `dPhoto` and `dVideo` enabled, and exactly one while `bRuleEnabled` is true
+(the first-start configuration satisfies it). The record rule `POST` that selects it is rejected with `EINVAL` otherwise,
+and while it is selected the general rule configuration `POST` is held to the same limit, so simplify the actions first
+or select another rule first. The two checks share one lock, so neither ordering nor concurrent posts bypass it. At
+startup a stored pair that violates it keeps rules disabled (`bRuleEnabled` reads false) with both files left in place.
+
 ```json
 {
     "sCurrentSelected": "ALWAYS_ON",
@@ -285,9 +297,9 @@ Notes:
 - Returns error `EPERM` if the rule system is disabled.
 - Returns error `EPERM` if the schedule rule evaluates to false.
 - Returns error `EPERM` if the current selected rule is not `HTTP`.
-- Returns error `EBUSY` if the storage system is not ready for writing.
+- Returns error `EBUSY` if a file action is enabled and the storage system is not ready for writing; a rule-only or Sound-only activation needs no storage.
 - Returns error `EBUSY` if a pending activation request is still being processed.
-- Returns error `EBUSY` if a previous recording event is still writing.
+- Returns error `EBUSY` if a file action is enabled and no file channel accepted the event (every enabled channel still holds a task); the event is still reported.
 - A refused activation leaves no pending event behind: the next activation is admitted afresh (since 2026-10-19).
 
 ## Storage API

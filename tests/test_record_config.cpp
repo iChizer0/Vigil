@@ -191,17 +191,68 @@ VG_TEST_CASE(rejects_other_schemas_incomplete_documents_and_wrong_types)
     VG_CHECK(Rejected(nlohmann::json(nullptr), f.ctx));
 }
 
-VG_TEST_CASE(rejects_capabilities_the_single_writer_runtime_cannot_run_yet)
+VG_TEST_CASE(accepts_every_action_combination_and_still_rejects_continuous_recording)
 {
+    // The multi-action configuration (docs/PLAN.md section 4.1, Phase 4D): any combination of actions, with or
+    // without rules enabled, round-trips canonically and maps onto the snapshot; continuous recording is
+    // rejected until Phase 5A rather than accepted as a no-op.
     Fixture f;
     VG_CHECK(Rejected(Document({ { "/bContinuousRecordEnabled", true } }), f.ctx));
-    VG_CHECK(Rejected(Document({ { "/dActions/dSound/bEnabled", true } }), f.ctx));
-    VG_CHECK(
-        Rejected(Document({ { "/dActions/dPhoto/bEnabled", true }, { "/dActions/dVideo/bEnabled", true } }), f.ctx));
-    VG_CHECK(Rejected(Document({ { "/bRuleEnabled", true } }), f.ctx)); // rules on with nothing to do
-    VG_CHECK(!Rejected(Document({ { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true } }), f.ctx));
-    VG_CHECK(!Rejected(Document({ { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true } }), f.ctx));
-    VG_CHECK(!Rejected(Document({ { "/dActions/dVideo/bEnabled", true } }), f.ctx)); // rules off, action armed
+    VG_CHECK(Rejected(Document({ { "/bContinuousRecordEnabled", true }, { "/bRuleEnabled", true },
+                          { "/dActions/dVideo/bEnabled", true } }),
+        f.ctx));
+
+    const auto all = Document(
+        { { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true }, { "/dActions/dPhoto/sFormat", "RAW" },
+            { "/dActions/dPhoto/iIntervalMs", 1500 }, { "/dActions/dVideo/bEnabled", true },
+            { "/dActions/dVideo/iIntervalMs", 2500 }, { "/dActions/dSound/bEnabled", true } });
+    const RecordConfig every(all, f.ctx);
+    VG_CHECK(every.rule_enabled && every.photo.enabled && every.video.enabled && every.sound.enabled);
+    VG_CHECK_EQ(Canonical(every, f.ctx), all);
+    const auto settings = every.prepare(f.ctx).settings;
+    VG_REQUIRE(settings != nullptr && settings->photo != nullptr && settings->video != nullptr);
+    VG_CHECK(settings->sound_enabled && !settings->continuous_enabled);
+    VG_CHECK_EQ(settings->photo->format, "RAW");
+    VG_CHECK_EQ(settings->photo->interval.count(), 1500L);
+    VG_CHECK_EQ(settings->video->interval.count(), 2500L);
+    VG_CHECK(settings->watermarks == WaterMarks::aggregate(settings->photo->watermarks, settings->video->watermarks));
+    VG_CHECK(settings->fileChannel() == settings->photo);
+
+    // Sound alone, with or without rules, and rules enabled with nothing to do: every rule event is reported
+    // and nothing else happens.
+    for (const auto &doc: { Document({ { "/dActions/dSound/bEnabled", true } }),
+             Document({ { "/bRuleEnabled", true }, { "/dActions/dSound/bEnabled", true } }),
+             Document({ { "/bRuleEnabled", true } }) })
+    {
+        const RecordConfig cfg(doc, f.ctx);
+        VG_CHECK_EQ(Canonical(cfg, f.ctx), doc);
+        const auto s = cfg.prepare(f.ctx).settings;
+        VG_REQUIRE(s != nullptr);
+        VG_CHECK(!s->fileChannel());
+        VG_CHECK_EQ(s->sound_enabled, cfg.sound.enabled);
+    }
+}
+
+VG_TEST_CASE(the_always_on_invariant_admits_one_channel_and_exactly_one_while_rules_are_enabled)
+{
+    // docs/PLAN.md section 4.4: with ALWAYS_ON selected, at most one file channel, Sound disabled, continuous
+    // disabled, and exactly one channel while rules are enabled; the first-start state satisfies it.
+    Fixture f;
+    const auto satisfies
+        = [&](Overrides overrides) { return RecordConfig(Document(overrides), f.ctx).satisfiesAlwaysOnInvariant(); };
+    VG_CHECK(RecordConfig().satisfiesAlwaysOnInvariant());
+    VG_CHECK(satisfies({}));
+    VG_CHECK(satisfies({ { "/dActions/dPhoto/bEnabled", true } }));
+    VG_CHECK(satisfies({ { "/dActions/dVideo/bEnabled", true } }));
+    VG_CHECK(satisfies({ { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true } }));
+    VG_CHECK(satisfies({ { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true } }));
+    VG_CHECK(!satisfies({ { "/bRuleEnabled", true } })); // rules on: exactly one channel
+    VG_CHECK(!satisfies({ { "/dActions/dPhoto/bEnabled", true }, { "/dActions/dVideo/bEnabled", true } }));
+    VG_CHECK(!satisfies(
+        { { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true }, { "/dActions/dVideo/bEnabled", true } }));
+    VG_CHECK(!satisfies({ { "/dActions/dSound/bEnabled", true } }));
+    VG_CHECK(!satisfies(
+        { { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true }, { "/dActions/dSound/bEnabled", true } }));
 }
 
 VG_TEST_CASE(action_settings_carry_the_enabled_file_channel_and_the_effective_watermarks)
@@ -239,8 +290,8 @@ VG_TEST_CASE(action_settings_carry_the_enabled_file_channel_and_the_effective_wa
     VG_CHECK(
         none->watermarks == WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), nullptr));
 
-    // Both channels (built directly: the parser allows one until Phase 4D): the effective watermarks are the
-    // aggregate of one Photo plus one Video task (docs/PLAN.md section 9).
+    // Both channels: the effective watermarks are the aggregate of one Photo plus one Video task (docs/PLAN.md
+    // section 9).
     const auto both = ActionSettings::create(false, false, photo->photo, video->video, &f.ctx.c_api.media);
     VG_REQUIRE(both != nullptr);
     const auto &pw = photo->photo->watermarks, &vw = video->video->watermarks;
@@ -375,7 +426,7 @@ VG_TEST_CASE(publishing_bumps_only_the_revisions_of_the_channels_that_changed)
     VG_CHECK_EQ(after.video_revision, before.video_revision + 1);
     VG_CHECK_EQ(after.photo_revision, before.photo_revision);
 
-    // A Sound switch leaves both file channels alone (built directly: the parser rejects it until Phase 4D).
+    // A Sound switch leaves both file channels alone.
     before = after;
     VG_CHECK(publish(
         ActionSettings::create(false, true, before.settings->photo, before.settings->video, &f.ctx.c_api.media)));

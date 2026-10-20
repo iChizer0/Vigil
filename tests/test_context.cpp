@@ -40,8 +40,7 @@ std::shared_ptr<FileWriterSettings> ChannelSettings(const Context &ctx, CaptureT
         kRecordWriterPrefixDefault, kVideoClipLengthDefault, &ctx.c_api.media);
 }
 
-// Publishes a snapshot with the given file channels, built directly: the parser accepts at most one enabled
-// file action until Phase 4D.
+// Publishes a snapshot with the given file channels, built directly with the intervals each case needs.
 void Publish(Context &ctx, std::shared_ptr<FileWriterSettings> photo, std::shared_ptr<FileWriterSettings> video)
 {
     auto &shared = ctx.action_settings;
@@ -327,7 +326,7 @@ VG_TEST_CASE(claim_cancel_and_complete_are_identity_aware)
 
 VG_TEST_CASE(channels_hold_tasks_independently_and_a_stale_task_never_touches_a_newer_one)
 {
-    // Two enabled channels, built directly (docs/PLAN.md section 7.2; the parser allows one until Phase 4D).
+    // Two enabled channels, built directly (docs/PLAN.md section 7.2).
     Fixture f;
     auto &photo = f.ctx.file_channels.photo;
     auto &video = f.ctx.file_channels.video;

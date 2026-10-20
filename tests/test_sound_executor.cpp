@@ -152,17 +152,27 @@ struct Fixture
         return true;
     }
 
-    // Publishes a snapshot with the Video channel enabled and Sound switched as given, built directly: the
-    // parser rejects Sound until Phase 4D.
+    // The version-2 document with rules enabled, the Video channel enabled, and the Photo and Sound actions as
+    // given.
+    static nlohmann::json Document(bool photo, bool sound)
+    {
+        auto j = nlohmann::json::parse(R"({
+            "iSchemaVersion": 2, "bRuleEnabled": true, "bContinuousRecordEnabled": false,
+            "dActions": { "dPhoto": { "bEnabled": false, "sFormat": "JPG", "iIntervalMs": 5000 },
+                          "dVideo": { "bEnabled": true, "iIntervalMs": 5000 }, "dSound": { "bEnabled": false } }
+        })");
+        j["dActions"]["dPhoto"]["bEnabled"] = photo;
+        j["dActions"]["dSound"]["bEnabled"] = sound;
+        return j;
+    }
+
+    // Publishes the snapshot of a parsed configuration with the Video channel enabled and Sound switched as
+    // given; the rule flag is the test's to set.
     void publishSound(bool enabled)
     {
-        auto &shared = ctx.action_settings;
-        VG_REQUIRE(shared.update(shared.getRevision(),
-            ActionSettings::create(false, enabled, nullptr,
-                FileWriterSettings::create(CaptureType::Video, kRecordWriterDefaultFormat,
-                    kRecordWriterDefaultIntervalMs, kRecordWriterPrefixDefault, kVideoClipLengthDefault,
-                    &ctx.c_api.media),
-                &ctx.c_api.media)));
+        const RecordConfig cfg(Document(false, enabled), ctx);
+        const auto prepared = cfg.prepare(ctx);
+        VG_REQUIRE(ctx.action_settings.update(prepared.base_revision, prepared.settings));
     }
 
     // Enables Sound and rules, the gates the worker rechecks after claiming a trigger.
@@ -233,6 +243,7 @@ VG_TEST_CASE(a_pending_trigger_is_canceled_by_rule_disable_sound_disable_and_sto
 {
     {
         Fixture f;
+        f.arm();
         VG_CHECK(f.executor().tryTrigger());
         f.executor().cancelPending();
         VG_CHECK(f.executor().state() == State::Idle);
@@ -240,14 +251,17 @@ VG_TEST_CASE(a_pending_trigger_is_canceled_by_rule_disable_sound_disable_and_sto
         VG_CHECK_EQ(f.sound.calls.load(), 0);
     }
     {
-        Fixture f; // rules disabled: the tick cancels the trigger like the pending file task
+        Fixture f; // rules disabled after the trigger: the tick cancels it like the pending file task
+        f.arm();
         VG_CHECK(f.executor().tryTrigger());
+        f.ctx.record_rule_enabled.store(false);
         f.ctx.tick();
         VG_CHECK(f.executor().state() == State::Idle);
         VG_CHECK(!f.serve());
     }
     {
         Fixture f; // a configuration that disables Sound
+        f.arm();
         VG_CHECK(f.executor().tryTrigger());
         const RecordConfig none(nlohmann::json::parse(R"({
             "iSchemaVersion": 2, "bRuleEnabled": false, "bContinuousRecordEnabled": false,
@@ -261,6 +275,7 @@ VG_TEST_CASE(a_pending_trigger_is_canceled_by_rule_disable_sound_disable_and_sto
     }
     {
         Fixture f; // stop
+        f.arm();
         VG_CHECK(f.executor().tryTrigger());
         f.executor().stopAndJoin();
         VG_CHECK(f.executor().state() == State::Stopping);
@@ -270,10 +285,28 @@ VG_TEST_CASE(a_pending_trigger_is_canceled_by_rule_disable_sound_disable_and_sto
     }
 }
 
+VG_TEST_CASE(a_trigger_is_refused_while_rules_are_disabled_or_the_schedule_is_closed)
+{
+    // The executor reads the gates file admission reads, in its own critical section (docs/PLAN.md section
+    // 8.1): a gate closed between the rule loop's evaluation and the dispatch refuses the trigger.
+    Fixture f;
+    f.publishSound(true);
+    VG_CHECK(!f.executor().tryTrigger()); // rules disabled
+    f.ctx.record_rule_enabled.store(true);
+    f.ctx.schedule_open.store(false);
+    VG_CHECK(!f.executor().tryTrigger()); // the schedule closed
+    VG_CHECK(f.executor().state() == State::Idle);
+    f.ctx.schedule_open.store(true);
+    VG_CHECK(f.executor().tryTrigger());
+    VG_CHECK(f.serve());
+    VG_CHECK_EQ(f.sound.calls.load(), 1);
+}
+
 VG_TEST_CASE(a_pause_refuses_triggers_and_admission_and_a_waiting_pause_drains_playback)
 {
     {
         Fixture f;
+        f.arm();
         f.ctx.media_barrier.pause(false);
         VG_CHECK(!f.executor().tryTrigger()); // refused at the trigger
         f.ctx.media_barrier.resume();
@@ -385,6 +418,40 @@ VG_TEST_CASE(dispatch_triggers_sound_only_when_the_snapshot_enables_it_and_repor
     VG_CHECK(f.serve());
     VG_CHECK_EQ(f.sound.calls.load(), 1);
     VG_CHECK(!f.serve());
+}
+
+VG_TEST_CASE(a_parsed_multi_action_configuration_dispatches_photo_video_and_sound_for_one_owner)
+{
+    // Phase 4D: a configuration that enables every action, applied through RecordConfig::sync as the endpoint
+    // does, dispatches one owner into both file channels and the Sound executor; both tasks carry the owner's
+    // UID, which their FILE callbacks report, and the RULE report is file acceptance only.
+    Fixture f;
+    const RecordConfig cfg(Fixture::Document(true, true), f.ctx);
+    VG_CHECK_EQ(cfg.sync(f.ctx, cfg.prepare(f.ctx)), 0);
+    VG_CHECK(f.ctx.record_rule_enabled.load());
+    f.ctx.tick();
+    const auto owner = Owner();
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner));
+    const auto photo = f.ctx.file_channels.photo.current(), video = f.ctx.file_channels.video.current();
+    VG_REQUIRE(photo != nullptr && video != nullptr);
+    VG_CHECK(photo->owner == owner && video->owner == owner);
+    VG_CHECK_EQ(photo->event->owner_uid, owner->uid);
+    VG_CHECK_EQ(video->event->owner_uid, owner->uid);
+    VG_CHECK(f.executor().state() == State::Pending);
+    VG_CHECK(f.serve());
+    VG_CHECK_EQ(f.sound.calls.load(), 1);
+    auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(events[0].writer_created);
+    VG_CHECK_EQ(events[0].uid, owner->uid);
+
+    // While both channels hold a task, the next owner still triggers Sound on its own, and is reported without
+    // file acceptance.
+    VG_CHECK(!f.ctx.dispatchRuleEvent(Owner()));
+    VG_CHECK(f.executor().state() == State::Pending);
+    events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(!events[0].writer_created);
 }
 
 VG_TEST_MAIN()

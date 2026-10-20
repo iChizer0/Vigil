@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <filesystem>
@@ -128,6 +129,19 @@ nlohmann::json WaitForInternalSlot(const Fixture &f, bool enabled)
     }
 }
 
+// Posts `payload` to a C API entry point and returns the code of its JSON result.
+int Post(vg_sta_e (*api)(const vg_http_api_request_t *, vg_http_api_response_t *), const nlohmann::json &payload)
+{
+    std::string body = payload.dump();
+    vg_http_api_request_t request { .free_cb = nullptr, .payload = body.data(), .payload_len = body.size() };
+    vg_http_api_response_t response {};
+    VG_REQUIRE(api(&request, &response) == 0);
+    const auto *text = static_cast<const char *>(response.body);
+    const auto result = nlohmann::json::parse(text, text + response.body_len);
+    response.free_cb(response.body);
+    return result.at("code").get<int>();
+}
+
 // Selects the internal "device" as the enabled Slot through the C API: its manager thread and its Photo and
 // Video channel workers start and idle, since the device does not exist (docs/PLAN.md section 7.2), and its
 // destructor logs and joins them during teardown.
@@ -136,15 +150,34 @@ nlohmann::json SelectInternalSlot(const Fixture &f)
     nlohmann::json config;
     config["dSelectSlotToEnable"]["sByDevPath"] = f.device;
     config["dSelectSlotToEnable"]["sByUUID"] = nullptr;
-    std::string body = config.dump();
-    vg_http_api_request_t request { .free_cb = nullptr, .payload = body.data(), .payload_len = body.size() };
-    vg_http_api_response_t response {};
-    VG_REQUIRE(vg_http_api_storage_config_post(&request, &response) == 0);
-    const auto *text = static_cast<const char *>(response.body);
-    const auto result = nlohmann::json::parse(text, text + response.body_len);
-    response.free_cb(response.body);
-    VG_REQUIRE(result.at("code").get<int>() == 0);
+    VG_REQUIRE(Post(&vg_http_api_storage_config_post, config) == 0);
     return WaitForInternalSlot(f, true);
+}
+
+// The host's playback callback: counts its calls, which come from the runtime's Sound worker.
+struct SoundCalls
+{
+    static inline std::atomic<int> count = 0;
+
+    static vg_sta_e play(void *)
+    {
+        ++count;
+        return 0;
+    }
+};
+
+// Spins until `pred` holds: a bounded wait on a runtime thread, not a timing assumption.
+template<typename Pred>
+bool WaitFor(Pred pred)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!pred())
+    {
+        if (std::chrono::steady_clock::now() > deadline)
+            return false;
+        std::this_thread::yield();
+    }
+    return true;
 }
 
 } // namespace
@@ -227,6 +260,48 @@ VG_TEST_CASE(request_bodies_are_bounded_before_parsing)
     request.payload_len = body.size();
     VG_CHECK_EQ(vg_http_api_rule_http_rule_activate_post(&request, &response), EFAULT);
     VG_CHECK(response.body == nullptr);
+}
+
+VG_TEST_CASE(activation_without_a_file_action_needs_no_storage_and_plays_the_sound)
+{
+    // Rule-only and Sound-only configurations through the C API (docs/PLAN.md sections 4.1 and 5.2), with no
+    // Slot selected: the activation is dispatched without storage, the RULE callback reports it without file
+    // acceptance, and the Sound worker plays the trigger; a file action makes storage a precondition again.
+    Fixture f;
+    f.config.media.sound_play_cb = &SoundCalls::play;
+    SoundCalls::count = 0;
+    RuleEventRecorder::clear();
+    VG_REQUIRE(vg_service_init(&f.config) == 0);
+    nlohmann::json http;
+    http["sCurrentSelected"] = "HTTP";
+    VG_CHECK_EQ(Post(&vg_http_api_rule_record_config_post, http), 0);
+    auto record = nlohmann::json::parse(R"({
+        "iSchemaVersion": 2, "bRuleEnabled": true, "bContinuousRecordEnabled": false,
+        "dActions": { "dPhoto": { "bEnabled": false, "sFormat": "JPG", "iIntervalMs": 5000 },
+                      "dVideo": { "bEnabled": false, "iIntervalMs": 5000 }, "dSound": { "bEnabled": true } }
+    })");
+    VG_CHECK_EQ(Post(&vg_http_api_rule_config_post, record), 0);
+    VG_CHECK_EQ(Post(&vg_http_api_rule_http_rule_activate_post, nlohmann::json::object()), 0);
+    auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_HTTP);
+    VG_CHECK(!events[0].writer_created);
+    VG_CHECK(WaitFor([] { return SoundCalls::count.load() == 1; }));
+
+    record["dActions"]["dSound"]["bEnabled"] = false; // rule-only
+    VG_CHECK_EQ(Post(&vg_http_api_rule_config_post, record), 0);
+    VG_CHECK_EQ(Post(&vg_http_api_rule_http_rule_activate_post, nlohmann::json::object()), 0);
+    events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(!events[0].writer_created);
+
+    record["dActions"]["dVideo"]["bEnabled"] = true;
+    VG_CHECK_EQ(Post(&vg_http_api_rule_config_post, record), 0);
+    VG_CHECK_EQ(Post(&vg_http_api_rule_http_rule_activate_post, nlohmann::json::object()),
+        vigil::constants::kEndpointErrorBase + EBUSY); // no storage is ready to write
+    VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+    VG_CHECK_EQ(SoundCalls::count.load(), 1);
+    VG_CHECK_EQ(vg_service_deinit(), 0);
 }
 
 VG_TEST_CASE(the_selected_slot_starts_its_manager_and_both_channel_workers_and_deinit_joins_them)
