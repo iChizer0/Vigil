@@ -1,7 +1,7 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2026-10-19
+Revised: 2026-10-20
 Version: 2.0.0
 
 ## Rule API
@@ -65,6 +65,11 @@ ignored and dropped from the stored document. `EAGAIN` (`30011`) means the actio
 another commit) while the document was being prepared or applied; post it again. Request bodies are limited to 1 MiB; a
 larger body is rejected before parsing (the C API returns `EFAULT` with no JSON body). A first start without
 `record_config.json` reports every action disabled.
+
+A triggered video recording starts from the oldest key frame still buffered, so its file holds up to the buffer period
+(10 seconds) before its event, and it ends on the first key frame after the target clip length (`bVideoClipLengthSeconds`
+in Rule Info) has elapsed since it started, or at the key frame wait without one; a continuous clip starts at a key
+frame enqueued after it is admitted instead, so nothing before its admission is recorded.
 
 ### Rule Info
 
