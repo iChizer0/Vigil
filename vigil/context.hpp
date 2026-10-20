@@ -598,10 +598,12 @@ struct Context
     // The Sound action executor (docs/PLAN.md section 7.3): one worker, one state, no queue. A trigger is
     // accepted from Idle only, and only while the host provides `sound_play_cb`, media is not paused, and the
     // executor is not stopping; a Pending or Playing retrigger is rejected, not queued. The worker claims a
-    // Pending trigger, holds a media operation (section 8.3) while it calls the callback outside every lock, and
-    // returns to Idle whatever the callback returned: a failure is logged, never replayed. Disabling Sound or
-    // rules and stopping cancel a Pending trigger; a Playing callback finishes under its bounded-completion
-    // contract and `stopAndJoin` waits for it. Without a callback there is no worker and Sound is unavailable.
+    // Pending trigger, rechecks that Sound and rules are still enabled and media is not paused (a commit that
+    // closed a gate since the trigger cancels it), holds a media operation (section 8.3) while it calls the
+    // callback outside every lock, and returns to Idle whatever the callback returned: a failure is logged, never
+    // replayed. Disabling Sound or rules and stopping cancel a Pending trigger; a Playing callback finishes under
+    // its bounded-completion contract and `stopAndJoin` waits for it. Without a callback there is no worker and
+    // Sound is unavailable.
     struct SoundActionExecutor
     {
     public:
@@ -701,16 +703,23 @@ struct Context
                     return false;
                 _state = State::Playing;
             }
-            bool admitted = false;
+            bool played = false;
             vg_sta_e ret = 0;
             {
+                // The gates are rechecked after the claim, as the file writer does before creating anything: a
+                // commit that disabled Sound or rules since the trigger cancels it instead of playing.
                 const MediaBarrier::Operation operation(_ctx.media_barrier);
-                admitted = static_cast<bool>(operation);
-                if (admitted)
+                const auto settings = _ctx.action_settings.get().settings;
+                if (operation && settings && settings->sound_enabled
+                    && _ctx.record_rule_enabled.load(std::memory_order_relaxed))
+                {
+                    played = true;
                     ret = _ctx.c_api.media.sound_play_cb(_ctx.c_api.media.user_data);
+                }
             }
-            if (!admitted)
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Sound trigger canceled, media is paused");
+            if (!played)
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO,
+                    "Sound trigger canceled: media is paused, or Sound or rules were disabled");
             else if (ret != 0)
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Sound playback failed, code: ", static_cast<int>(ret));
             {

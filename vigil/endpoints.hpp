@@ -198,7 +198,8 @@ private:
     // Writes `text` to `path` (created or truncated) and fsyncs it. Returns 0 or an errno value.
     vg_sta_e WriteAndSync(const std::filesystem::path &path, const std::string &text) const noexcept
     {
-        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        // 0666 masked by the umask: the mode the previous ofstream-based store gave the configuration files
+        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
         if (fd < 0)
         {
             const auto err = errno;
@@ -326,15 +327,21 @@ public:
         try
         {
             RecordConfig record_config(j, *_ctx);
-            // The snapshot is built before the lock: the host's size estimate is a media callback, which must not
-            // run under the commit lock (docs/PLAN.md section 4.3).
-            auto action_settings = record_config.createActionSettings(*_ctx);
-            if (!action_settings)
+            // Prepared before the lock: the host's size estimate is a media callback, which must not run under
+            // the commit lock, and the revision it was prepared against detects a media refresh or another
+            // commit that lands before the publish (docs/PLAN.md section 4.3).
+            const auto prepared = record_config.prepare(*_ctx);
+            if (!prepared.settings)
             {
                 ret = ENOMEM;
                 throw Exception("Failed to create the action settings of the record config");
             }
             const std::unique_lock lock(_record_config_mutex);
+            if (_ctx->action_settings.getRevision() != prepared.base_revision)
+            {
+                ret = EAGAIN; // nothing stored, nothing applied: the client posts again
+                throw Exception("Try again: the action settings changed while the record config was being prepared");
+            }
 
             if (store) // Store the canonical document first, so that a persistence failure changes nothing
             {
@@ -344,7 +351,7 @@ public:
                     throw Exception("Failed to store record config to file");
             }
 
-            if (ret = record_config.sync(*_ctx, std::move(action_settings)); ret != 0)
+            if (ret = record_config.sync(*_ctx, prepared); ret != 0)
                 throw Exception("Try again to sync record config to context");
             _record_config = std::move(record_config);
         }
@@ -721,7 +728,9 @@ public:
                     }
                 }
             }
-            // Try to activate
+            // Try to activate. The rule lock covers the type check only: the dispatch runs the RULE callback,
+            // which must not run under an internal lock (docs/PLAN.md section 6.2), and an HTTP owner needs
+            // nothing from the rule instance.
             {
                 const std::shared_lock lock(_record_rule_mutex);
                 if (!_record_rule || _record_rule->type() != VG_RULE_TYPE_HTTP)
@@ -729,9 +738,9 @@ public:
                     ret = EPERM;
                     throw Exception("Current record rule is not HTTP rule, cannot activate");
                 }
-                if (ret = static_cast<HTTPRule *>(_record_rule.get())->tryActivate(); ret != 0)
-                    throw Exception("Failed to activate HTTP rule, error code: " + std::to_string(ret));
             }
+            if (ret = HTTPRule::Activate(*_ctx); ret != 0)
+                throw Exception("Failed to activate HTTP rule, error code: " + std::to_string(ret));
         }
         catch (const std::exception &e)
         {

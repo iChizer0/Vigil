@@ -995,6 +995,7 @@ private:
                 // count instead of being retried immediately.
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting new writer task, dev path ", _dev_path);
                 auto status = WriteEvent::Status::Failed;
+                auto end = start + channel->interval; // a constructor failure holds from the probe
                 try
                 {
                     std::unique_ptr<SlotAdaptedWriter<Slot>> writer;
@@ -1011,6 +1012,7 @@ private:
                         default:
                             throw Exception("Unsupported writer type");
                     }
+                    end = writer->endTime(); // the interval counts from the writer's start, as before Phase 2A
                     status = (*writer)()->status.load(std::memory_order_acquire);
                 }
                 catch (const std::exception &e)
@@ -1018,7 +1020,7 @@ private:
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Writer task failed for storage slot with device path ",
                         _dev_path, ": ", e.what());
                 }
-                if (!finish_task(event, status, start + channel->interval))
+                if (!finish_task(event, status, end))
                     return;
                 continue;
             }

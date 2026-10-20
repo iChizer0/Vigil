@@ -569,9 +569,9 @@ struct RecordConfig
     // A missing field or a field of the wrong type is reported by nlohmann::json; nothing is defaulted.
     RecordConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
-        if (j.at("iSchemaVersion") != kSchemaVersion)
-            throw Exception("Unsupported record configuration schema version " + j.at("iSchemaVersion").dump()
-                            + ", expected " + std::to_string(kSchemaVersion));
+        if (const auto &version = j.at("iSchemaVersion"); !version.is_number_integer() || version != kSchemaVersion)
+            throw Exception("Unsupported record configuration schema version " + version.dump() + ", expected "
+                            + std::to_string(kSchemaVersion));
         rule_enabled = j.at("bRuleEnabled").get<bool>();
         continuous_enabled = j.at("bContinuousRecordEnabled").get<bool>();
         const auto &actions = j.at("dActions");
@@ -608,34 +608,43 @@ struct RecordConfig
         j["dActions"]["dSound"] = { { "bEnabled", sound.enabled } };
     }
 
-    // The action settings snapshot of this configuration (docs/PLAN.md section 7.1): each enabled file action
-    // with its watermarks, which the host estimates through a media callback, so build it before taking the
-    // commit lock. Null only on allocation failure.
-    std::shared_ptr<const ActionSettings> createActionSettings(const Context &ctx) const noexcept
+    // A commit prepared outside the commit lock (docs/PLAN.md section 4.3): the action settings snapshot of this
+    // configuration, built with the host's size estimate (a media callback), and the revision it was built
+    // against, so that a media refresh or another commit landing before the publish is detected. `settings` is
+    // null only on allocation failure.
+    struct Prepared
     {
+        size_t base_revision;
+        std::shared_ptr<const ActionSettings> settings;
+    };
+
+    Prepared prepare(const Context &ctx) const noexcept
+    {
+        const auto base_revision = ctx.action_settings.getRevision();
         const auto *media = &ctx.c_api.media;
         std::shared_ptr<FileWriterSettings> photo_settings, video_settings;
         if (photo.enabled
             && !(photo_settings = FileWriterSettings::create(CaptureType::Image, photo.format, photo.interval,
                      kRecordWriterPrefixDefault, kVideoClipLengthDefault, media)))
-            return nullptr;
+            return { base_revision, nullptr };
         if (video.enabled
             && !(video_settings = FileWriterSettings::create(CaptureType::Video, kRecordWriterDefaultFormat,
                      video.interval, kRecordWriterPrefixDefault, kVideoClipLengthDefault, media)))
-            return nullptr;
-        return ActionSettings::create(continuous_enabled, sound.enabled, std::move(photo_settings),
-            std::move(video_settings), media);
+            return { base_revision, nullptr };
+        return { base_revision, ActionSettings::create(continuous_enabled, sound.enabled, std::move(photo_settings),
+                                    std::move(video_settings), media) };
     }
 
-    // Publishes the configuration to the runtime: `settings`, built from it by createActionSettings, under the
-    // revision check, then the rule flag. Returns EAGAIN, with nothing applied, when the snapshot changed
-    // concurrently (a media refresh); the caller retries.
-    vg_sta_e sync(Context &ctx, std::shared_ptr<const ActionSettings> settings) const noexcept
+    // Publishes the configuration to the runtime: the prepared snapshot under its base revision, then the rule
+    // flag. Returns EAGAIN, with nothing applied, when the snapshot changed since it was prepared (a media
+    // refresh or another commit); the caller prepares again and retries. A disabled Sound cancels a pending
+    // trigger; a playing one finishes (section 7.3).
+    vg_sta_e sync(Context &ctx, const Prepared &prepared) const noexcept
     {
-        if (!ctx.action_settings.update(ctx.action_settings.getRevision(), std::move(settings)))
+        if (!ctx.action_settings.update(prepared.base_revision, prepared.settings))
             return EAGAIN;
         ctx.record_rule_enabled.store(rule_enabled, std::memory_order_release);
-        if (!sound.enabled) // disabling Sound cancels a pending trigger; a playing one finishes (section 7.3)
+        if (!sound.enabled)
             ctx.sound_executor.cancelPending();
         return 0;
     }

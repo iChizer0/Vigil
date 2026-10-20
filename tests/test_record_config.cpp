@@ -104,7 +104,7 @@ std::shared_ptr<FileWriterSettings> Channel(const Context &ctx)
 // The snapshot of the first-start document with `overrides` applied.
 std::shared_ptr<const ActionSettings> Snapshot(const Context &ctx, Overrides overrides = {})
 {
-    return RecordConfig(Document(overrides), ctx).createActionSettings(ctx);
+    return RecordConfig(Document(overrides), ctx).prepare(ctx).settings;
 }
 
 } // namespace
@@ -117,7 +117,7 @@ VG_TEST_CASE(defaults_are_the_first_start_document)
     VG_CHECK(!cfg.continuous_enabled);
     VG_CHECK(!cfg.photo.enabled && !cfg.video.enabled && !cfg.sound.enabled);
     VG_CHECK_EQ(Canonical(cfg, f.ctx), Document());
-    const auto settings = cfg.createActionSettings(f.ctx);
+    const auto settings = cfg.prepare(f.ctx).settings;
     VG_REQUIRE(settings != nullptr);
     VG_CHECK(!settings->fileChannel() && !settings->continuous_enabled && !settings->sound_enabled);
     VG_CHECK_EQ(Canonical(RecordConfig(Document(), f.ctx), f.ctx), Document()); // and it round-trips
@@ -153,6 +153,7 @@ VG_TEST_CASE(rejects_other_schemas_incomplete_documents_and_wrong_types)
     VG_CHECK(!Rejected(Document(), f.ctx));
     for (const auto &[pointer, value]: Overrides {
              { "/iSchemaVersion", 1 },
+             { "/iSchemaVersion", 2.0 }, // numerically equal, but not an integer
              { "/iSchemaVersion", "2" },
              { "/iSchemaVersion", nullptr },
              { "/bRuleEnabled", "yes" },
@@ -246,7 +247,7 @@ VG_TEST_CASE(sync_publishes_the_snapshot_and_the_rule_flag)
     Fixture f;
     const auto rev0 = f.ctx.action_settings.getRevision();
     const RecordConfig photo(Document({ { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true } }), f.ctx);
-    VG_CHECK_EQ(photo.sync(f.ctx, photo.createActionSettings(f.ctx)), 0);
+    VG_CHECK_EQ(photo.sync(f.ctx, photo.prepare(f.ctx)), 0);
     VG_CHECK(f.ctx.record_rule_enabled.load());
     VG_REQUIRE(Channel(f.ctx) != nullptr);
     VG_CHECK_EQ(Channel(f.ctx)->format, "JPG");
@@ -254,13 +255,13 @@ VG_TEST_CASE(sync_publishes_the_snapshot_and_the_rule_flag)
 
     // No enabled file action: the flag is published and the snapshot has no file channel.
     const RecordConfig none(Document(), f.ctx);
-    VG_CHECK_EQ(none.sync(f.ctx, none.createActionSettings(f.ctx)), 0);
+    VG_CHECK_EQ(none.sync(f.ctx, none.prepare(f.ctx)), 0);
     VG_CHECK(!f.ctx.record_rule_enabled.load());
     VG_CHECK(Channel(f.ctx) == nullptr);
     VG_CHECK_EQ(f.ctx.action_settings.getRevision(), rev0 + 2);
 
     // The same document again publishes nothing.
-    VG_CHECK_EQ(none.sync(f.ctx, none.createActionSettings(f.ctx)), 0);
+    VG_CHECK_EQ(none.sync(f.ctx, none.prepare(f.ctx)), 0);
     VG_CHECK_EQ(f.ctx.action_settings.getRevision(), rev0 + 2);
 }
 
@@ -381,6 +382,38 @@ VG_TEST_CASE(a_stale_revision_is_refused_and_applies_nothing)
     VG_CHECK_EQ(shared.get().revision, current.revision + 1);
 }
 
+VG_TEST_CASE(a_commit_prepared_before_a_media_refresh_is_refused)
+{
+    // The snapshot is prepared outside the commit lock with the host's estimate of that moment; a refresh that
+    // lands before the publish changed the base it was built on, so the publish is refused and the client
+    // prepares again. Until the review fix of 2026-10-19 the revision was read at publish time, and the stale
+    // snapshot silently replaced the refreshed one.
+    auto cfg = MakeFakeConfig();
+    cfg.media.max_bytes_estimate_cb = &EstimateFromGlobal;
+    g_estimate = 0;
+    Context ctx(cfg);
+    auto &shared = ctx.action_settings;
+    const auto *media = &ctx.c_api.media;
+
+    const RecordConfig video(Document({ { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true } }), ctx);
+    const auto prepared = video.prepare(ctx);
+    VG_REQUIRE(prepared.settings != nullptr);
+    g_estimate = 1024 * 1024;
+    shared.sync(*media); // the refresh lands between prepare and publish
+    const auto refreshed = shared.get();
+    VG_CHECK_EQ(video.sync(ctx, prepared), EAGAIN);
+    VG_CHECK(!ctx.record_rule_enabled.load()); // nothing applied
+    VG_CHECK_EQ(shared.get().revision, refreshed.revision);
+    VG_CHECK(shared.get().settings->video == nullptr);
+
+    // Prepared again, the commit carries the refreshed estimate.
+    VG_CHECK_EQ(video.sync(ctx, video.prepare(ctx)), 0);
+    VG_CHECK(ctx.record_rule_enabled.load());
+    VG_REQUIRE(shared.get().settings->video != nullptr);
+    VG_CHECK(
+        shared.get().settings->video->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), media));
+}
+
 VG_TEST_CASE(a_media_refresh_re_estimates_every_channel_coherently)
 {
     auto cfg = MakeFakeConfig();
@@ -392,7 +425,7 @@ VG_TEST_CASE(a_media_refresh_re_estimates_every_channel_coherently)
 
     const RecordConfig video(
         Document({ { "/dActions/dVideo/bEnabled", true }, { "/dActions/dVideo/iIntervalMs", 2500 } }), ctx);
-    VG_CHECK_EQ(video.sync(ctx, video.createActionSettings(ctx)), 0);
+    VG_CHECK_EQ(video.sync(ctx, video.prepare(ctx)), 0);
     const auto before = shared.get();
     VG_REQUIRE(before.settings != nullptr && before.settings->video != nullptr);
     VG_CHECK(before.settings->video->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), nullptr));
@@ -419,7 +452,7 @@ VG_TEST_CASE(a_media_refresh_re_estimates_every_channel_coherently)
 
     // Without a file channel the refresh re-estimates the default clip's watermarks; no channel revision moves.
     const RecordConfig none(Document(), ctx);
-    VG_CHECK_EQ(none.sync(ctx, none.createActionSettings(ctx)), 0);
+    VG_CHECK_EQ(none.sync(ctx, none.prepare(ctx)), 0);
     const auto idle = shared.get();
     g_estimate = 2 * 1024 * 1024;
     shared.sync(*media);

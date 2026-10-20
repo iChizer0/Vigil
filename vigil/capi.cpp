@@ -1,7 +1,9 @@
+#include <atomic>
 #include <cassert>
 #include <cerrno>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -24,6 +26,7 @@ namespace vigil_c_api {
 // gets ESRCH instead of a deadlock, and no worker is joined under the entrance lock.
 static inline std::mutex vigil_instance_lifecycle_mutex;
 static inline std::shared_mutex vigil_instance_mutex;
+static inline std::atomic<uint64_t> vigil_instance_generation = 0; // bumped whenever an instance is published
 static inline std::mutex vigil_instance_scoped_suspend_mutex;
 static inline size_t vigil_instance_scoped_suspend_count = 0;
 static inline std::unique_ptr<vigil::Vigil> vigil_instance = nullptr;
@@ -70,11 +73,14 @@ vg_sta_e vg_service_init(vg_config_t *config)
     }
 
     {
-        const std::lock_guard lock2(vigil_instance_scoped_suspend_mutex);
-        vigil_instance_scoped_suspend_count = 0; // Reset scoped suspend count on init
+        const std::unique_lock lock(vigil_instance_mutex);
+        vigil_instance = std::move(instance);
+        vigil_instance_generation.fetch_add(1, std::memory_order_release);
     }
-    const std::unique_lock lock(vigil_instance_mutex);
-    vigil_instance = std::move(instance);
+    // Reset after publishing: a suspension of a previous instance still in flight either counted before this
+    // reset, which wipes it, or sees the new generation and counts nothing.
+    const std::lock_guard lock2(vigil_instance_scoped_suspend_mutex);
+    vigil_instance_scoped_suspend_count = 0;
     return 0;
 }
 
@@ -135,16 +141,21 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame)
 vg_sta_e vg_media_scoped_suspend_write(bool wait)
 {
     std::shared_ptr<vigil::Context> ctx;
+    uint64_t generation = 0;
     {
         const std::shared_lock lock(vigil_instance_mutex);
         if (!vigil_instance)
             return ESRCH;
         ctx = vigil_instance->contextPtr();
+        generation = vigil_instance_generation.load(std::memory_order_acquire);
     }
 
     // Drained with no instance lock held: a media callback may reenter the C API, and deinit may detach the
-    // runtime meanwhile (its workers leave the barrier as they are joined). `ctx` keeps the barrier alive.
+    // runtime meanwhile (its workers leave the barrier as they are joined). `ctx` keeps the barrier alive. A
+    // runtime published since the capture is another instance, whose count must not be touched.
     const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
+    if (vigil_instance_generation.load(std::memory_order_acquire) != generation)
+        return ESRCH;
     ctx->media_barrier.pause(wait);
     ++vigil_instance_scoped_suspend_count;
     return 0;
