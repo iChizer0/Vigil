@@ -208,10 +208,11 @@ int64_t NowMs()
 
 constexpr auto kHour = std::chrono::hours(1);
 
-// What the writer thread does at the end of its task.
+// What the worker does at the end of its task: completes the task its channel holds.
 void CompleteCurrent(Context &ctx, WriteEvent::Status status)
 {
-    ctx.shared_rule_event.complete(ctx.shared_rule_event.getCurrent(), status);
+    if (const auto [task, held] = ctx.file_channels.latest(); held)
+        ctx.file_channels.of(task->type).complete(task, status);
 }
 
 // The interval of the enabled file channel in the published snapshot, or -1 without one.
@@ -486,6 +487,48 @@ VG_TEST_CASE(rule_info_reports_the_event_time_and_the_dispatch_time)
     owner = f.endpoint->getRuleInfo().at("dLastRuleEventOwner");
     VG_CHECK_EQ(owner.at("sRuleType").get<std::string>(), "HTTP");
     VG_CHECK_EQ(owner.at("iTimestamp").get<int64_t>(), owner.at("iDispatchTimestamp").get<int64_t>());
+}
+
+VG_TEST_CASE(rule_info_reports_the_channel_busy_through_the_hold)
+{
+    // A channel holds its task from acceptance until the worker completes it, which follows the interval hold
+    // (docs/PLAN.md section 6.2): bReadyForNewEvent stays false and nothing is accepted meanwhile, even once the
+    // write has finished and the task's status is terminal.
+    Fixture f;
+    f.start();
+    VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0);
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
+    f.evaluate();
+    auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(events[0].writer_created);
+
+    const auto task = f.ctx->file_channels.video.claim(); // the worker starts the task
+    VG_REQUIRE(task != nullptr);
+    auto info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), false);
+    VG_CHECK_EQ(info.at("dLastRuleEvent").at("sStatus").get<std::string>(), "WRITING");
+    VG_CHECK_EQ(info.at("dLastRuleEvent").at("iOwnerUID").get<uint64_t>(), events[0].uid);
+
+    task->event->status.store(WriteEvent::Status::Completed); // the write finished; the hold follows
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), false);
+    VG_CHECK_EQ(info.at("dLastRuleEvent").at("sStatus").get<std::string>(), "COMPLETED");
+    VG_CHECK_EQ(info.at("dLastRuleEventOwner").at("iUID").get<uint64_t>(), events[0].uid);
+    f.evaluate(); // the timer fires, but the held channel accepts nothing
+    events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(!events[0].writer_created);
+
+    f.ctx->file_channels.video.complete(task, WriteEvent::Status::Completed); // the hold elapsed
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), true);
+    VG_CHECK_EQ(info.at("dLastRuleEvent").at("sStatus").get<std::string>(), "COMPLETED");
+    f.evaluate();
+    events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(events[0].writer_created);
+    VG_CHECK_EQ(f.endpoint->getRuleInfo().at("dLastRuleEvent").at("sStatus").get<std::string>(), "PENDING");
 }
 
 VG_TEST_CASE(record_rule_config_switches_rules_persists_and_rolls_back_failures)

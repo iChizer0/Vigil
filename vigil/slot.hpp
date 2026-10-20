@@ -898,9 +898,9 @@ private:
     {
         size_t consecutive_error_count = 0;
 
-        // Ends one task: the channel stays busy through the interval (plus the cooldown after a failure), as
-        // today, and only then is the event completed. Returns false when the thread must stop.
-        const auto finish_task = [this, &consecutive_error_count](const std::shared_ptr<WriteEvent> &event,
+        // Ends one task: the channel holds it through the interval (plus the cooldown after a failure), as
+        // today, and only then is it completed. Returns false when the thread must stop.
+        const auto finish_task = [this, &consecutive_error_count](const std::shared_ptr<FileTask> &task,
                                      WriteEvent::Status status, std::chrono::steady_clock::time_point end) -> bool {
             // Completed and Failed hold the channel until the interval (plus the failure cooldown) has elapsed.
             // Canceled and Interrupted (a closed gate) do not: the loop re-checks the gates on its next probe.
@@ -916,7 +916,7 @@ private:
                 while (std::chrono::steady_clock::now() < end && !_stop_token.load(std::memory_order_acquire))
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            _ctx.shared_rule_event.complete(event, status);
+            _ctx.file_channels.of(task->type).complete(task, status);
             if (_stop_token.load(std::memory_order_acquire))
                 return false;
             if (consecutive_error_count >= kWriterConsecutiveFailureMax)
@@ -929,7 +929,7 @@ private:
             return true;
         };
 
-        _ctx.shared_rule_event.cancelPending(); // An event from before this thread started is stale
+        _ctx.file_channels.cancelPending(); // A task from before this thread started is stale
         while (!_stop_token.load(std::memory_order_acquire))
         {
             const auto start = std::chrono::steady_clock::now();
@@ -944,14 +944,10 @@ private:
 
             {
                 const auto watermarks = loaded.settings->watermarks;
-                // The single enabled file channel and its revision, loaded together (docs/PLAN.md section 7.1):
-                // the writer stops when its own channel's settings change, not when the other channel or Sound
-                // changes. Phase 4C gives each channel its own worker.
+                // The single enabled file channel (docs/PLAN.md section 7.1), which this Slot's one worker serves
+                // until Phase 4C-4 gives each channel its own. Nothing to write without one; a pending task is
+                // retired by the rule loop, since rules cannot stay enabled without a file action (section 4.1).
                 const auto channel = loaded.settings->fileChannel();
-                const auto channel_revision = loaded.settings->photo ? loaded.photo_revision : loaded.video_revision;
-
-                // Nothing to write without an enabled file channel; a pending event is retired by the rule loop,
-                // since rules cannot stay enabled without a file action (docs/PLAN.md section 4.1)
                 if (!channel)
                     goto l_continue;
 
@@ -984,30 +980,31 @@ private:
                 if (_ctx.media_barrier.isPaused())
                     goto l_continue;
 
-                // Claim the pending write event, if any
-                const auto event = _ctx.shared_rule_event.claim();
-                if (!event)
+                // Claim the channel's pending task, if any. It is bound to the settings and the channel revision
+                // the dispatcher loaded (docs/PLAN.md section 7.2); the writer stops when that revision moves.
+                const auto task = _ctx.file_channels.of(channel->type).claim();
+                if (!task)
                     goto l_continue;
 
-                // One task: create, write, finish, publish, release, then back off and complete the event. The
+                // One task: create, write, finish, publish, release, then back off and complete the task. The
                 // writer is destroyed before the cooldown, so the file is published right after the write. A
                 // constructor failure is a failed task like any other and enters the same cooldown and failure
                 // count instead of being retried immediately.
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting new writer task, dev path ", _dev_path);
                 auto status = WriteEvent::Status::Failed;
-                auto end = start + channel->interval; // a constructor failure holds from the probe
+                auto end = start + task->settings->interval; // a constructor failure holds from the probe
                 try
                 {
                     std::unique_ptr<SlotAdaptedWriter<Slot>> writer;
-                    switch (channel->type)
+                    switch (task->type)
                     {
                         case CaptureType::Image:
                             writer = std::make_unique<ImageWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
-                                channel_revision, std::ref(_ctx), channel, event);
+                                task->settings_revision, std::ref(_ctx), task->settings, task->event);
                             break;
                         case CaptureType::Video:
                             writer = std::make_unique<VideoWriter<SlotAdaptedWriter<Slot>>>(std::ref(*this),
-                                channel_revision, std::ref(_ctx), channel, event);
+                                task->settings_revision, std::ref(_ctx), task->settings, task->event);
                             break;
                         default:
                             throw Exception("Unsupported writer type");
@@ -1020,7 +1017,7 @@ private:
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Writer task failed for storage slot with device path ",
                         _dev_path, ": ", e.what());
                 }
-                if (!finish_task(event, status, end))
+                if (!finish_task(task, status, end))
                     return;
                 continue;
             }

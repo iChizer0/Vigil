@@ -265,6 +265,44 @@ VG_TEST_CASE(sync_publishes_the_snapshot_and_the_rule_flag)
     VG_CHECK_EQ(f.ctx.action_settings.getRevision(), rev0 + 2);
 }
 
+VG_TEST_CASE(sync_cancels_the_pending_task_of_a_channel_whose_settings_changed)
+{
+    // A pending task is bound to the channel settings of the snapshot it was accepted under (docs/PLAN.md
+    // section 7.1): publishing different settings for that channel cancels it, the same settings keep it, and a
+    // claimed task is left to its worker, which stops on the revision change.
+    Fixture f;
+    auto &video = f.ctx.file_channels.video;
+    const auto owner
+        = [] { return std::make_shared<EventOwner>(VG_RULE_TYPE_TIMER, "", "", EventOwner::SourceDelivery::Event); };
+    const RecordConfig cfg(Document({ { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true } }), f.ctx);
+    VG_CHECK_EQ(cfg.sync(f.ctx, cfg.prepare(f.ctx)), 0);
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner()));
+    const auto pending = video.current();
+    VG_REQUIRE(pending != nullptr);
+
+    VG_CHECK_EQ(cfg.sync(f.ctx, cfg.prepare(f.ctx)), 0); // the same document: nothing published, the task kept
+    VG_CHECK(video.current() == pending);
+    VG_CHECK(pending->event->status.load() == WriteEvent::Status::Pending);
+
+    const RecordConfig changed(Document({ { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true },
+                                   { "/dActions/dVideo/iIntervalMs", 2500 } }),
+        f.ctx);
+    VG_CHECK_EQ(changed.sync(f.ctx, changed.prepare(f.ctx)), 0);
+    VG_CHECK(video.current() == nullptr);
+    VG_CHECK(video.last() == pending);
+    VG_CHECK(pending->event->status.load() == WriteEvent::Status::Canceled);
+    VG_CHECK(f.ctx.record_rule_enabled.load());
+
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner())); // accepted again, with the new settings
+    const auto claimed = video.claim();
+    VG_REQUIRE(claimed != nullptr);
+    VG_CHECK_EQ(claimed->settings->interval.count(), 2500L);
+    VG_CHECK_EQ(cfg.sync(f.ctx, cfg.prepare(f.ctx)), 0); // back to 5000 ms: the claimed task is its worker's
+    VG_CHECK(video.current() == claimed);
+    VG_CHECK(claimed->event->status.load() == WriteEvent::Status::Writing);
+    VG_CHECK(f.ctx.action_settings.channelRevision(CaptureType::Video) != claimed->settings_revision); // stops it
+}
+
 VG_TEST_CASE(default_action_settings_exist_before_any_configuration)
 {
     Fixture f;

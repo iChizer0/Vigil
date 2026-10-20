@@ -942,13 +942,13 @@ public:
         return Activate(_ctx);
     }
 
-    // Dispatches one HTTP owner: EBUSY when the file task was not accepted. Needs no rule instance, so the
-    // endpoint calls it with no rule lock held (the dispatch runs the RULE callback).
+    // Dispatches one HTTP owner: EBUSY when no file channel accepted a task (docs/PLAN.md section 5.2). Needs no
+    // rule instance, so the endpoint calls it with no rule lock held (the dispatch runs the RULE callback).
     static vg_sta_e Activate(const Context &ctx) noexcept
     {
         try
         {
-            return ctx.tryCreateWriterEvent(
+            return ctx.dispatchRuleEvent(
                        std::make_shared<EventOwner>(VG_RULE_TYPE_HTTP, "", "", EventOwner::SourceDelivery::Event))
                        ? 0
                        : EBUSY;
@@ -989,7 +989,9 @@ public:
         const auto now = ctx.shared_time.steadyTime();
         if (const auto interval = currentInterval(ctx); now - _last_trigger_time >= interval)
         {
-            if (ctx.shared_rule_event.getCurrent())
+            // Waits while a file channel holds a task, through its hold (docs/PLAN.md section 4.4), without
+            // consuming the interval.
+            if (ctx.file_channels.holdsTask())
                 return nullptr;
 
             _last_trigger_time = now;

@@ -608,11 +608,14 @@ public:
                     return obj;
                 };
 
-                auto [last_evt, last_owner, current_evt, current_owner] = _ctx->shared_rule_event.get();
+                // The most recently accepted file task across both channels (docs/PLAN.md section 6.2): the
+                // held one if any channel holds a task, else the last retired one. With one enabled channel
+                // this is its current task if any, else its last one.
+                const auto [task, held] = _ctx->file_channels.latest();
 
-                res_j["bReadyForNewEvent"] = current_evt ? false : true;
-                res_j["dLastRuleEvent"] = fmt_evt(current_evt ? current_evt : last_evt);
-                res_j["dLastRuleEventOwner"] = fmt_evt_owner(current_owner ? current_owner : last_owner);
+                res_j["bReadyForNewEvent"] = !held;
+                res_j["dLastRuleEvent"] = fmt_evt(task ? task->event : nullptr);
+                res_j["dLastRuleEventOwner"] = fmt_evt_owner(task ? task->owner : nullptr);
             }
             {
                 auto gpios_obj = nlohmann::json::object();
@@ -815,7 +818,7 @@ private:
                 return;
         }
 
-        _ctx->tryCreateWriterEvent(std::move(event_owner));
+        _ctx->dispatchRuleEvent(std::move(event_owner));
     }
 
 private:
