@@ -1,6 +1,6 @@
 // Characterization tests for RuleEndpoint: startup from configuration files, the rule-loop iteration
 // (gates, direct EVENT bypass, dispatch), the three configuration endpoints, HTTP activation, and the
-// rule-info projection (docs/PLAN.md sections 4.3, 5.1, 5.2, 6.2; matrix R1, R3, C2, W1). The rule
+// rule-info projection (docs/PLAN.md sections 4.3, 5.1, 5.2, 6.2; matrix R1, R3, C2, C3, W1). The rule
 // thread is not started; each test drives one iteration at a time through RuleEndpointTestAccess.
 
 #include <cerrno>
@@ -1360,6 +1360,129 @@ VG_TEST_CASE(concurrent_posts_cannot_bypass_the_always_on_invariant)
         VG_CHECK(RecordConfig(record, *f.ctx).satisfiesAlwaysOnInvariant());
     else
         VG_CHECK_EQ(rule, TimerRuleJson(0));
+}
+
+VG_TEST_CASE(always_on_runs_each_single_file_action_with_its_format_and_paces_on_its_interval)
+{
+    // The single-action regression of docs/PLAN.md section 12 (C3): under ALWAYS_ON, the default rule, one file
+    // action of each format runs as it did before the refactor. The format and the interval reach the task
+    // unchanged and nothing is converted to continuous recording; the channel holds the task until the worker
+    // completes it after the hold, during which the rule waits without consuming its interval; the rule then
+    // re-arms no earlier than the interval after the previous start; and rule disable and schedule closure still
+    // stop it. The hold itself is the worker's (tests/test_channel_worker.cpp).
+    struct Single
+    {
+        const char *format;
+        CaptureType type;
+        long interval_ms;
+    };
+    for (const Single &s: { Single { "MP4", CaptureType::Video, 20 }, Single { "JPG", CaptureType::Image, 30 },
+             Single { "RAW", CaptureType::Image, 40 } })
+    {
+        const auto other_type = s.type == CaptureType::Video ? CaptureType::Image : CaptureType::Video;
+        const char *own_key = s.type == CaptureType::Video ? "dVideo" : "dPhoto";
+        const char *other_key = s.type == CaptureType::Video ? "dPhoto" : "dVideo";
+        const auto interval = std::chrono::milliseconds(s.interval_ms);
+        Fixture f;
+        f.start();
+        VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON")); // the default selection
+        const auto doc = RecordJson(true, s.format, s.interval_ms);
+        VG_CHECK_EQ(f.postRecordConfig(doc), 0);
+        VG_CHECK_EQ(f.endpoint->getRecordConfig(), doc); // returned as posted: no continuous conversion
+        const auto settings = f.ctx->action_settings.get().settings;
+        VG_REQUIRE(settings != nullptr);
+        VG_CHECK(settings->continuous == nullptr);
+        const auto channel = settings->fileChannel();
+        VG_REQUIRE(channel != nullptr);
+        VG_CHECK(channel->type == s.type);
+        VG_CHECK_EQ(channel->format, s.format);
+        VG_CHECK(channel->interval == interval);
+        VG_CHECK(settings->channel(other_type) == nullptr);
+
+        // The first interval is elapsed at selection: the first tick dispatches into the configured channel.
+        f.evaluate();
+        auto events = RuleEventRecorder::take();
+        VG_REQUIRE(events.size() == size_t { 1 });
+        VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_ALWAYS_ON);
+        VG_CHECK(events[0].writer_created);
+        const auto first_start = f.ctx->shared_time.steadyTime(); // the rule's reference: the tick it fired on
+        auto &own = f.ctx->file_channels.of(s.type);
+        const auto task = own.current();
+        VG_REQUIRE(task != nullptr);
+        VG_CHECK(task->kind == FileTask::Kind::Triggered);
+        VG_CHECK(task->type == s.type);
+        VG_REQUIRE(task->owner != nullptr);
+        VG_CHECK_EQ(task->owner->uid, events[0].uid);
+        VG_CHECK_EQ(task->event->owner_uid, events[0].uid);
+        VG_CHECK_EQ(task->settings->format, s.format);
+        VG_CHECK(task->settings->interval == interval);
+        if (s.type == CaptureType::Video)
+            VG_CHECK(task->settings->video_clip_length == kVideoClipLengthDefault);
+        VG_CHECK(f.ctx->file_channels.of(other_type).current() == nullptr);
+        auto info = f.endpoint->getRuleInfo();
+        VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), false);
+        VG_CHECK_EQ(info.at("dActionStates").at(own_key).at("sState").get<std::string>(), "PENDING");
+        VG_CHECK_EQ(info.at("dActionStates").at(other_key).at("sState").get<std::string>(), "IDLE");
+        VG_CHECK_EQ(info.at("dActionStates").at(other_key).at("bEnabled").get<bool>(), false);
+        VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bContinuous").get<bool>(), false);
+
+        // Held through the write and the hold, the channel blocks the rule, which keeps its reference time.
+        f.evaluate();
+        VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+        VG_CHECK(own.claim(f.slot->registration()) == task); // the worker runs the task ...
+        own.complete(task, WriteEvent::Status::Completed);   // ... and completes it after its hold
+
+        // Re-armed no earlier than the interval after the previous start: every tick before that dispatches
+        // nothing, and the first tick at or after it dispatches again. The rule reads the context's steady time,
+        // which moves on the tick, so the comparison is exact.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        bool dispatched = false;
+        while (!dispatched && std::chrono::steady_clock::now() < deadline)
+        {
+            f.evaluate();
+            dispatched = RuleEventRecorder::size() == size_t { 1 };
+            const auto since_start = f.ctx->shared_time.steadyTime() - first_start;
+            if (dispatched)
+                VG_CHECK(since_start >= interval);
+            else
+                VG_CHECK(since_start < interval);
+        }
+        VG_REQUIRE(dispatched);
+        events = RuleEventRecorder::take();
+        VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_ALWAYS_ON);
+        VG_CHECK(events[0].writer_created);
+        VG_CHECK(events[0].uid > task->owner->uid);
+        const auto next = own.current();
+        VG_REQUIRE(next != nullptr);
+        VG_CHECK(next != task);
+        VG_CHECK_EQ(next->settings->format, s.format);
+
+        // Rule disable dispatches nothing and retires the pending task; a closed schedule dispatches nothing
+        // either, and reopening it lets the rule fire again.
+        VG_CHECK_EQ(f.postRecordConfig(RecordJson(false, s.format, s.interval_ms)), 0);
+        f.evaluate();
+        VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+        VG_CHECK(own.current() == nullptr);
+        VG_CHECK(next->event->status.load() == WriteEvent::Status::Canceled);
+        VG_CHECK_EQ(f.postRecordConfig(doc), 0);
+        VG_CHECK_EQ(f.postScheduleRuleConfig(ScheduleWindowJson(3 * kHour, 4 * kHour)), 0); // closed
+        for (int i = 0; i < 3; ++i)
+            f.evaluate();
+        VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+        VG_CHECK(own.current() == nullptr);
+        VG_CHECK_EQ(f.postScheduleRuleConfig(ScheduleWindowJson(-kHour, kHour)), 0); // open
+        VG_CHECK(WaitFor([&] {
+            f.evaluate();
+            return RuleEventRecorder::size() == size_t { 1 };
+        }));
+        events = RuleEventRecorder::take();
+        VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_ALWAYS_ON);
+        VG_CHECK(events[0].writer_created);
+        const auto reopened = own.current();
+        VG_REQUIRE(reopened != nullptr);
+        VG_CHECK_EQ(reopened->settings->format, s.format);
+        VG_CHECK(reopened->settings->interval == interval);
+    }
 }
 
 VG_TEST_CASE(activation_without_a_file_action_needs_no_storage_and_reports_the_owner)
