@@ -1,8 +1,8 @@
 // Characterization tests for the C API lifecycle (docs/PLAN.md section 8.3): the instance guard, nested
 // scoped suspension, and reentry from a callback while the runtime is being built or torn down. The runtime
-// is real (rule, storage, and capture threads) over the fake configuration: the internal "device" is a path
-// that does not exist, every scanned block device is hidden, and no media sink is reachable, so nothing here
-// touches a device or needs privileges.
+// is real (rule, storage, and capture threads, plus the selected Slot's manager and channel workers) over the
+// fake configuration: the internal "device" is a path that does not exist, every scanned block device is
+// hidden, and no media sink is reachable, so nothing here touches a device or needs privileges.
 
 #include <atomic>
 #include <cerrno>
@@ -112,12 +112,39 @@ bool MediaPaused()
     return Get(&vg_http_api_rule_info_get).at("bMediaPaused").get<bool>();
 }
 
-// The storage manager thread adds the internal Slot on its first scan. Its destructor is what logs during
-// teardown, so the reentry test waits for it (a condition, not a delay).
-void WaitForSlot()
+// The storage manager thread adds the internal Slot on its first scan and enables it once it is selected, both
+// on its own schedule: a condition to wait for, not a delay.
+nlohmann::json WaitForInternalSlot(const Fixture &f, bool enabled)
 {
-    while (Get(&vg_http_api_storage_status_get).at("lSlots").empty())
+    while (true)
+    {
+        const auto status = Get(&vg_http_api_storage_status_get); // outlives the loop over its slots
+        for (const auto &slot: status.at("lSlots"))
+        {
+            if (slot.at("sDevPath").get<std::string>() == f.device && slot.at("bEnabled").get<bool>() == enabled)
+                return slot;
+        }
         std::this_thread::yield();
+    }
+}
+
+// Selects the internal "device" as the enabled Slot through the C API: its manager thread and its Photo and
+// Video channel workers start and idle, since the device does not exist (docs/PLAN.md section 7.2), and its
+// destructor logs and joins them during teardown.
+nlohmann::json SelectInternalSlot(const Fixture &f)
+{
+    nlohmann::json config;
+    config["dSelectSlotToEnable"]["sByDevPath"] = f.device;
+    config["dSelectSlotToEnable"]["sByUUID"] = nullptr;
+    std::string body = config.dump();
+    vg_http_api_request_t request { .free_cb = nullptr, .payload = body.data(), .payload_len = body.size() };
+    vg_http_api_response_t response {};
+    VG_REQUIRE(vg_http_api_storage_config_post(&request, &response) == 0);
+    const auto *text = static_cast<const char *>(response.body);
+    const auto result = nlohmann::json::parse(text, text + response.body_len);
+    response.free_cb(response.body);
+    VG_REQUIRE(result.at("code").get<int>() == 0);
+    return WaitForInternalSlot(f, true);
 }
 
 } // namespace
@@ -169,8 +196,9 @@ VG_TEST_CASE(a_callback_can_reenter_the_c_api_while_the_runtime_is_built_or_torn
     VG_CHECK(Reentry::count.load() > 0);
     VG_CHECK_EQ(Reentry::status.load(), ESRCH);
 
-    // The same while it is torn down: the instance is detached before any worker is joined.
-    WaitForSlot();
+    // The same while it is torn down, with the selected Slot's threads among those joined: the instance is
+    // detached before any worker is joined.
+    SelectInternalSlot(f);
     Reentry::arm();
     VG_CHECK_EQ(vg_service_deinit(), 0);
     Reentry::disarm();
@@ -199,6 +227,24 @@ VG_TEST_CASE(request_bodies_are_bounded_before_parsing)
     request.payload_len = body.size();
     VG_CHECK_EQ(vg_http_api_rule_http_rule_activate_post(&request, &response), EFAULT);
     VG_CHECK(response.body == nullptr);
+}
+
+VG_TEST_CASE(the_selected_slot_starts_its_manager_and_both_channel_workers_and_deinit_joins_them)
+{
+    // The runtime's full thread set (docs/PLAN.md sections 7.2 and 8.3): selecting the internal Slot starts its
+    // manager thread and its Photo and Video workers, deinit joins them, and the runtime builds again on the
+    // stored selection.
+    Fixture f;
+    VG_REQUIRE(vg_service_init(&f.config) == 0);
+    auto slot = SelectInternalSlot(f);
+    VG_CHECK(slot.at("bSelected").get<bool>());
+    VG_CHECK(!slot.at("bWriting").get<bool>());
+    VG_CHECK_EQ(vg_service_deinit(), 0);
+
+    VG_REQUIRE(vg_service_init(&f.config) == 0); // the selection was stored: the Slot is enabled again
+    slot = WaitForInternalSlot(f, true);
+    VG_CHECK(slot.at("bSelected").get<bool>());
+    VG_CHECK_EQ(vg_service_deinit(), 0);
 }
 
 VG_TEST_MAIN()

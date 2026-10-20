@@ -56,12 +56,16 @@ using namespace vigil::utils;
 
 using CancellationCheck = std::function<bool()>;
 
+// The usage of the system's preserved-space probe file, cached for 50 ms. The manager thread and both channel
+// workers of an internal Slot read it (docs/PLAN.md section 9), so the cache is under a mutex.
 static inline size_t SystemPreservedUsageProbe() noexcept
 {
     static const std::chrono::duration<size_t, std::milli> probe_interval = std::chrono::milliseconds(50);
+    static std::mutex mutex;
     static auto last_probe_time = std::chrono::steady_clock::now() - probe_interval;
     static size_t last_usage = 0;
 
+    const std::lock_guard lock(mutex);
     if (const auto now = std::chrono::steady_clock::now(); now - last_probe_time >= probe_interval)
     {
         struct ::stat st;
@@ -90,10 +94,10 @@ public:
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
           _internal(internal), _data_dir_path(std::move(data_dir_path)), _info_mutex(), _label(), _uuid(), _type(),
           _mutex(), _op_mutex(), _enabled(false), _failure(false), _stop_token(false), _on_destruction(false),
-          _manager_thread(nullptr), _writer_thread(nullptr), _state(SlotState::NotFormattedOrFormatUnsupported),
-          _fsck(FSCK::Result::ErrorUnknown), _stats(), _quota_limit_bytes(-1), _quota_rotate(true),
-          _index_manager(nullptr), _writer_task_count(0), _rotating(false), _write_stats(),
-          _relay(ctx, _mount_path / _data_dir_path)
+          _manager_thread(nullptr), _photo_worker_thread(nullptr), _video_worker_thread(nullptr),
+          _state(SlotState::NotFormattedOrFormatUnsupported), _fsck(FSCK::Result::ErrorUnknown), _stats(),
+          _quota_limit_bytes(-1), _quota_rotate(true), _index_manager(nullptr), _writer_task_count(0), _rotating(false),
+          _write_stats(), _relay(ctx, _mount_path / _data_dir_path)
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Creating storage slot for device path ", _dev_path, " at mount path ",
             _mount_path, ", removable: ", _removable ? "true" : "false");
@@ -242,7 +246,7 @@ public:
 
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Enabling storage slot for device path ", _dev_path);
 
-        if (_manager_thread && _writer_thread)
+        if (_manager_thread) // a partial start is unwound below, so the manager thread implies both workers
             return 0;
 
         ensureStateResetToInitial();
@@ -253,19 +257,21 @@ public:
 
         _failure.store(false, std::memory_order_release);
         _stop_token.store(false, std::memory_order_release);
+        // The manager thread and one worker per file channel (docs/PLAN.md section 7.2). A thread that cannot be
+        // started unwinds the ones already running (section 9): the Slot is enabled with all three or not at all,
+        // and the storage manager retries on its next pass.
         try
         {
-            // Launch manager thread
-            if (!_manager_thread)
-                _manager_thread = std::make_unique<std::thread>(&Slot::managerThreadTask, this);
-            // Launch writer thread
-            if (!_writer_thread)
-                _writer_thread = std::make_unique<std::thread>(&Slot::writerThreadTask, this);
+            _manager_thread = std::make_unique<std::thread>(&Slot::managerThreadTask, this);
+            _photo_worker_thread = std::make_unique<std::thread>(&Slot::workerThreadTask, this, CaptureType::Image);
+            _video_worker_thread = std::make_unique<std::thread>(&Slot::workerThreadTask, this, CaptureType::Video);
         }
         catch (const std::exception &e)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create threads for storage slot for device path ",
                 _dev_path, ": ", e.what());
+            _stop_token.store(true, std::memory_order_release);
+            joinThreads();
             return EFAULT;
         }
         _enabled.store(true, std::memory_order_release);
@@ -305,33 +311,9 @@ private:
         // Disable relay
         disableNginxRelay();
 
-        try
-        {
-            if (_writer_thread)
-            {
-                _writer_thread->join();
-                _writer_thread.reset();
-            }
-        }
-        catch (const std::exception &e)
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to safely shutdown writer thread for device path ", _dev_path,
-                ": ", e.what());
-        }
-        try
-        {
-            if (_manager_thread)
-            {
-                // Stop manager thread
-                _manager_thread->join();
-                _manager_thread.reset();
-            }
-        }
-        catch (const std::exception &e)
-        {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to safely shutdown manager thread for device path ", _dev_path,
-                ": ", e.what());
-        }
+        // Both workers finish and publish the task they run before the index is released (docs/PLAN.md
+        // section 9)
+        joinThreads();
 
         // Reset index manager
         _index_manager.store(nullptr, std::memory_order_release);
@@ -344,6 +326,27 @@ private:
             const std::unique_lock lock2(_ctx.slot_check_mutex);
             if (_ctx.slot_check.first == static_cast<const void *>(this))
                 _ctx.slot_check = std::make_pair(nullptr, nullptr);
+        }
+    }
+
+    // Joins the threads that were started, the stop token set: the workers first, which may be finishing a
+    // task, then the manager.
+    void joinThreads() noexcept
+    {
+        for (auto *const thread: { &_photo_worker_thread, &_video_worker_thread, &_manager_thread })
+        {
+            if (!*thread)
+                continue;
+            try
+            {
+                (*thread)->join();
+                thread->reset();
+            }
+            catch (const std::exception &e)
+            {
+                VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
+                    "Failed to safely shutdown a thread of storage slot for device path ", _dev_path, ": ", e.what());
+            }
         }
     }
 
@@ -607,12 +610,14 @@ protected:
         return _stop_token.load(std::memory_order_acquire);
     }
 
-    // Admission of a new task against `watermarks`, the aggregate of the enabled channels (docs/PLAN.md section
-    // 9): empty while the index or the stats are not usable, and when the Slot is saturated by its quota or by
-    // its free space minus what admitted tasks may still write to this filesystem (logged when rotation is on,
-    // as before). The task's own bytes are reserved in the same critical section as the free-space check; the
-    // worker releases them once the file is published.
-    Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &watermarks) noexcept
+    // Admission of a new task of one channel (docs/PLAN.md section 9), against `admission`, the aggregate
+    // watermarks of the enabled channels that the manager's Ready state also uses, with `task_bytes`, the task's
+    // own, reserved in the same critical section as the free-space check. Empty while the index or the stats are
+    // not usable, and when the Slot is saturated by its quota or by its free space minus what admitted tasks may
+    // still write to this filesystem (logged when rotation is on, as before). The worker releases the
+    // reservation once the file is published; with both channels enabled, the second task is admitted only when
+    // the free space covers the aggregate mark plus the first task's bytes.
+    Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &admission, FileSize task_bytes) noexcept
     {
         Context::InFlightBudgets::Reservation reservation;
         bool saturated = false;
@@ -624,20 +629,19 @@ protected:
             const auto index_result = idx_mgr->size();
             if (!index_result.valid)
                 return {};
-            saturated = index_result.size + watermarks.critical_remain_bytes > limit;
+            saturated = index_result.size + admission.critical_remain_bytes > limit;
         }
         if (!saturated)
         {
             if (!doStats())
                 return {};
-            reservation = _ctx.in_flight_budgets.tryReserve(_filesystem_id.load(std::memory_order_acquire),
-                watermarks.task_bytes, _stats.load(std::memory_order_acquire).free_bytes,
-                criticalRemainBytes(watermarks));
+            reservation = _ctx.in_flight_budgets.tryReserve(_filesystem_id.load(std::memory_order_acquire), task_bytes,
+                _stats.load(std::memory_order_acquire).free_bytes, criticalRemainBytes(admission));
             saturated = !reservation;
         }
         if (saturated && _quota_rotate.load())
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Writer thread for ", _dev_path,
-                " reached critical watermark, skipping new writer task start");
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Storage slot for device path ", _dev_path,
+                " is at its critical watermark, skipping a new writer task");
         return reservation;
     }
 
@@ -777,6 +781,8 @@ protected:
         return;
     }
 
+    // One channel's worker reached its consecutive failure limit: the manager thread takes the Slot to the
+    // error state, as before, so the other channel stops too (a retained limitation; docs/PLAN.md section 7.2).
     void markFailed() noexcept
     {
         _failure.store(true, std::memory_order_release);
@@ -987,11 +993,12 @@ private:
         }
     }
 
-    // The writer thread: one channel worker over this Slot (docs/PLAN.md section 7.2) with the production
-    // cooldown and failure limit, serving the enabled channel until Phase 4C-4 gives each channel its own.
-    void writerThreadTask() noexcept
+    // A worker thread: the channel worker of one file channel over this Slot (docs/PLAN.md section 7.2), with the
+    // production cooldown and failure limit. The Photo and Video workers share the Slot's probes, the budget
+    // registry, and the publication lock, and each counts its own failures.
+    void workerThreadTask(CaptureType type) noexcept
     {
-        FileChannelWorker<Slot> worker(_ctx, *this);
+        FileChannelWorker<Slot> worker(_ctx, *this, type);
         worker.run();
     }
 
@@ -1804,13 +1811,14 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _enabled;
     std::atomic<bool> _failure;
 
-    // Stop token for manager and writer threads
+    // Stop token for the manager and worker threads
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _stop_token;
     mutable std::atomic<bool> _on_destruction;
 
-    // Manager and writer threads
+    // The manager thread and one channel worker thread per file channel (docs/PLAN.md section 7.2)
     std::unique_ptr<std::thread> _manager_thread;
-    std::unique_ptr<std::thread> _writer_thread;
+    std::unique_ptr<std::thread> _photo_worker_thread;
+    std::unique_ptr<std::thread> _video_worker_thread;
 
     // Shared slot state machine
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<SlotState> _state;

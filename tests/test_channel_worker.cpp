@@ -1,7 +1,8 @@
 // Characterization tests for the file channel worker over a fake Slot adapter and fake media (docs/PLAN.md
 // section 7.2; matrix W1): claim, write, publish outside the media operation and before the hold, complete; the
 // failure cooldown and the consecutive failure limit with injected constants; Canceled and Interrupted do not
-// hold; a stale task never touches a newer one through the loop; and the thread body with its stop.
+// hold; a stale task never touches a newer one through the loop; the thread body with its stop; and two workers
+// over one Slot, each on its own channel with its own budget and failure count, serving both channels at once.
 
 #include <atomic>
 #include <cerrno>
@@ -11,6 +12,7 @@
 #include <filesystem>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -42,6 +44,7 @@ constexpr Context::InFlightBudgets::FilesystemId kFakeFilesystem = 42;
 // What the worker handed over for publication, and what it observed at that moment.
 struct Publication
 {
+    std::shared_ptr<WriteEvent> event; // of the task published
     std::filesystem::path path;
     WriteEvent::Status status;
     bool held;                // a channel still held the task: the publication precedes the hold
@@ -60,7 +63,8 @@ struct FakeSlot
     std::atomic<bool> stop = false;
     std::atomic<int> failure_marks = 0;
     std::atomic<size_t> published = 0;
-    std::vector<Publication> publications; // read only while the worker is not running
+    std::mutex publications_mutex;         // two workers may publish at once
+    std::vector<Publication> publications; // read only while no worker is running
 
     FakeSlot(FakeMedia &m, Context &c) : media(m), ctx(c) { }
 
@@ -74,10 +78,10 @@ struct FakeSlot
         return ready.load();
     }
 
-    Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &watermarks) noexcept
+    Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &admission, FileSize task_bytes) noexcept
     {
-        return ctx.in_flight_budgets.tryReserve(kFakeFilesystem, watermarks.task_bytes, free_bytes.load(),
-            watermarks.critical_remain_bytes);
+        return ctx.in_flight_budgets.tryReserve(kFakeFilesystem, task_bytes, free_bytes.load(),
+            admission.critical_remain_bytes);
     }
 
     std::unique_ptr<FakeAdapter> createWriter(const std::shared_ptr<FileTask> &task)
@@ -91,8 +95,10 @@ struct FakeSlot
 
     void publish(CacheFileInfo &&info) noexcept
     {
-        publications.push_back(Publication { info.path, info.event->status.load(), ctx.file_channels.holdsTask(),
-            ctx.media_barrier.activeOperations(), ctx.in_flight_budgets.inFlight(kFakeFilesystem) });
+        const std::lock_guard lock(publications_mutex);
+        publications.push_back(
+            Publication { info.event, info.path, info.event->status.load(), ctx.file_channels.holdsTask(),
+                ctx.media_barrier.activeOperations(), ctx.in_flight_budgets.inFlight(kFakeFilesystem) });
         ++published;
     }
 
@@ -140,16 +146,33 @@ struct Fixture
         return cfg;
     }
 
-    // Publishes a snapshot with one enabled channel of `type` and `interval`, built directly.
-    void enable(CaptureType type, std::chrono::milliseconds interval)
+    std::shared_ptr<FileWriterSettings> settingsOf(CaptureType type, std::chrono::milliseconds interval)
     {
         const bool video = type == CaptureType::Video;
-        const auto settings
-            = FileWriterSettings::create(type, video ? kRecordWriterDefaultFormat : kRecordPhotoDefaultFormat, interval,
-                kRecordWriterPrefixDefault, kVideoClipLengthDefault, &ctx.c_api.media);
+        return FileWriterSettings::create(type, video ? kRecordWriterDefaultFormat : kRecordPhotoDefaultFormat,
+            interval, kRecordWriterPrefixDefault, kVideoClipLengthDefault, &ctx.c_api.media);
+    }
+
+    // Publishes a snapshot with the given channels, built directly.
+    void publish(std::shared_ptr<FileWriterSettings> photo, std::shared_ptr<FileWriterSettings> video)
+    {
         auto &shared = ctx.action_settings;
-        VG_REQUIRE(shared.update(shared.getRevision(), ActionSettings::create(false, false, video ? nullptr : settings,
-                                                           video ? settings : nullptr, &ctx.c_api.media)));
+        VG_REQUIRE(shared.update(shared.getRevision(),
+            ActionSettings::create(false, false, std::move(photo), std::move(video), &ctx.c_api.media)));
+    }
+
+    // Publishes a snapshot with one enabled channel of `type` and `interval`.
+    void enable(CaptureType type, std::chrono::milliseconds interval)
+    {
+        const auto settings = settingsOf(type, interval);
+        const bool video = type == CaptureType::Video;
+        publish(video ? nullptr : settings, video ? settings : nullptr);
+    }
+
+    // Publishes a snapshot with both channels enabled, which no configuration can do before Phase 4D.
+    void enableBoth(std::chrono::milliseconds photo_interval, std::chrono::milliseconds video_interval)
+    {
+        publish(settingsOf(CaptureType::Image, photo_interval), settingsOf(CaptureType::Video, video_interval));
     }
 
     Context::FileChannel &channel(CaptureType type)
@@ -171,6 +194,7 @@ struct Fixture
     {
         uint8_t data[4] = { 1, 2, 3, 4 };
         const vg_video_frame_t frame { .pts = ++pts, .data = data, .bytes_len = sizeof data, .key_frame = key_frame };
+        const std::lock_guard lock(media.mutex); // a video writer on another thread reads the queue
         media.queue.emplace_back(frame);
     }
 
@@ -197,6 +221,28 @@ struct Fixture
         }
         return true;
     }
+
+    // A worker running its thread body on its own thread. Destruction requests the stop and joins, so a failed
+    // REQUIRE unwinds instead of terminating.
+    struct Running
+    {
+        FakeSlot &slot;
+        std::thread thread;
+
+        Running(FakeSlot &s, Worker &worker) : slot(s), thread([&worker] { worker.run(); }) { }
+
+        ~Running()
+        {
+            slot.stop = true;
+            if (thread.joinable())
+                thread.join();
+        }
+
+        void join()
+        {
+            thread.join();
+        }
+    };
 };
 
 } // namespace
@@ -207,7 +253,7 @@ VG_TEST_CASE(a_task_is_claimed_written_published_outside_the_operation_and_compl
     f.enable(CaptureType::Image, std::chrono::milliseconds(40));
     auto &photo = f.channel(CaptureType::Image);
     const auto task = f.dispatch();
-    Worker worker(f.ctx, f.slot);
+    Worker worker(f.ctx, f.slot, CaptureType::Image);
 
     const auto before = Clock::now();
     VG_CHECK(worker.step() == Step::Ran);
@@ -238,7 +284,7 @@ VG_TEST_CASE(canceled_and_interrupted_tasks_complete_at_once_without_a_hold)
         f.enable(CaptureType::Image, kLong);
         f.media.stop_after_frames = 0;
         const auto task = f.dispatch();
-        Worker worker(f.ctx, f.slot);
+        Worker worker(f.ctx, f.slot, CaptureType::Image);
         const auto before = Clock::now();
         VG_CHECK(worker.step() == Step::Ran);
         VG_CHECK(Clock::now() - before < kBound);
@@ -253,7 +299,7 @@ VG_TEST_CASE(canceled_and_interrupted_tasks_complete_at_once_without_a_hold)
         f.pushKeyFrame();
         f.media.stop_after_frames = 1;
         const auto task = f.dispatch();
-        Worker worker(f.ctx, f.slot);
+        Worker worker(f.ctx, f.slot, CaptureType::Video);
         const auto before = Clock::now();
         VG_CHECK(worker.step() == Step::Ran);
         VG_CHECK(Clock::now() - before < kBound);
@@ -274,7 +320,8 @@ VG_TEST_CASE(a_failed_task_holds_through_the_cooldown_and_the_limit_stops_the_wo
     Fixture f;
     f.enable(CaptureType::Image, std::chrono::milliseconds(20));
     auto &photo = f.channel(CaptureType::Image);
-    Worker worker(f.ctx, f.slot, std::chrono::milliseconds(30), 2); // injected: a 30 ms cooldown, two failures
+    // Injected: a 30 ms cooldown, two failures.
+    Worker worker(f.ctx, f.slot, CaptureType::Image, std::chrono::milliseconds(30), 2);
 
     f.media.capture_result = EIO;
     auto task = f.dispatch();
@@ -310,7 +357,7 @@ VG_TEST_CASE(a_stop_request_ends_the_hold_after_completing_the_task_and_the_thre
     f.enable(CaptureType::Image, kLong);
     auto &photo = f.channel(CaptureType::Image);
     {
-        Worker worker(f.ctx, f.slot);
+        Worker worker(f.ctx, f.slot, CaptureType::Image);
         const auto task = f.dispatch();
         f.slot.stop = true; // requested before the task starts: it still runs and completes, with no hold
         const auto before = Clock::now();
@@ -324,8 +371,8 @@ VG_TEST_CASE(a_stop_request_ends_the_hold_after_completing_the_task_and_the_thre
     // The thread body: a task from before the worker started is stale; later ones are served until the stop.
     const auto stale = f.dispatch();
     f.slot.ready = false;
-    Worker worker(f.ctx, f.slot);
-    std::thread thread([&] { worker.run(); });
+    Worker worker(f.ctx, f.slot, CaptureType::Image);
+    Fixture::Running running(f.slot, worker);
     VG_REQUIRE(Fixture::waitFor([&] { return stale->event->status.load() == WriteEvent::Status::Canceled; }));
     VG_CHECK(photo.current() == nullptr);
     const auto served = f.dispatch();
@@ -333,7 +380,7 @@ VG_TEST_CASE(a_stop_request_ends_the_hold_after_completing_the_task_and_the_thre
     VG_REQUIRE(Fixture::waitFor([&] { return f.slot.published.load() == 2; }));
     VG_CHECK(photo.current() == served); // published, and now held through the interval
     f.slot.stop = true;                  // which the stop ends
-    thread.join();
+    running.join();
     VG_CHECK(served->event->status.load() == WriteEvent::Status::Completed);
     VG_CHECK(photo.current() == nullptr && photo.last() == served);
     VG_CHECK_EQ(f.slot.publications.size(), size_t { 2 });
@@ -353,7 +400,7 @@ VG_TEST_CASE(a_stale_task_never_touches_a_newer_one_through_the_loop)
         photo.complete(a, WriteEvent::Status::Interrupted);
         b = f.dispatch();
     };
-    Worker worker(f.ctx, f.slot);
+    Worker worker(f.ctx, f.slot, CaptureType::Image);
     VG_CHECK(worker.step() == Step::Ran);
     VG_REQUIRE(b != nullptr);
     VG_CHECK(photo.current() == b);
@@ -370,7 +417,7 @@ VG_TEST_CASE(a_stale_task_never_touches_a_newer_one_through_the_loop)
 VG_TEST_CASE(the_probe_claims_nothing_without_an_enabled_channel_a_ready_slot_headroom_or_media)
 {
     Fixture f;
-    Worker worker(f.ctx, f.slot);
+    Worker worker(f.ctx, f.slot, CaptureType::Image);
     VG_CHECK(worker.step() == Step::Idle); // no enabled channel: nothing to serve
     f.enable(CaptureType::Image, kLong);
     const auto task = f.dispatch();
@@ -404,7 +451,7 @@ VG_TEST_CASE(the_budget_is_reserved_at_admission_and_released_on_every_terminal_
         FileSize seen = -1;
         f.media.on_capture = [&] { seen = f.inFlight(); };
         const auto task = f.dispatch();
-        Worker worker(f.ctx, f.slot);
+        Worker worker(f.ctx, f.slot, CaptureType::Image);
         VG_CHECK(worker.step() == Step::Ran);
         VG_CHECK_EQ(seen, task->settings->watermarks.task_bytes);
         VG_REQUIRE(f.slot.publications.size() == size_t { 1 });
@@ -418,7 +465,7 @@ VG_TEST_CASE(the_budget_is_reserved_at_admission_and_released_on_every_terminal_
         FileSize seen = -1;
         f.media.on_capture = [&] { seen = f.inFlight(); };
         const auto task = f.dispatch();
-        Worker worker(f.ctx, f.slot, std::chrono::milliseconds(10), 10);
+        Worker worker(f.ctx, f.slot, CaptureType::Image, std::chrono::milliseconds(10), 10);
         VG_CHECK(worker.step() == Step::Ran);
         VG_CHECK_EQ(seen, task->settings->watermarks.task_bytes);
         VG_CHECK(task->event->status.load() == WriteEvent::Status::Failed);
@@ -430,7 +477,7 @@ VG_TEST_CASE(the_budget_is_reserved_at_admission_and_released_on_every_terminal_
         f.enable(CaptureType::Image, kLong);
         f.media.stop_after_frames = 0;
         const auto task = f.dispatch();
-        Worker worker(f.ctx, f.slot);
+        Worker worker(f.ctx, f.slot, CaptureType::Image);
         VG_CHECK(worker.step() == Step::Ran);
         VG_CHECK(task->event->status.load() == WriteEvent::Status::Canceled);
         VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
@@ -443,7 +490,7 @@ VG_TEST_CASE(the_budget_is_reserved_at_admission_and_released_on_every_terminal_
         FileSize seen = -1;
         f.media.on_write = [&] { seen = f.inFlight(); };
         const auto task = f.dispatch();
-        Worker worker(f.ctx, f.slot);
+        Worker worker(f.ctx, f.slot, CaptureType::Video);
         VG_CHECK(worker.step() == Step::Ran);
         VG_CHECK_EQ(seen, task->settings->watermarks.task_bytes);
         VG_CHECK(task->event->status.load() == WriteEvent::Status::Interrupted);
@@ -456,7 +503,7 @@ VG_TEST_CASE(the_budget_is_reserved_at_admission_and_released_on_every_terminal_
         f.enable(CaptureType::Image, kLong);
         const auto task = f.dispatch();
         f.slot.free_bytes = task->settings->watermarks.critical_remain_bytes; // not above the mark
-        Worker worker(f.ctx, f.slot);
+        Worker worker(f.ctx, f.slot, CaptureType::Image);
         VG_CHECK(worker.step() == Step::Idle);
         VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
         VG_CHECK(task->event->status.load() == WriteEvent::Status::Pending);
@@ -479,7 +526,7 @@ VG_TEST_CASE(a_watermark_change_does_not_stop_a_running_clip_but_a_recording_cha
         VG_REQUIRE(shared.update(shared.getRevision(),
             ActionSettings::create(false, false, nullptr, settings, &f.ctx.c_api.media)));
     };
-    Worker worker(f.ctx, f.slot);
+    Worker worker(f.ctx, f.slot, CaptureType::Video);
 
     // Three frames and a closing key frame: the clip completes on the fourth. After the second frame the same
     // recording is republished with the watermarks of a longer clip.
@@ -519,6 +566,136 @@ VG_TEST_CASE(a_watermark_change_does_not_stop_a_running_clip_but_a_recording_cha
     VG_REQUIRE(f.slot.publications.size() == size_t { 2 });
     VG_CHECK(f.slot.publications[1].status == WriteEvent::Status::Interrupted);
     VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
+}
+
+VG_TEST_CASE(each_worker_serves_only_its_own_channel_with_its_own_budget_and_failure_count)
+{
+    // Two workers over one Slot, one per channel (docs/PLAN.md section 7.2): neither claims from the other's
+    // channel, each task reserves its own bytes against the aggregate mark (section 9), and a channel's failures
+    // count for that channel alone. The Video worker steps inside the Photo capture callback, so the two
+    // reservations overlap deterministically.
+    Fixture f;
+    f.enableBoth(std::chrono::milliseconds(20), std::chrono::milliseconds(20));
+    auto &photo = f.channel(CaptureType::Image);
+    auto &video = f.channel(CaptureType::Video);
+    // Injected: a 10 ms cooldown, one failure, for each worker.
+    Worker photo_worker(f.ctx, f.slot, CaptureType::Image, std::chrono::milliseconds(10), 1);
+    Worker video_worker(f.ctx, f.slot, CaptureType::Video, std::chrono::milliseconds(10), 1);
+
+    // Only a Video task is pending: the Photo worker claims nothing and leaves it alone.
+    f.dispatch();
+    photo.cancelPending();
+    const auto lone = video.current();
+    VG_REQUIRE(lone != nullptr);
+    VG_CHECK(photo_worker.step() == Step::Idle);
+    VG_CHECK(video.current() == lone && lone->event->status.load() == WriteEvent::Status::Pending);
+    VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
+    f.pushKeyFrame(); // each clip here writes one key frame and ends on the next, which stays queued
+    f.pushKeyFrame();
+    f.media.finish_after_frames = 1;
+    VG_CHECK(video_worker.step() == Step::Ran);
+    VG_CHECK(lone->event->status.load() == WriteEvent::Status::Completed);
+
+    // Both channels accept; the Video worker steps inside the Photo capture, so both reservations are in flight
+    // at the Video publication, and the Photo's own alone at its own.
+    f.dispatch();
+    const auto photo_task = photo.current(), video_task = video.current();
+    VG_REQUIRE(photo_task != nullptr && video_task != nullptr);
+    const auto photo_bytes = photo_task->settings->watermarks.task_bytes;
+    const auto video_bytes = video_task->settings->watermarks.task_bytes;
+    const auto aggregate_bytes = f.ctx.action_settings.get().settings->watermarks.task_bytes;
+    VG_CHECK_EQ(aggregate_bytes, photo_bytes + video_bytes); // what both are admitted against
+    f.pushKeyFrame();
+    f.pushKeyFrame();
+    f.media.finish_after_frames = 2;
+    f.media.on_capture = [&] {
+        VG_CHECK_EQ(f.inFlight(), photo_bytes); // the Photo's own bytes, not the aggregate's
+        VG_CHECK(video_worker.step() == Step::Ran);
+        VG_CHECK(video_task->event->status.load() == WriteEvent::Status::Completed);
+        VG_CHECK_EQ(f.inFlight(), photo_bytes); // the Video's were released with its publication
+    };
+    VG_CHECK(photo_worker.step() == Step::Ran);
+    f.media.on_capture = nullptr;
+    VG_CHECK(photo_task->event->status.load() == WriteEvent::Status::Completed);
+    VG_REQUIRE(f.slot.publications.size() == size_t { 3 });
+    VG_CHECK(f.slot.publications[1].event == video_task->event);
+    VG_CHECK_EQ(f.slot.publications[1].in_flight, photo_bytes + video_bytes);
+    VG_CHECK(f.slot.publications[2].event == photo_task->event);
+    VG_CHECK_EQ(f.slot.publications[2].in_flight, photo_bytes);
+    VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
+    VG_CHECK_EQ(f.slot.failure_marks.load(), 0);
+
+    // A failing capture reaches the Photo worker's limit; the Video worker's count is its own, so it goes on.
+    f.media.capture_result = EIO;
+    f.dispatch();
+    VG_CHECK(photo_worker.step() == Step::Stop);
+    VG_CHECK_EQ(f.slot.failure_marks.load(), 1);
+    VG_CHECK(photo.current() == nullptr && photo.last()->event->status.load() == WriteEvent::Status::Failed);
+    const auto next_video = video.current();
+    VG_REQUIRE(next_video != nullptr);
+    f.pushKeyFrame();
+    f.pushKeyFrame();
+    f.media.finish_after_frames = 3;
+    VG_CHECK(video_worker.step() == Step::Ran);
+    VG_CHECK(next_video->event->status.load() == WriteEvent::Status::Completed);
+    VG_CHECK_EQ(f.slot.failure_marks.load(), 1);
+    VG_CHECK_EQ(f.media.captures, 2);
+    VG_CHECK_EQ(f.media.finishes, 3);
+    VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
+}
+
+VG_TEST_CASE(the_thread_bodies_retire_only_their_own_stale_task_and_serve_both_channels_at_once)
+{
+    // Each worker thread cancels only its own channel's task from before it started (docs/PLAN.md section 9);
+    // then the Photo worker completes a capture while the Video worker is still waiting for the key frame that
+    // closes its clip (matrix A1: Video busy while Photo triggers), and the stop ends both holds.
+    Fixture f;
+    f.enableBoth(kLong, kLong);
+    auto &photo = f.channel(CaptureType::Image);
+    auto &video = f.channel(CaptureType::Video);
+    f.media.finish_after_frames = 3; // the clip is finished after three frames and ends on the next key frame
+    f.dispatch();
+    const auto stale_photo = photo.current(), stale_video = video.current();
+    VG_REQUIRE(stale_photo != nullptr && stale_video != nullptr);
+    f.slot.ready = false;
+    Worker photo_worker(f.ctx, f.slot, CaptureType::Image);
+    Worker video_worker(f.ctx, f.slot, CaptureType::Video);
+    Fixture::Running photo_thread(f.slot, photo_worker);
+    VG_REQUIRE(Fixture::waitFor([&] { return stale_photo->event->status.load() == WriteEvent::Status::Canceled; }));
+    VG_CHECK(video.current() == stale_video); // the other channel's task is not this worker's to retire
+    VG_CHECK(stale_video->event->status.load() == WriteEvent::Status::Pending);
+    Fixture::Running video_thread(f.slot, video_worker);
+    VG_REQUIRE(Fixture::waitFor([&] { return stale_video->event->status.load() == WriteEvent::Status::Canceled; }));
+
+    // Both channels accept again. The clip has its starting key frame and two frames but no closing one, so the
+    // Photo publishes while the Video is still writing.
+    f.pushKeyFrame();
+    f.pushFrame(false);
+    f.pushFrame(false);
+    f.dispatch();
+    const auto photo_task = photo.current(), video_task = video.current();
+    VG_REQUIRE(photo_task != nullptr && video_task != nullptr);
+    f.slot.ready = true;
+    VG_REQUIRE(Fixture::waitFor([&] {
+        return f.slot.published.load() == 1 && video_task->event->status.load() == WriteEvent::Status::Writing;
+    }));
+    VG_CHECK(photo_task->event->status.load() == WriteEvent::Status::Completed); // and held through its interval
+    f.pushKeyFrame();                                                            // closes the clip
+    VG_REQUIRE(Fixture::waitFor([&] { return f.slot.published.load() == 2; }));
+    f.slot.stop = true; // ends both holds
+    photo_thread.join();
+    video_thread.join();
+    VG_CHECK(video_task->event->status.load() == WriteEvent::Status::Completed);
+    VG_CHECK(photo.current() == nullptr && photo.last() == photo_task);
+    VG_CHECK(video.current() == nullptr && video.last() == video_task);
+    VG_REQUIRE(f.slot.publications.size() == size_t { 2 });
+    VG_CHECK(f.slot.publications[0].event == photo_task->event);
+    VG_CHECK(f.slot.publications[1].event == video_task->event);
+    VG_CHECK_EQ(f.media.captures, 1);
+    VG_CHECK_EQ(f.media.video_frames, 3);
+    VG_CHECK_EQ(f.media.finishes, 1);
+    VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
+    VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
 }
 
 VG_TEST_MAIN()
