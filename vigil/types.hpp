@@ -1117,8 +1117,16 @@ struct ActionSettings
             media_capi);
     }
 
-    // The single enabled file channel of the single-writer runtime, null when none is enabled. Both cannot be
-    // enabled until Phase 4D; Phase 4C replaces every caller with a worker per channel.
+    // The settings of one file channel (Image is the Photo channel, Video the Video one), null when it is
+    // disabled: what the channel's worker serves (docs/PLAN.md section 7.2).
+    const std::shared_ptr<FileWriterSettings> &channel(CaptureType type) const noexcept
+    {
+        return type == CaptureType::Image ? photo : video;
+    }
+
+    // The single enabled file channel, null when none is enabled: the interval ALWAYS_ON paces on, and what the
+    // HTTP precheck tests for a file action. Both cannot be enabled until Phase 4D, whose invariant keeps
+    // ALWAYS_ON to one channel.
     const std::shared_ptr<FileWriterSettings> &fileChannel() const noexcept
     {
         return photo ? photo : video;

@@ -29,8 +29,12 @@ using namespace vigil::writers;
 
 struct FakeMedia
 {
-    std::mutex mutex;
+    std::mutex mutex; // of the queue, as the writers expect
     std::deque<MediaFrame> queue;
+    // The records below are written from the callbacks, which the Photo and Video workers of one Slot may run at
+    // once: `records` covers them. The hooks run outside it, so a hook may step a worker or dispatch; the knobs
+    // are set before the workers run.
+    std::mutex records;
 
     vg_sta_e create_result = 0;
     vg_sta_e finish_result = 0;
@@ -73,9 +77,12 @@ struct FakeMedia
     static vg_sta_e Create(int *fd, const char *path, const char *format, void *user_data)
     {
         auto &m = of(user_data);
-        ++m.creates;
-        m.last_path = path;
-        m.last_format = format;
+        {
+            const std::lock_guard lock(m.records);
+            ++m.creates;
+            m.last_path = path;
+            m.last_format = format;
+        }
         if (m.create_result != 0)
             return m.create_result;
         if (m.pause_on_create)
@@ -87,6 +94,7 @@ struct FakeMedia
     static vg_sta_e Finish(int fd, void *user_data)
     {
         auto &m = of(user_data);
+        const std::lock_guard lock(m.records);
         ++m.finishes;
         m.last_fd = fd;
         return m.finish_result;
@@ -95,9 +103,12 @@ struct FakeMedia
     static vg_sta_e WriteVideo(int fd, const vg_video_frame_t *, void *user_data)
     {
         auto &m = of(user_data);
-        ++m.video_frames;
-        m.last_fd = fd;
-        m.active_while_writing = m.ctx->media_barrier.activeOperations();
+        {
+            const std::lock_guard lock(m.records);
+            ++m.video_frames;
+            m.last_fd = fd;
+            m.active_while_writing = m.ctx->media_barrier.activeOperations();
+        }
         if (m.on_write)
             m.on_write();
         return m.write_result;
@@ -106,6 +117,7 @@ struct FakeMedia
     static vg_sta_e WriteAudio(int fd, const vg_audio_frame_t *, void *user_data)
     {
         auto &m = of(user_data);
+        const std::lock_guard lock(m.records);
         ++m.audio_frames;
         m.last_fd = fd;
         return m.write_result;
@@ -114,10 +126,13 @@ struct FakeMedia
     static vg_sta_e Capture(const char *path, const char *format, void *user_data)
     {
         auto &m = of(user_data);
-        ++m.captures;
-        m.last_path = path;
-        m.last_format = format;
-        m.active_while_capturing = m.ctx->media_barrier.activeOperations();
+        {
+            const std::lock_guard lock(m.records);
+            ++m.captures;
+            m.last_path = path;
+            m.last_format = format;
+            m.active_while_capturing = m.ctx->media_barrier.activeOperations();
+        }
         if (m.on_capture)
             m.on_capture();
         return m.capture_result;
@@ -138,6 +153,7 @@ public:
 
     ~FakeAdapter() override
     {
+        const std::lock_guard lock(_media.records);
         _media.active_at_destruction = this->ctxRef().media_barrier.activeOperations();
     }
 
@@ -173,6 +189,7 @@ protected:
 
     bool shouldFinishWritingImpl() const noexcept
     {
+        const std::lock_guard lock(_media.records);
         return _media.framesWritten() >= _media.finish_after_frames;
     }
 
@@ -181,6 +198,7 @@ protected:
         if (_settings_revision
             && !this->ctxRef().file_channels.of(this->settings().type).isOpenFor(*_settings_revision))
             return false;
+        const std::lock_guard lock(_media.records);
         return ++_media.continue_checks <= _media.stop_after_continue_checks
                && _media.framesWritten() < _media.stop_after_frames;
     }

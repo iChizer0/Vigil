@@ -512,6 +512,10 @@ private:
         return dev_path_match && uuid_match;
     }
 
+    // Enables the selected Slot only after every other enabled Slot was disabled, which joined its two channel
+    // workers and its manager thread (docs/PLAN.md section 9): the replacement opens once the old consumers are
+    // drained, and a task never moves to another device (one pending across the switch is stale to the new
+    // workers, which cancel it).
     vg_sta_e syncEnabledSlotWithConfig()
     {
         const auto current_cfg = getConfig();

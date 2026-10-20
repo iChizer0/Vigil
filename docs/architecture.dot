@@ -225,7 +225,7 @@ digraph G {
       video_writer [label="VideoWriter<T>\nKeyframe Clip Boundaries\nClip Length Control\nFrame-by-Frame Write\nvideo_file_*_cb", shape=box];
     }
 
-    writer_thread [label="Slot Writer Thread\nFileChannelWorker<Slot> (50ms)\nReady / Headroom / Pause Probes\nClaim, Write, Publish, Hold, Complete", shape=box, style=filled, fillcolor=lightsalmon];
+    writer_thread [label="Slot Worker Threads (Photo, Video)\nFileChannelWorker<Slot> per Channel (50ms)\nReady / Budget / Pause Probes\nClaim, Write, Publish, Hold, Complete", shape=box, style=filled, fillcolor=lightsalmon];
 
     capture_thread [label="Capture Thread (50ms)\nCaptureEvent Check\nSpace Check\nMedia Pause Check\nDirect File Write", shape=box, style=filled, fillcolor=lightsalmon];
   }
@@ -261,7 +261,7 @@ digraph G {
         write_stats [label="WriteStats\nHourly Bytes/Minute\nEstimated Write Rate", shape=box];
         fsck_util [label="FSCK Utility\nExt/FAT Dirty Probe\nfsck -p Repair\nInterruptible Execute", shape=box];
         slot_recovery [label="Manager Recovery\nCumulative Error Counter\nMax Attempts→Error\nBackoff Retry", shape=box];
-        slot_writer [label="Slot::writerThreadTask\nCache→Target Move\nDirect Filesystem Ops", shape=box];
+        slot_writer [label="Slot::publish\nCache→Target Move\nDirect Filesystem Ops", shape=box];
         relay [label="Relay\nUUID Symlink Export\nTimeout Auto-Disable (5m)\nNginx Integration", shape=box];
       }
     }
@@ -446,7 +446,7 @@ digraph G {
   fsck_util -> fs [color=blue, xlabel="fsck -p", constraint=false];
   slot_quota -> fs [color=blue, xlabel="remove_all/recycle", constraint=false];
 
-  // Slot owns writer thread
+  // Slot owns both worker threads
   slot_ops -> writer_thread [color=blue, xlabel="spawn", weight=2];
   slot_ops -> slot_writer [color=blue, weight=2];
 
