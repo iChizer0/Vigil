@@ -239,6 +239,28 @@ struct TimerRuleConfig
     }
 };
 
+// The host's GPIO pin list for one library call (docs/PLAN.md section 10): queried on construction into a
+// value-initialized structure, so a query that fails without writing it frees nothing, and released through the
+// host's free_cb on destruction, so the list is freed exactly once however the call ends (a throw while parsing
+// the rule leaked it before 2026-10-20). The caller checks that `available_cb` is set; `pins` is declared first,
+// so it is zeroed before the query.
+struct AvailableGPIOPins
+{
+    vg_config_gpio_pins_t pins {};
+    const vg_sta_e status;
+
+    explicit AvailableGPIOPins(const Context &ctx) noexcept : status(ctx.c_api.gpios.available_cb(&pins)) { }
+
+    ~AvailableGPIOPins()
+    {
+        if (pins.free_cb)
+            pins.free_cb(pins.pins);
+    }
+
+    AvailableGPIOPins(const AvailableGPIOPins &) = delete;
+    AvailableGPIOPins &operator=(const AvailableGPIOPins &) = delete;
+};
+
 struct GPIOPinConfig
 {
     std::unique_ptr<vg_config_gpio_pin_t> pin;
@@ -248,10 +270,12 @@ struct GPIOPinConfig
         if (ctx.c_api.gpios.available_cb == nullptr)
             throw Exception("C API GPIO available callback is null while parsing GPIO pin config");
 
-        vg_config_gpio_pins_t available_pins;
-        if (ctx.c_api.gpios.available_cb(&available_pins) != 0)
-            throw Exception("Failed to get available GPIO pins from C API while parsing GPIO pin config");
+        const AvailableGPIOPins available(ctx); // freed when this scope ends, also when a throw below skips the rest
+        if (available.status != 0)
+            throw Exception("Failed to get available GPIO pins from C API while parsing GPIO pin config, error code: "
+                            + std::to_string(available.status));
 
+        const auto &available_pins = available.pins;
         if (available_pins.pins && available_pins.len > 0)
         {
             if (j.contains("iNum"))
@@ -281,11 +305,6 @@ struct GPIOPinConfig
                 }
             }
         }
-
-        if (available_pins.free_cb)
-            available_pins.free_cb(available_pins.pins);
-        else
-            VG_LOG(ctx.log, VG_LOG_LEVEL_DEBUG, "No free_cb provided for available GPIO pins");
 
         if (!pin)
             throw Exception("Failed to find GPIO pin in C API while parsing GPIO pin config");
@@ -379,12 +398,17 @@ struct TTYRuleConfig
     {
         j.at("sName").get_to(name);
         {
-            for (size_t i = 0; i < ctx.c_api.ttys.len; ++i)
+            // The host's TTY list is borrowed for the service lifetime (docs/PLAN.md section 10); an entry
+            // without a socket path cannot be used (its null pointer was dereferenced before 2026-10-20).
+            for (size_t i = 0; ctx.c_api.ttys.ttys && i < ctx.c_api.ttys.len; ++i)
             {
-                if (ctx.c_api.ttys.ttys[i].name && name == ctx.c_api.ttys.ttys[i].name)
+                const auto &tty = ctx.c_api.ttys.ttys[i];
+                if (tty.name && name == tty.name)
                 {
-                    socket_path = ctx.c_api.ttys.ttys[i].socket_path;
-                    buffer_size = ctx.c_api.ttys.ttys[i].buffer_size;
+                    if (!tty.socket_path)
+                        throw Exception("TTY '" + name + "' has no socket path in C API while parsing TTY rule");
+                    socket_path = tty.socket_path;
+                    buffer_size = tty.buffer_size;
                     break;
                 }
             }

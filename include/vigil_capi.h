@@ -4,7 +4,7 @@
 #ifdef VG_CAPI_VERSION
 #error "Duplicate definition of VG_CAPI_VERSION"
 #else
-#define VG_CAPI_VERSION "2026.10.19"
+#define VG_CAPI_VERSION "2026.10.20"
 #endif
 
 #include "vigil_ctypes.h"
@@ -21,8 +21,11 @@ extern "C" {
  * Initializes internal subsystems and registers the supplied callbacks so
  * media, GPIO, and HTTP integrations become active for subsequent calls (singleton, thread-safe).
  *
- * @param config Mutable configuration structure describing host callbacks.
- * @return vg_sta_e 0 on success, otherwise an error code.
+ * @param config The configuration, copied: the callbacks, user_data, strings, and the ttys array it points to are
+ * borrowed until vg_service_deinit returns. config_directory is required; every callback is optional unless its
+ * field says otherwise, and a rule or an action that needs a missing callback is refused or fails when it runs.
+ * @return vg_sta_e 0 on success; EINVAL for a null config or config_directory, EALREADY while a runtime exists,
+ * EFAULT when the runtime could not be built (the cause is logged).
  * @note May launch child threads for media processing and HTTP serving, and the Unix socket path used for TTY should be
  * created by the caller.
  */
@@ -32,10 +35,10 @@ vg_sta_e vg_service_init(vg_config_t *config);
  * @brief Shuts down the Vigil runtime and releases any allocated resources (thread-safe).
  *
  * @return vg_sta_e 0 when teardown succeeds; error status otherwise.
- * @note Blocks until all child threads have exited and resources are cleaned up. The callbacks and user_data given
- * to vg_service_init must stay valid until this call returns. Neither this function nor vg_service_init may be
- * called from a callback, since the call would wait for the thread it runs on; a callback that calls another C API
- * function while the runtime is being built or torn down receives ESRCH.
+ * @note Blocks until all child threads have exited and resources are cleaned up. The callbacks, user_data, strings,
+ * and arrays given to vg_service_init must stay valid until this call returns. Neither this function nor
+ * vg_service_init may be called from a callback, since the call would wait for the thread it runs on; a callback that
+ * calls another C API function while the runtime is being built or torn down receives ESRCH.
  */
 vg_sta_e vg_service_deinit();
 
@@ -44,8 +47,9 @@ vg_sta_e vg_service_deinit();
 /**
  * @brief Queues a video frame for processing or archival by Vigil (thread-safe).
  *
- * @param frame Pointer to the frame metadata and payload description.
- * @return vg_sta_e 0 when accepted, or an error status on failure.
+ * @param frame Pointer to the frame metadata and payload description; the payload is copied during the call.
+ * @return vg_sta_e 0 when accepted, EINVAL for a null frame or one without a payload (null data or zero bytes_len),
+ * or an error status on failure.
  * @note May block if internal buffers are full until space becomes available when recording.
  */
 vg_sta_e vg_media_enqueue_video_frame(const vg_video_frame_t *frame);
@@ -53,8 +57,8 @@ vg_sta_e vg_media_enqueue_video_frame(const vg_video_frame_t *frame);
 /**
  * @brief Queues an audio frame corresponding to the given source (thread-safe).
  *
- * @param frame Pointer to the audio frame metadata and payload description.
- * @return vg_sta_e 0 when accepted, or an error status on failure.
+ * @param frame Pointer to the audio frame metadata and payload description; the payload is copied during the call.
+ * @return vg_sta_e 0 when accepted, EINVAL for a null frame or one without a payload, or an error status on failure.
  * @note May block if internal buffers are full until space becomes available when recording.
  */
 vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
@@ -63,9 +67,10 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
  * @brief Suspends media writing operations, optionally waiting for in-flight writes to complete (thread-safe).
  *
  * @param wait When true, blocks until every admitted media operation (video create/write/finish, image capture,
- * thumbnail generation, sound playback) has completed; nothing new is admitted until the matching resume. Must
- * not be true when called from a media callback, which would wait for itself.
- * @return vg_sta_e 0 on success, otherwise an error status (except EAGAIN when wait is false).
+ * thumbnail generation, sound playback) has completed; nothing new is admitted until the matching resume. Not to
+ * be called from a media callback, with or without wait: a waiting suspension drains the callbacks while holding
+ * the lock this function and vg_media_scoped_resume_write take.
+ * @return vg_sta_e 0 on success, ESRCH without a runtime.
  * @note While suspended, incoming media frames may be dropped if internal buffers fill up. Generally used when the
  * frame settings are being changed to avoid partial writes.
  */

@@ -81,6 +81,8 @@ struct FakeGPIO
     static inline size_t last_debounce_ms = 0;
     static inline vg_gpio_pin_lvl_e level = VG_GPIO_PIN_LVL_LOW;
     static inline vg_gpio_pin_evt_e event = VG_GPIO_PIN_EVT_NONE;
+    static inline int freed = 0;               // calls of the list's free_cb
+    static inline bool fail_available = false; // the query fails without touching the list
 
     static void reset()
     {
@@ -90,14 +92,24 @@ struct FakeGPIO
         last_debounce_ms = 0;
         level = VG_GPIO_PIN_LVL_LOW;
         event = VG_GPIO_PIN_EVT_NONE;
+        freed = 0;
+        fail_available = false;
     }
 
     static vg_sta_e Available(vg_config_gpio_pins_t *out)
     {
-        out->free_cb = nullptr;
+        if (fail_available)
+            return -1;
+        out->free_cb = &Free;
         out->pins = pins;
         out->len = 1;
         return 0;
+    }
+
+    static void Free(void *list)
+    {
+        if (list == pins)
+            ++freed;
     }
 
     static vg_sta_e Acquire(int pin, vg_gpio_pin_mod_e mode, size_t debounce_ms)
@@ -416,6 +428,46 @@ VG_TEST_CASE(gpio_rule_observes_levels_and_edges_and_names_the_signal_and_the_pi
         VG_CHECK_EQ(owner->id, "RISING");
         VG_CHECK_EQ(owner->source_id, "GPIO_07");
         VG_CHECK(rule(ctx) == nullptr); // edges are observed on evaluation, not queued
+    }
+}
+
+VG_TEST_CASE(gpio_pin_lookup_frees_the_host_list_once_however_parsing_ends)
+{
+    // The host's pin list is released through its free_cb exactly once per query, also when the rule's JSON
+    // fails to parse after the query (leaked before 2026-10-20); a query that fails without writing the list
+    // frees nothing and refuses the rule.
+    FakeGPIO::reset();
+    const Context ctx(GPIOConfig(true, true));
+    const GPIORuleConfig ok(GPIOJson("RISING"), ctx);
+    VG_CHECK_EQ(FakeGPIO::freed, 1);
+    auto bad_number = GPIOJson("RISING");
+    bad_number["iNum"] = "seven"; // looked up by number first, which fails to parse after the query
+    VG_CHECK_THROWS(GPIORuleConfig(bad_number, ctx));
+    VG_CHECK_EQ(FakeGPIO::freed, 2);
+    VG_CHECK_THROWS(GPIORuleConfig(GPIOJson("SIDEWAYS"), ctx)); // fails after the lookup
+    VG_CHECK_EQ(FakeGPIO::freed, 3);
+    FakeGPIO::fail_available = true;
+    VG_CHECK_THROWS(GPIORuleConfig(GPIOJson("RISING"), ctx));
+    VG_CHECK_EQ(FakeGPIO::freed, 3);
+}
+
+VG_TEST_CASE(tty_rule_config_needs_a_listed_tty_with_a_socket_path)
+{
+    // The host's TTY list is borrowed and read on every parse: an entry without a socket path cannot be
+    // selected (its null pointer was dereferenced before 2026-10-20), and a length without an array lists
+    // nothing.
+    vg_config_tty_t no_path { .name = "tty0", .socket_path = nullptr, .buffer_size = 16 };
+    {
+        const Context ctx(TTYFixture::Config(no_path));
+        VG_CHECK_THROWS(TTYRuleConfig(nlohmann::json { { "sName", "tty0" }, { "sCommand", "go" } }, ctx));
+        VG_CHECK_THROWS(TTYRuleConfig(nlohmann::json { { "sName", "other" }, { "sCommand", "go" } }, ctx));
+    }
+    {
+        auto cfg = MakeFakeConfig();
+        cfg.ttys.ttys = nullptr;
+        cfg.ttys.len = 1;
+        const Context ctx(cfg);
+        VG_CHECK_THROWS(TTYRuleConfig(nlohmann::json { { "sName", "tty0" }, { "sCommand", "go" } }, ctx));
     }
 }
 

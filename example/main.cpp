@@ -44,6 +44,13 @@ void on_rule_event_cb(const vg_rule_evt_t *evt)
               << ", dispatched " << evt->dispatch_timestamp << std::endl;
 }
 
+void on_file_event_cb(const vg_file_evt_t *evt)
+{
+    // Borrowed for the duration of the call; event_uid is 0 for a continuous recording clip.
+    std::cout << "File published: " << evt->path << ", " << evt->size_bytes << " bytes, " << evt->attributes
+              << ", rule event " << evt->event_uid << std::endl;
+}
+
 vg_sta_e sound_play_cb(void *user_data)
 {
     (void)user_data;
@@ -155,6 +162,7 @@ int main()
     config.basic.log_level = VG_LOG_LEVEL_DEBUG;
     config.basic.log_cb = log_cb;
     config.basic.on_rule_event_cb = on_rule_event_cb;
+    config.basic.on_file_event_cb = on_file_event_cb;
 
     // GPIOs
     config.gpios.available_cb = available_gpios_cb;

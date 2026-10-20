@@ -51,7 +51,7 @@ static void vg_log_exception(const vg_config_t &config, const std::exception &e)
 
 vg_sta_e vg_service_init(vg_config_t *config)
 {
-    if (!config)
+    if (!config || !config->basic.config_directory) // the one string the runtime cannot do without
         return EINVAL;
 
     const std::lock_guard lifecycle(vigil_instance_lifecycle_mutex);
@@ -98,7 +98,7 @@ vg_sta_e vg_service_deinit()
 
 vg_sta_e vg_media_enqueue_video_frame(const vg_video_frame_t *frame)
 {
-    if (!frame)
+    if (!frame || !frame->data || frame->bytes_len == 0) // a frame is its payload, copied below
         return EINVAL;
 
     const std::shared_lock lock(vigil_instance_mutex);
@@ -119,7 +119,7 @@ vg_sta_e vg_media_enqueue_video_frame(const vg_video_frame_t *frame)
 
 vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame)
 {
-    if (!frame)
+    if (!frame || !frame->data || frame->bytes_len == 0)
         return EINVAL;
 
     const std::shared_lock lock(vigil_instance_mutex);
