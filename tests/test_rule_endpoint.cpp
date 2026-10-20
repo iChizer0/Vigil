@@ -686,4 +686,25 @@ VG_TEST_CASE(rule_info_carries_exact_uids_above_2_to_53)
     VG_CHECK(info.dump().find(std::to_string(events[0].uid)) != std::string::npos);
 }
 
+VG_TEST_CASE(http_activation_runs_the_rule_callback_outside_the_rule_lock)
+{
+    // A RULE callback may call back into the configuration endpoints. Until the review fix of 2026-10-19 the
+    // HTTP activation dispatched under the record-rule lock, so a callback that replaced the rule deadlocked.
+    Fixture f;
+    f.start();
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
+    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0);
+    int nested = -1;
+    RuleEventRecorder::hook = [&](const vg_rule_evt_t &) { nested = f.postRecordRuleConfig(TimerRuleJson(0)); };
+    VG_CHECK_EQ(f.activateHTTP(), 0);
+    RuleEventRecorder::hook = nullptr;
+    VG_CHECK_EQ(nested, 0);
+    VG_CHECK_EQ(f.endpoint->getRecordRuleConfig().at("sCurrentSelected").get<std::string>(), "TIMER");
+    const auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_HTTP);
+    VG_CHECK(events[0].writer_created);
+    VG_CHECK_EQ(f.activateHTTP(), kEndpointErrorBase + EPERM); // the selected rule is no longer HTTP
+}
+
 VG_TEST_MAIN()

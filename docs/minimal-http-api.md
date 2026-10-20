@@ -11,7 +11,7 @@ Version: 2.0.0
 Get or set the rule enablement and the post-trigger actions. The payload is the version-2 record configuration
 (`record_config.json`): the library accepts no other version and never rewrites a stored file it cannot read, so an
 external manager migrates older files. `GET` returns the canonical document; `POST` takes the document shown below
-(a missing action block means a disabled action) and stores it in canonical form.
+and stores it in canonical form; every field is required (see below).
 
 **Path:** `.../vigil/rule/config`
 
@@ -48,8 +48,10 @@ and post it). Until multi-action support lands, at most one of `dPhoto` and `dVi
 requires one of them, and `dSound` and `bContinuousRecordEnabled` are rejected when enabled. A missing field, a field of
 the wrong type, a non-positive or non-integer interval, an unknown photo format, and any other `iSchemaVersion` are
 rejected with `EINVAL` (`30022`); a rejected payload changes neither the runtime nor the stored file. Unknown fields are
-ignored and dropped from the stored document. `EAGAIN` (`30011`) means a media refresh changed the action settings while
-the document was being applied; post it again. A first start without `record_config.json` reports every action disabled.
+ignored and dropped from the stored document. `EAGAIN` (`30011`) means the action settings changed (a media refresh or
+another commit) while the document was being prepared or applied; post it again. Request bodies are limited to 1 MiB; a
+larger body is rejected before parsing (the C API returns `EFAULT` with no JSON body). A first start without
+`record_config.json` reports every action disabled.
 
 ### Rule Info
 
@@ -63,8 +65,8 @@ Get the information about the rule system.
 
 ```json
 {
-    "bReadyForNewEvent": true, // Boolean, whether a new recording event can be started (false while a current event is pending or writing)
-    "dLastRuleEvent": { // Object or null: the current writer event while one is pending or writing, otherwise the last finished one
+    "bReadyForNewEvent": true, // Boolean, whether a new recording event can be started (false while a channel holds a task: pending, writing, or finished but still within its interval and failure cooldown)
+    "dLastRuleEvent": { // Object or null: the current writer event while a channel holds one, otherwise the last finished one
         "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED" (a gate, pause, stop, or settings change stopped a task that had started; its file is kept), "CANCELED" (nothing was recorded: retired before a writer claimed it, or the gate was already closed when the writer started), "UNKNOWN"
         "iTimestamp": 1735574000, // Integer, Unix timestamp in milliseconds
         "iOwnerUID": 1735574400123 // Integer, UID of the owner that created the event (exact 64-bit value)

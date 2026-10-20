@@ -939,10 +939,17 @@ public:
 
     vg_sta_e tryActivate() noexcept
     {
+        return Activate(_ctx);
+    }
+
+    // Dispatches one HTTP owner: EBUSY when the file task was not accepted. Needs no rule instance, so the
+    // endpoint calls it with no rule lock held (the dispatch runs the RULE callback).
+    static vg_sta_e Activate(const Context &ctx) noexcept
+    {
         try
         {
-            return _ctx.tryCreateWriterEvent(
-                       std::make_shared<EventOwner>(type(), id(), "", EventOwner::SourceDelivery::Event))
+            return ctx.tryCreateWriterEvent(
+                       std::make_shared<EventOwner>(VG_RULE_TYPE_HTTP, "", "", EventOwner::SourceDelivery::Event))
                        ? 0
                        : EBUSY;
         }

@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -36,24 +37,31 @@ struct RecordedRuleEvent
 class RuleEventRecorder final
 {
 public:
+    // Runs after each recorded event, on the dispatching thread with no lock held; tests use it to reenter.
+    static inline std::function<void(const vg_rule_evt_t &)> hook;
+
     static void callback(const vg_rule_evt_t *evt)
     {
         if (!evt)
             return;
-        const std::lock_guard lock(mutex());
-        events().push_back(RecordedRuleEvent {
-            .type = evt->type,
-            .id = evt->id ? evt->id : "",
-            .timestamp = evt->timestamp,
-            .dispatch_timestamp = evt->dispatch_timestamp,
-            .uid = evt->uid,
-            .source_id = evt->source_id ? evt->source_id : "",
-            .source_delivery = evt->source_delivery ? evt->source_delivery : "",
-            .writer_created = evt->writer_created,
-            .id_is_null = evt->id == nullptr,
-            .source_id_is_null = evt->source_id == nullptr,
-            .source_delivery_is_null = evt->source_delivery == nullptr,
-        });
+        {
+            const std::lock_guard lock(mutex());
+            events().push_back(RecordedRuleEvent {
+                .type = evt->type,
+                .id = evt->id ? evt->id : "",
+                .timestamp = evt->timestamp,
+                .dispatch_timestamp = evt->dispatch_timestamp,
+                .uid = evt->uid,
+                .source_id = evt->source_id ? evt->source_id : "",
+                .source_delivery = evt->source_delivery ? evt->source_delivery : "",
+                .writer_created = evt->writer_created,
+                .id_is_null = evt->id == nullptr,
+                .source_id_is_null = evt->source_id == nullptr,
+                .source_delivery_is_null = evt->source_delivery == nullptr,
+            });
+        }
+        if (hook)
+            hook(*evt);
     }
 
     static std::vector<RecordedRuleEvent> take()
@@ -66,6 +74,7 @@ public:
 
     static void clear()
     {
+        hook = nullptr;
         const std::lock_guard lock(mutex());
         events().clear();
     }

@@ -154,6 +154,13 @@ struct Fixture
         VG_REQUIRE(shared.update(shared.getRevision(),
             ActionSettings::create(false, enabled, nullptr, nullptr, &ctx.c_api.media)));
     }
+
+    // Enables Sound and rules, the gates the worker rechecks after claiming a trigger.
+    void arm()
+    {
+        publishSound(true);
+        ctx.record_rule_enabled.store(true);
+    }
 };
 
 std::shared_ptr<EventOwner> Owner()
@@ -180,6 +187,7 @@ VG_TEST_CASE(without_a_callback_the_sound_action_is_unavailable)
 VG_TEST_CASE(a_trigger_is_accepted_from_idle_only_and_played_once)
 {
     Fixture f;
+    f.arm();
     VG_CHECK(f.executor().available());
     VG_CHECK(f.executor().tryTrigger());
     VG_CHECK(f.executor().state() == State::Pending);
@@ -199,6 +207,7 @@ VG_TEST_CASE(a_trigger_is_accepted_from_idle_only_and_played_once)
 VG_TEST_CASE(a_failed_callback_is_logged_once_and_never_retried)
 {
     Fixture f;
+    f.arm();
     f.sound.result = EIO;
     VG_CHECK(f.executor().tryTrigger());
     VG_CHECK(f.serve());
@@ -236,7 +245,7 @@ VG_TEST_CASE(a_pending_trigger_is_canceled_by_rule_disable_sound_disable_and_sto
                           "dVideo": { "bEnabled": false, "iIntervalMs": 5000 }, "dSound": { "bEnabled": false } }
         })"),
             f.ctx);
-        VG_CHECK_EQ(none.sync(f.ctx, none.createActionSettings(f.ctx)), 0);
+        VG_CHECK_EQ(none.sync(f.ctx, none.prepare(f.ctx)), 0);
         VG_CHECK(f.executor().state() == State::Idle);
         VG_CHECK(!f.serve());
     }
@@ -267,6 +276,7 @@ VG_TEST_CASE(a_pause_refuses_triggers_and_admission_and_a_waiting_pause_drains_p
     }
     {
         Fixture f(/* with_callback = */ true, /* run_worker = */ true);
+        f.arm();
         f.sound.block = true;
         VG_CHECK(f.executor().tryTrigger());
         VG_REQUIRE(Fixture::waitFor([&] { return f.sound.calls.load() == 1; }));
@@ -289,9 +299,34 @@ VG_TEST_CASE(a_pause_refuses_triggers_and_admission_and_a_waiting_pause_drains_p
     }
 }
 
+VG_TEST_CASE(a_claimed_trigger_is_canceled_when_a_gate_closed_since_the_trigger)
+{
+    // The dispatcher loads the snapshot before it triggers, so a commit can disable Sound or rules in between
+    // without finding anything pending to cancel; the worker rechecks both after claiming.
+    {
+        Fixture f;
+        f.arm();
+        VG_CHECK(f.executor().tryTrigger());
+        f.publishSound(false);
+        VG_CHECK(f.serve());
+        VG_CHECK_EQ(f.sound.calls.load(), 0);
+        VG_CHECK(f.executor().state() == State::Idle);
+    }
+    {
+        Fixture f;
+        f.arm();
+        VG_CHECK(f.executor().tryTrigger());
+        f.ctx.record_rule_enabled.store(false);
+        VG_CHECK(f.serve());
+        VG_CHECK_EQ(f.sound.calls.load(), 0);
+        VG_CHECK(f.executor().state() == State::Idle);
+    }
+}
+
 VG_TEST_CASE(stop_waits_for_the_playing_callback_and_the_executor_stays_stopped)
 {
     Fixture f(/* with_callback = */ true, /* run_worker = */ true);
+    f.arm();
     f.sound.block = true;
     VG_CHECK(f.executor().tryTrigger());
     VG_REQUIRE(Fixture::waitFor([&] { return f.sound.calls.load() == 1; }));
