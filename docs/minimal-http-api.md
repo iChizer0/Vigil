@@ -85,6 +85,29 @@ Get the information about the rule system.
         "iDispatchTimestamp": 1735574400, // Integer, Unix milliseconds when Vigil created the owner; equals iTimestamp for owners without an input
         "iUID": 1735574400123 // Integer, unique owner ID (exact 64-bit value), also carried by the rule and file callbacks
     },
+    "dLastDispatchedOwner": { // Object or null: the owner of the most recent dispatch, whatever the actions did with it, in the shape of dLastRuleEventOwner; it moves ahead of dLastRuleEventOwner when the file actions rejected or did not apply to the event
+        // ...
+    },
+    "dActionStates": { // Object, the state of each post-trigger action
+        "dPhoto": {
+            "bEnabled": true, // Boolean, whether the action is enabled in the general rule configuration
+            "bReady": false, // Boolean, enabled and holding no task: the next event can be admitted here, subject to the gates and the storage slot
+            "sState": "WRITING", // String, one of: "IDLE" (no task held), "PENDING" (accepted, no worker has claimed it yet), "WRITING", "HOLDING" (the task finished, sStatus is terminal, and the channel still holds it: through its interval after a completed task, or its failure cooldown after a failed one; an interrupted or canceled task is retired at once)
+            "dEvent": { // Object or null: the held task's event, in the shape of dLastRuleEvent
+                "sStatus": "WRITING",
+                "iTimestamp": 1735574000,
+                "iOwnerUID": 1735574400123
+            }
+        },
+        "dVideo": {
+            // ... The same fields as dPhoto
+        },
+        "dSound": {
+            "bEnabled": false, // Boolean, whether the action is enabled in the general rule configuration
+            "bReady": false, // Boolean, enabled, available, and idle: the next event can trigger playback, subject to the gates
+            "sState": "UNAVAILABLE" // String, one of: "UNAVAILABLE" (the host provides no playback callback), "IDLE", "PENDING" (triggered, not yet playing), "PLAYING", "STOPPING" (the service is shutting down)
+        }
+    },
     "dAvailableGPIOs": { // Object, available GPIO pins
         "GPIO_01": { // Key: String, GPIO pin name
             "iNum": 1, // Integer, GPIO number
