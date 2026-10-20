@@ -83,15 +83,20 @@ struct Fixture
     std::unique_ptr<FakeSlotAdmission> slot; // registered and ready, as an enabled Slot is (docs/PLAN.md section 8.1)
     std::unique_ptr<RuleEndpoint> endpoint;
 
-    // With `unwritable_store` the configuration "directory" is a regular file, so nothing can be stored.
-    explicit Fixture(bool unwritable_store = false) : root(MakeTempDir()), dir(root)
+    // With `unwritable_store` the configuration "directory" is a regular file, so nothing can be stored. With
+    // `with_sound` the host provides a playback callback, so Sound is available; its worker is not started,
+    // so a trigger stays Pending for rule info to report.
+    explicit Fixture(bool unwritable_store = false, bool with_sound = false) : root(MakeTempDir()), dir(root)
     {
         if (unwritable_store)
         {
             dir = root + "/blocker";
             WriteFile(dir, "x");
         }
-        ctx = std::make_shared<Context>(MakeFakeConfig(dir.c_str()));
+        auto cfg = MakeFakeConfig(dir.c_str());
+        if (with_sound)
+            cfg.media.sound_play_cb = [](void *) -> vg_sta_e { return 0; };
+        ctx = std::make_shared<Context>(cfg, /* run_sound_worker = */ !with_sound);
         slot = std::make_unique<FakeSlotAdmission>(*ctx);
         RuleEventRecorder::clear();
     }
@@ -598,6 +603,121 @@ VG_TEST_CASE(rule_info_reports_the_channel_busy_through_the_hold)
     VG_REQUIRE(events.size() == size_t { 1 });
     VG_CHECK(events[0].writer_created);
     VG_CHECK_EQ(f.endpoint->getRuleInfo().at("dLastRuleEvent").at("sStatus").get<std::string>(), "PENDING");
+}
+
+VG_TEST_CASE(rule_info_reports_the_last_dispatched_owner_and_the_state_of_each_action)
+{
+    // docs/PLAN.md section 6.2 (Phase 4D-2): the last dispatched owner is independent of file tasks, and each
+    // action reports its own state: a file channel is IDLE, or PENDING, WRITING, and HOLDING through the task
+    // it holds; Sound is UNAVAILABLE without the host's callback, else its executor state. The existing fields
+    // keep their meaning.
+    Fixture f(/* unwritable_store = */ false, /* with_sound = */ true);
+    f.start();
+    auto info = f.endpoint->getRuleInfo();
+    VG_CHECK(info.at("dLastDispatchedOwner").is_null());
+    for (const char *name: { "dPhoto", "dVideo" })
+    {
+        const auto &channel = info.at("dActionStates").at(name);
+        VG_CHECK_EQ(channel.at("bEnabled").get<bool>(), false);
+        VG_CHECK_EQ(channel.at("bReady").get<bool>(), false);
+        VG_CHECK_EQ(channel.at("sState").get<std::string>(), "IDLE");
+        VG_CHECK(channel.at("dEvent").is_null());
+    }
+    VG_CHECK_EQ(info.at("dActionStates").at("dSound").at("bEnabled").get<bool>(), false);
+    VG_CHECK_EQ(info.at("dActionStates").at("dSound").at("bReady").get<bool>(), false);
+    VG_CHECK_EQ(info.at("dActionStates").at("dSound").at("sState").get<std::string>(), "IDLE"); // available
+
+    // Every action under a Timer rule: enabled and ready; one dispatch leaves both channels PENDING, with the
+    // owner's UID on each held event, and Sound Pending.
+    VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0);
+    VG_CHECK_EQ(f.postRecordConfig(WithActions(RecordJson(true, "MP4", 5000), true, true, true)), 0);
+    info = f.endpoint->getRuleInfo();
+    for (const char *name: { "dPhoto", "dVideo", "dSound" })
+    {
+        VG_CHECK_EQ(info.at("dActionStates").at(name).at("bEnabled").get<bool>(), true);
+        VG_CHECK_EQ(info.at("dActionStates").at(name).at("bReady").get<bool>(), true);
+        VG_CHECK_EQ(info.at("dActionStates").at(name).at("sState").get<std::string>(), "IDLE");
+    }
+    f.evaluate();
+    const auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK(events[0].writer_created);
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("dLastDispatchedOwner").at("iUID").get<uint64_t>(), events[0].uid);
+    VG_CHECK_EQ(info.at("dLastDispatchedOwner").at("sRuleType").get<std::string>(), "TIMER");
+    VG_CHECK_EQ(info.at("dLastRuleEventOwner").at("iUID").get<uint64_t>(), events[0].uid);
+    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), false);
+    for (const char *name: { "dPhoto", "dVideo" })
+    {
+        const auto &channel = info.at("dActionStates").at(name);
+        VG_CHECK_EQ(channel.at("bReady").get<bool>(), false);
+        VG_CHECK_EQ(channel.at("sState").get<std::string>(), "PENDING");
+        VG_CHECK_EQ(channel.at("dEvent").at("sStatus").get<std::string>(), "PENDING");
+        VG_CHECK_EQ(channel.at("dEvent").at("iOwnerUID").get<uint64_t>(), events[0].uid);
+    }
+    VG_CHECK_EQ(info.at("dActionStates").at("dSound").at("bReady").get<bool>(), false);
+    VG_CHECK_EQ(info.at("dActionStates").at("dSound").at("sState").get<std::string>(), "PENDING");
+
+    // The Video worker claims its task and the Photo task completes: WRITING beside IDLE, Sound Idle again.
+    auto &photo = f.ctx->file_channels.photo;
+    auto &video = f.ctx->file_channels.video;
+    const auto video_task = video.claim(f.slot->registration());
+    VG_REQUIRE(video_task != nullptr);
+    photo.complete(photo.current(), WriteEvent::Status::Completed);
+    f.ctx->sound_executor.cancelPending();
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), false); // Video holds its task
+    VG_CHECK_EQ(info.at("dActionStates").at("dPhoto").at("sState").get<std::string>(), "IDLE");
+    VG_CHECK_EQ(info.at("dActionStates").at("dPhoto").at("bReady").get<bool>(), true);
+    VG_CHECK(info.at("dActionStates").at("dPhoto").at("dEvent").is_null());
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "WRITING");
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("dEvent").at("sStatus").get<std::string>(), "WRITING");
+    VG_CHECK_EQ(info.at("dActionStates").at("dSound").at("sState").get<std::string>(), "IDLE");
+    VG_CHECK_EQ(info.at("dActionStates").at("dSound").at("bReady").get<bool>(), true);
+
+    // The write finished: the channel holds the task through its interval (COMPLETED) or its failure cooldown
+    // (FAILED), HOLDING either way, and is IDLE once the hold elapsed.
+    video_task->event->status.store(WriteEvent::Status::Completed);
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "HOLDING");
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("dEvent").at("sStatus").get<std::string>(), "COMPLETED");
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bReady").get<bool>(), false);
+    video_task->event->status.store(WriteEvent::Status::Failed);
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "HOLDING");
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("dEvent").at("sStatus").get<std::string>(), "FAILED");
+    video.complete(video_task, WriteEvent::Status::Failed);
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), true);
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "IDLE");
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bReady").get<bool>(), true);
+    VG_CHECK(info.at("dActionStates").at("dVideo").at("dEvent").is_null());
+
+    // The last dispatched owner moves with every dispatch, accepted or not: with the Slot not ready, the next
+    // Timer tick is reported and rejected by both channels, Sound is triggered on its own, and the last rule
+    // event owner stays the owner of the last accepted task.
+    f.slot->ready = false;
+    f.evaluate();
+    const auto rejected = RuleEventRecorder::take();
+    VG_REQUIRE(rejected.size() == size_t { 1 });
+    VG_CHECK(!rejected[0].writer_created);
+    info = f.endpoint->getRuleInfo();
+    VG_CHECK_EQ(info.at("dLastDispatchedOwner").at("iUID").get<uint64_t>(), rejected[0].uid);
+    VG_CHECK_EQ(info.at("dLastRuleEventOwner").at("iUID").get<uint64_t>(), events[0].uid);
+    VG_CHECK_EQ(info.at("dLastRuleEvent").at("sStatus").get<std::string>(), "FAILED");
+    VG_CHECK_EQ(info.at("dActionStates").at("dPhoto").at("sState").get<std::string>(), "IDLE");
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "IDLE");
+    VG_CHECK_EQ(info.at("dActionStates").at("dSound").at("sState").get<std::string>(), "PENDING");
+
+    // Without the host's callback Sound is UNAVAILABLE however it is configured.
+    Fixture g;
+    g.start();
+    VG_CHECK_EQ(g.postRecordRuleConfig(TimerRuleJson(0)), 0);
+    VG_CHECK_EQ(g.postRecordConfig(WithActions(RecordJson(true, nullptr, 0), false, false, true)), 0);
+    const auto sound = g.endpoint->getRuleInfo().at("dActionStates").at("dSound");
+    VG_CHECK_EQ(sound.at("bEnabled").get<bool>(), true);
+    VG_CHECK_EQ(sound.at("bReady").get<bool>(), false);
+    VG_CHECK_EQ(sound.at("sState").get<std::string>(), "UNAVAILABLE");
 }
 
 VG_TEST_CASE(record_rule_config_switches_rules_persists_and_rolls_back_failures)

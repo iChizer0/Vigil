@@ -645,6 +645,35 @@ public:
                 res_j["bReadyForNewEvent"] = !held;
                 res_j["dLastRuleEvent"] = fmt_evt(task ? task->event : nullptr);
                 res_j["dLastRuleEventOwner"] = fmt_evt_owner(task ? task->owner : nullptr);
+
+                // The last dispatched owner, whatever the actions did with it, and each action's own state
+                // (docs/PLAN.md section 6.2): the switch from the published snapshot, readiness, and for a file
+                // channel the task it holds, for Sound the executor state.
+                res_j["dLastDispatchedOwner"] = fmt_evt_owner(_ctx->last_dispatched_owner.get());
+                const auto settings = _ctx->action_settings.get().settings;
+                const auto channel_state = [&](const Context::FileChannel &channel) {
+                    const auto current = channel.current();
+                    const bool enabled = settings && settings->channel(channel.type());
+                    auto obj = nlohmann::json::object();
+                    obj["bEnabled"] = enabled;
+                    obj["bReady"] = enabled && !current;
+                    obj["sState"] = ChannelStateString(current);
+                    obj["dEvent"] = fmt_evt(current ? current->event : nullptr);
+                    return obj;
+                };
+                auto states = nlohmann::json::object();
+                states["dPhoto"] = channel_state(_ctx->file_channels.photo);
+                states["dVideo"] = channel_state(_ctx->file_channels.video);
+                {
+                    using Sound = Context::SoundActionExecutor;
+                    const auto &sound = _ctx->sound_executor;
+                    const bool enabled = settings && settings->sound_enabled;
+                    const auto state = sound.state();
+                    states["dSound"] = { { "bEnabled", enabled },
+                        { "bReady", enabled && sound.available() && state == Sound::State::Idle },
+                        { "sState", std::string(sound.available() ? Sound::StateString(state) : "UNAVAILABLE") } };
+                }
+                res_j["dActionStates"] = std::move(states);
             }
             {
                 auto gpios_obj = nlohmann::json::object();
@@ -800,6 +829,24 @@ private:
     {
         const std::unique_lock lock(_record_config_mutex);
         return _record_config.satisfiesAlwaysOnInvariant();
+    }
+
+    // The state of a file channel for rule info (docs/PLAN.md section 6.2): IDLE holds no task; PENDING,
+    // WRITING, and HOLDING follow the held task from acceptance to the end of its hold, the interval after a
+    // completed task or the cooldown after a failed one.
+    static std::string ChannelStateString(const std::shared_ptr<FileTask> &current)
+    {
+        if (!current)
+            return "IDLE";
+        switch (current->event->status.load(std::memory_order_acquire))
+        {
+            case WriteEvent::Status::Pending:
+                return "PENDING";
+            case WriteEvent::Status::Writing:
+                return "WRITING";
+            default:
+                return "HOLDING";
+        }
     }
 
     void ruleThreadTask() noexcept

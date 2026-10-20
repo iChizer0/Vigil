@@ -614,8 +614,8 @@ struct Context
     // The acceptance sequence across both channels, which orders their tasks for rule info.
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<uint64_t> file_task_sequence = 0;
 
-    // The owner of the last dispatch, whatever the channels did with it (docs/PLAN.md section 6.2). Rule info
-    // reports it with the multi-action API of Phase 4D.
+    // The owner of the last dispatch, whatever the channels did with it (docs/PLAN.md section 6.2), which rule
+    // info reports as `dLastDispatchedOwner`.
     struct LastDispatchedOwner
     {
     public:
@@ -881,6 +881,22 @@ struct Context
     {
     public:
         enum class State { Idle, Pending, Playing, Stopping };
+
+        static constexpr std::string_view StateString(State state) noexcept
+        {
+            switch (state)
+            {
+                case State::Idle:
+                    return "IDLE";
+                case State::Pending:
+                    return "PENDING";
+                case State::Playing:
+                    return "PLAYING";
+                case State::Stopping:
+                    return "STOPPING";
+            }
+            return "UNKNOWN";
+        }
 
         // `run_worker == false` is a test seam: no thread is started and the test plays pending triggers
         // through SoundActionExecutorTestAccess. Production code always runs the worker.
