@@ -950,8 +950,11 @@ inline CaptureType CaptureTypeFrom(const std::string &fmt) noexcept
         return CaptureType::Unknown;
 }
 
+// The storage headroom of a task (docs/PLAN.md section 9): the bytes one task may write (one image, or one clip
+// of the given length), and the free-space marks derived from it. Estimates, not reservations.
 struct WaterMarks
 {
+    FileSize task_bytes;
     FileSize critical_remain_bytes;
     FileSize high_remain_bytes;
     FileSize recycle_bytes;
@@ -974,19 +977,19 @@ struct WaterMarks
                 res > 0)
                 limit = static_cast<FileSize>(res);
         }
-        return WaterMarks {
-            .critical_remain_bytes
-            = static_cast<FileSize>(kStorageCriticalWaterMarkFactor * limit + kStorageMinFileSystemFreeBytes),
-            .high_remain_bytes
-            = static_cast<FileSize>(kStorageHighWaterMarkFactor * limit + kStorageMinFileSystemFreeBytes),
-            .recycle_bytes = static_cast<FileSize>(kStorageRecycleFactor * limit + kStorageMinFileSystemFreeBytes),
-        };
+        return of(limit);
+    }
+
+    // The watermarks of two tasks that may write at once: one Video plus one Photo (docs/PLAN.md section 9).
+    static inline constexpr WaterMarks aggregate(const WaterMarks &a, const WaterMarks &b) noexcept
+    {
+        return of(a.task_bytes + b.task_bytes);
     }
 
     bool operator==(const WaterMarks &other) const noexcept
     {
-        return critical_remain_bytes == other.critical_remain_bytes && high_remain_bytes == other.high_remain_bytes
-               && recycle_bytes == other.recycle_bytes;
+        return task_bytes == other.task_bytes && critical_remain_bytes == other.critical_remain_bytes
+               && high_remain_bytes == other.high_remain_bytes && recycle_bytes == other.recycle_bytes;
     }
 
     template<typename T, std::enable_if_t<std::is_unsigned_v<T>, bool> = true>
@@ -998,6 +1001,18 @@ struct WaterMarks
     }
 
 private:
+    static inline constexpr WaterMarks of(FileSize task_bytes) noexcept
+    {
+        return WaterMarks {
+            .task_bytes = task_bytes,
+            .critical_remain_bytes
+            = static_cast<FileSize>(kStorageCriticalWaterMarkFactor * task_bytes + kStorageMinFileSystemFreeBytes),
+            .high_remain_bytes
+            = static_cast<FileSize>(kStorageHighWaterMarkFactor * task_bytes + kStorageMinFileSystemFreeBytes),
+            .recycle_bytes = static_cast<FileSize>(kStorageRecycleFactor * task_bytes + kStorageMinFileSystemFreeBytes),
+        };
+    }
+
     static inline constexpr const std::array<std::pair<std::string_view, FileSize>, 4> kFormatMaxBytesMap = {
         std::make_pair<std::string_view, FileSize>("MP4", 3 * 1024 * 1024),            // 3 MB per second of video
         std::make_pair<std::string_view, FileSize>("JPG", 10 * 1024 * 1024),           // 10 MB per image
@@ -1019,9 +1034,16 @@ struct FileWriterSettings
 
     bool operator==(const FileWriterSettings &other) const noexcept
     {
-        return type == other.type && format == other.format && interval == other.interval
-               && file_name_prefix == other.file_name_prefix && video_clip_length == other.video_clip_length
-               && watermarks == other.watermarks;
+        return SameRecording(*this, other) && watermarks == other.watermarks;
+    }
+
+    // Whether two settings describe the same recording: everything but the watermarks, which are admission
+    // state (docs/PLAN.md section 9). A running task is bound to the recording, so only a change of it moves
+    // its channel's revision.
+    static bool SameRecording(const FileWriterSettings &a, const FileWriterSettings &b) noexcept
+    {
+        return a.type == b.type && a.format == b.format && a.interval == b.interval
+               && a.file_name_prefix == b.file_name_prefix && a.video_clip_length == b.video_clip_length;
     }
 
     static std::shared_ptr<FileWriterSettings> create(CaptureType type, const std::string &fmt,
@@ -1063,17 +1085,22 @@ struct ActionSettings
 
     ~ActionSettings() = default;
 
-    // The effective watermarks are those of the enabled file channel, or of one default clip when none is
-    // enabled, which is the headroom the Slot has at first start. Phase 4C sizes them for one simultaneous
-    // Video plus Photo.
+    // The effective watermarks, which admission reads (docs/PLAN.md section 9): the aggregate of one Photo plus
+    // one Video task when both channels are enabled, the enabled channel's when one is, or one default clip's
+    // when none is, which is the headroom the Slot has at first start.
     static std::shared_ptr<const ActionSettings> create(bool continuous, bool sound,
         std::shared_ptr<FileWriterSettings> photo, std::shared_ptr<FileWriterSettings> video,
         const vg_config_media_t *media_capi) noexcept
     {
-        const auto &channel = photo ? photo : video;
-        const auto watermarks
-            = channel ? channel->watermarks
-                      : WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), media_capi);
+        const auto watermarks = [&] {
+            if (photo && video)
+                return WaterMarks::aggregate(photo->watermarks, video->watermarks);
+            if (photo)
+                return photo->watermarks;
+            if (video)
+                return video->watermarks;
+            return WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), media_capi);
+        }();
         return std::shared_ptr<const ActionSettings>(
             new (std::nothrow) ActionSettings(continuous, sound, std::move(photo), std::move(video), watermarks));
     }
@@ -1101,6 +1128,13 @@ struct ActionSettings
         const std::shared_ptr<FileWriterSettings> &b) noexcept
     {
         return a == b || (a && b && *a == *b);
+    }
+
+    // Whether two channel settings describe the same recording (null is a disabled channel), watermarks aside.
+    static bool SameRecording(const std::shared_ptr<FileWriterSettings> &a,
+        const std::shared_ptr<FileWriterSettings> &b) noexcept
+    {
+        return a == b || (a && b && FileWriterSettings::SameRecording(*a, *b));
     }
 
     bool operator==(const ActionSettings &other) const noexcept

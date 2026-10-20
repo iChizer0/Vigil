@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <limits>
 #include <new>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -518,6 +519,16 @@ private:
     int _fd;
     Type _fs_type;
 };
+
+// The identity of the filesystem that holds `path`, its device number, which the in-flight budgets are keyed
+// by (docs/PLAN.md section 9). Empty when the path cannot be examined.
+inline std::optional<std::uintmax_t> FilesystemIdOf(const std::filesystem::path &path) noexcept
+{
+    struct stat st;
+    if (::stat(path.c_str(), &st) != 0)
+        return std::nullopt;
+    return static_cast<std::uintmax_t>(st.st_dev);
+}
 
 } // namespace vigil::utils
 

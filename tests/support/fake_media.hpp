@@ -44,6 +44,7 @@ struct FakeMedia
     size_t continue_checks = 0;
     bool pause_on_create = false;     // pauses media from inside the create callback, after admission
     std::function<void()> on_capture; // runs inside the image capture callback, before it returns
+    std::function<void()> on_write;   // runs inside the video frame write callback, after the count moved
 
     int creates = 0;
     int finishes = 0;
@@ -97,6 +98,8 @@ struct FakeMedia
         ++m.video_frames;
         m.last_fd = fd;
         m.active_while_writing = m.ctx->media_barrier.activeOperations();
+        if (m.on_write)
+            m.on_write();
         return m.write_result;
     }
 
@@ -121,13 +124,15 @@ struct FakeMedia
     }
 };
 
-// A writer adapter over FakeMedia with the same hooks as SlotAdaptedWriter.
+// A writer adapter over FakeMedia with the same hooks as SlotAdaptedWriter. With a settings revision it also
+// watches its channel's gate, as SlotAdaptedWriter does; without one (the writer tests) only the knobs decide.
 class FakeAdapter: public AdaptableWriter<FakeAdapter>
 {
 public:
     FakeAdapter(FakeMedia &media, Context &ctx, std::shared_ptr<FileWriterSettings> settings,
-        std::shared_ptr<WriteEvent> event)
-        : AdaptableWriter<FakeAdapter>(ctx, std::move(settings), std::move(event)), _media(media)
+        std::shared_ptr<WriteEvent> event, std::optional<size_t> settings_revision = std::nullopt)
+        : AdaptableWriter<FakeAdapter>(ctx, std::move(settings), std::move(event)), _media(media),
+          _settings_revision(settings_revision)
     {
     }
 
@@ -173,6 +178,9 @@ protected:
 
     bool shouldContinueWritingImpl() const noexcept
     {
+        if (_settings_revision
+            && !this->ctxRef().file_channels.of(this->settings().type).isOpenFor(*_settings_revision))
+            return false;
         return ++_media.continue_checks <= _media.stop_after_continue_checks
                && _media.framesWritten() < _media.stop_after_frames;
     }
@@ -184,6 +192,7 @@ protected:
 
 private:
     FakeMedia &_media;
+    std::optional<size_t> _settings_revision;
 };
 
 } // namespace vigil::tests

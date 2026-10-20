@@ -24,7 +24,8 @@ using namespace vigil::types;
 //
 //   bool stopRequested() const;                           the Slot is stopping: end the loop and any hold
 //   bool isReadyToWrite() const;                          the Slot can take a task
-//   bool hasHeadroom(const WaterMarks &);                 the quota and free-space probes (they log saturation)
+//   Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &);   the quota and free-space probes with
+//                                                                           the task's budget reserved (section 9)
 //   std::unique_ptr<W> createWriter(const std::shared_ptr<FileTask> &);   the writer of a claimed task; throws
 //                                                                           when it cannot be built
 //   void publish(CacheFileInfo &&);                       the filesystem publication and the FILE callback
@@ -33,14 +34,14 @@ using namespace vigil::types;
 //
 // The writer W runs its task to the terminal status with operator(), reports endTime(), and hands over the
 // recorded file with takePublication() (empty when nothing is published), generating its thumbnail while it
-// still holds its media operation. One task runs as claim, write (the writer finishes its sink on every path),
-// takePublication, release the writer and with it the media operation, publish outside it, then the hold: the
-// channel holds a Completed or Failed task until the interval (plus the cooldown after a failure) has elapsed
-// from the writer's start, and only then completes it, while Canceled and Interrupted (a closed gate) complete
-// at once. A constructor failure is a failed task like any other. The cooldown and the consecutive failure
-// limit, which marks the adapter failed and ends the loop, are constructor parameters with the production
-// defaults (section 13). One worker per Slot serves the enabled channel until Phase 4C-4 gives each channel its
-// own.
+// still holds its media operation. One task runs as admit, claim, write (the writer finishes its sink on every
+// path), takePublication, release the writer and with it the media operation, publish outside it, release the
+// budget reservation now that the index sees the file, then the hold: the channel holds a Completed or Failed
+// task until the interval (plus the cooldown after a failure) has elapsed from the writer's start, and only
+// then completes it, while Canceled and Interrupted (a closed gate) complete at once. A constructor failure is
+// a failed task like any other. The cooldown and the consecutive failure limit, which marks the adapter failed
+// and ends the loop, are constructor parameters with the production defaults (section 13). One worker per Slot
+// serves the enabled channel until Phase 4C-4 gives each channel its own.
 template<typename Adapter>
 class FileChannelWorker final
 {
@@ -91,7 +92,10 @@ public:
         // The single enabled file channel (docs/PLAN.md section 7.1). Nothing to write without one; a pending
         // task is retired by the rule loop, since rules cannot stay enabled without a file action (section 4.1).
         const auto channel = loaded.settings->fileChannel();
-        if (!channel || !_adapter.isReadyToWrite() || !_adapter.hasHeadroom(loaded.settings->watermarks))
+        if (!channel || !_adapter.isReadyToWrite())
+            return Step::Idle;
+        auto admission = _adapter.tryAdmit(loaded.settings->watermarks);
+        if (!admission)
             return Step::Idle;
         // The writer's admission is the linearization point of a pause (section 8.3); this cheap pre-check keeps
         // the task unclaimed.
@@ -100,14 +104,15 @@ public:
         const auto task = _ctx.file_channels.of(channel->type).claim();
         if (!task)
             return Step::Idle;
-        return runTask(task) ? Step::Ran : Step::Stop;
+        return runTask(task, std::move(admission)) ? Step::Ran : Step::Stop;
     }
 
 private:
     static inline constexpr const std::chrono::milliseconds kHoldPollInterval = std::chrono::milliseconds(10);
 
-    // Runs one claimed task through to its completion. False when the loop must end.
-    bool runTask(const std::shared_ptr<FileTask> &task) noexcept
+    // Runs one claimed task through to its completion, holding its budget reservation until its file is
+    // published. False when the loop must end.
+    bool runTask(const std::shared_ptr<FileTask> &task, Context::InFlightBudgets::Reservation admission) noexcept
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting a writer task for ", _adapter.name());
         auto status = WriteEvent::Status::Failed;
@@ -121,6 +126,7 @@ private:
             writer.reset();                               // the media operation leaves here
             if (publication)
                 _adapter.publish(std::move(*publication)); // the rename and the FILE callback run outside it
+            admission.release();                           // the index sees the file now; nothing is in flight
         }
         catch (const std::exception &e)
         {

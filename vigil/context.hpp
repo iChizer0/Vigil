@@ -19,6 +19,7 @@
 #include <thread>
 #include <tuple>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 
@@ -309,8 +310,8 @@ struct Context
     // The published action settings snapshot and its revisions (docs/PLAN.md section 7.1). The global revision
     // detects configuration-commit conflicts: `update` publishes only for a caller that saw the current one, so
     // a commit and a media refresh cannot interleave. Each file channel has its own revision, bumped only when
-    // that channel's settings change, which is what its writer watches: a change to the other channel or to
-    // Sound does not stop it.
+    // that channel's recording settings change, which is what its writer watches: a change to the other
+    // channel, to Sound, or to the watermarks (admission state, section 9) does not stop it.
     struct SharedActionSettings
     {
     public:
@@ -334,9 +335,9 @@ struct Context
                 return false;
             if (settings && *settings == *next)
                 return true;
-            if (!settings || !ActionSettings::SameSettings(settings->photo, next->photo))
+            if (!settings || !ActionSettings::SameRecording(settings->photo, next->photo))
                 photo_revision.fetch_add(1, std::memory_order_release);
-            if (!settings || !ActionSettings::SameSettings(settings->video, next->video))
+            if (!settings || !ActionSettings::SameRecording(settings->video, next->video))
                 video_revision.fetch_add(1, std::memory_order_release);
             settings = std::move(next);
             revision.store(cur + 1, std::memory_order_release);
@@ -451,6 +452,15 @@ struct Context
             const std::unique_lock lock(_mutex);
             if (expected && _current == expected)
                 retireUnsafe(status);
+        }
+
+        // The gate of a running task of this channel (docs/PLAN.md section 8.1): rules are enabled and the
+        // settings revision the task was bound to is still the current one. The writer checks the media pause
+        // and its Slot's own continuation condition besides.
+        bool isOpenFor(size_t settings_revision) const noexcept
+        {
+            return _ctx.record_rule_enabled.load(std::memory_order_relaxed)
+                   && _ctx.action_settings.channelRevision(_type) == settings_revision;
         }
 
         // Whether the channel holds a task: from acceptance until completion, through the hold.
@@ -575,6 +585,110 @@ struct Context
         mutable std::shared_mutex _mutex;
         std::shared_ptr<EventOwner> _owner;
     } mutable last_dispatched_owner;
+
+    // In-flight budgets (docs/PLAN.md section 9): the bytes that admitted tasks may still write into a
+    // filesystem, which the index does not see while the files are in a cache directory. Admission subtracts
+    // them from the free space before comparing with the critical watermark, in the same critical section as
+    // the reservation, so two admissions cannot both count the same free bytes; automatic Photo and Video and
+    // manual capture on the same filesystem share one budget. Watermarks are estimates, not reservations: the
+    // actual write errors still decide. A holder keeps its reservation for the life of its task and releases it
+    // on every terminal path.
+    struct InFlightBudgets
+    {
+    public:
+        using FilesystemId = std::uintmax_t; // the device number of the filesystem (utils::FilesystemIdOf)
+
+        // One admitted reservation, released when destroyed or released explicitly. Empty when refused.
+        class Reservation final
+        {
+        public:
+            Reservation() noexcept = default;
+
+            Reservation(Reservation &&other) noexcept
+                : _budgets(std::exchange(other._budgets, nullptr)), _filesystem(other._filesystem), _bytes(other._bytes)
+            {
+            }
+
+            Reservation &operator=(Reservation &&other) noexcept
+            {
+                if (this != &other)
+                {
+                    release();
+                    _budgets = std::exchange(other._budgets, nullptr);
+                    _filesystem = other._filesystem;
+                    _bytes = other._bytes;
+                }
+                return *this;
+            }
+
+            ~Reservation() noexcept
+            {
+                release();
+            }
+
+            explicit operator bool() const noexcept
+            {
+                return _budgets != nullptr;
+            }
+
+            FileSize bytes() const noexcept
+            {
+                return _budgets ? _bytes : 0;
+            }
+
+            void release() noexcept
+            {
+                if (const auto budgets = std::exchange(_budgets, nullptr))
+                    budgets->release(_filesystem, _bytes);
+            }
+
+        private:
+            friend InFlightBudgets;
+
+            Reservation(InFlightBudgets &budgets, FilesystemId filesystem, FileSize bytes) noexcept
+                : _budgets(&budgets), _filesystem(filesystem), _bytes(bytes)
+            {
+            }
+
+            InFlightBudgets *_budgets = nullptr;
+            FilesystemId _filesystem = 0;
+            FileSize _bytes = 0;
+        };
+
+        // Admits a task that may write `bytes` to `filesystem` when `free_bytes`, minus what admitted tasks may
+        // still write there, exceed `critical_remain_bytes`, and reserves its bytes in the same critical
+        // section. Empty when refused.
+        Reservation tryReserve(FilesystemId filesystem, FileSize bytes, FileSize free_bytes,
+            FileSize critical_remain_bytes) noexcept
+        {
+            const std::lock_guard lock(_mutex);
+            const auto it = _bytes.find(filesystem);
+            const FileSize in_flight = it != _bytes.end() ? it->second : 0;
+            if (free_bytes - in_flight <= critical_remain_bytes)
+                return {};
+            _bytes[filesystem] += bytes;
+            return Reservation(*this, filesystem, bytes);
+        }
+
+        // What admitted tasks may still write to `filesystem`.
+        FileSize inFlight(FilesystemId filesystem) const noexcept
+        {
+            const std::lock_guard lock(_mutex);
+            const auto it = _bytes.find(filesystem);
+            return it != _bytes.end() ? it->second : 0;
+        }
+
+    private:
+        void release(FilesystemId filesystem, FileSize bytes) noexcept
+        {
+            const std::lock_guard lock(_mutex);
+            if (const auto it = _bytes.find(filesystem); it != _bytes.end() && (it->second -= bytes) <= 0)
+                _bytes.erase(it);
+        }
+
+        mutable std::mutex _mutex;
+        std::unordered_map<FilesystemId, FileSize> _bytes;
+    } in_flight_budgets;
 
     // Shared video/audio frame buffers
     template<size_t PeriodLimit>

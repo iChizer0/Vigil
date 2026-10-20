@@ -26,12 +26,14 @@
 #include "index_manager.hpp"
 #include "log.hpp"
 #include "types.hpp"
+#include "utils.hpp"
 
 namespace vigil::writers {
 
 using namespace vigil::constants;
 using namespace vigil::types;
 using namespace vigil::index_manager;
+using namespace vigil::utils;
 
 namespace detail {
 
@@ -211,13 +213,13 @@ protected:
         return false;
     }
 
-    // The writer stops when rules are disabled, when its own file channel's settings change (a change to the
-    // other channel or to Sound does not stop it; docs/PLAN.md section 7.1), or when the Slot stops being ready.
+    // The writer stops when its channel's gate closes (rules disabled, or its own channel's recording settings
+    // changed: a change to the other channel, to Sound, or to the watermarks does not stop it; docs/PLAN.md
+    // sections 7.1 and 9) or when the Slot can no longer carry its task.
     inline bool shouldContinueWritingImpl() const noexcept
     {
-        return this->ctxRef().record_rule_enabled.load(std::memory_order_relaxed)
-               && this->ctxRef().action_settings.channelRevision(this->settings().type) == _settings_revision
-               && _slot.isReadyToWrite();
+        return this->ctxRef().file_channels.of(this->settings().type).isOpenFor(_settings_revision)
+               && _slot.canContinue(this->settings().watermarks);
     }
 
     inline void onThumbnailFrameImpl(const MediaFrame::FrameType &frame) noexcept
@@ -274,7 +276,7 @@ public:
     CaptureAdaptedWriter(T &capture, std::shared_ptr<CaptureEvent> event, Args &&...args)
         : AdaptableWriter<CaptureAdaptedWriter<T>>(std::forward<Args>(args)...), _capture(capture),
           _event(std::move(event)), _output_file_path(), _output_cache_path(),
-          _last_stats_time(std::chrono::steady_clock::time_point::min())
+          _last_stats_time(std::chrono::steady_clock::now()), _reservation()
     {
         if (!_event)
             throw Exception("CaptureAdaptedWriter initialized with null event");
@@ -285,7 +287,9 @@ public:
             throw Exception("CaptureAdaptedWriter initialized with empty output file name");
         }
 
-        if (!isRemainSpaceEnough())
+        // Admission against the shared in-flight budget of the output filesystem (docs/PLAN.md section 9); the
+        // reservation is held until this writer is destroyed, after the rename.
+        if (!(_reservation = reserveBudget()))
         {
             this->setEventStatus(WriteEvent::Status::Failed);
             throw Exception("CaptureAdaptedWriter detected insufficient remaining space");
@@ -364,6 +368,39 @@ protected:
     inline void onThumbnailFrameImpl(const MediaFrame::FrameType &) noexcept { }
 
 private:
+    // The output filesystem's free space, minus what admitted tasks may still write there, must exceed this
+    // capture's critical watermark; its own bytes are reserved in the same critical section.
+    Context::InFlightBudgets::Reservation reserveBudget() const noexcept
+    {
+        struct statvfs stat;
+        if (const auto ret = ::statvfs(_event->output_directory.c_str(), &stat); ret != 0)
+        {
+            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                "CaptureAdaptedWriter failed to get filesystem stats for path: ", _event->output_directory,
+                ", code: ", ret);
+            return {};
+        }
+        const auto filesystem = FilesystemIdOf(_event->output_directory);
+        if (!filesystem)
+        {
+            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                "CaptureAdaptedWriter failed to identify the filesystem of path: ", _event->output_directory);
+            return {};
+        }
+        const FileSize free_bytes = stat.f_bavail * stat.f_frsize;
+        const auto &watermarks = this->settings().watermarks;
+        auto &budgets = this->ctxRef().in_flight_budgets;
+        auto reservation
+            = budgets.tryReserve(*filesystem, watermarks.task_bytes, free_bytes, watermarks.critical_remain_bytes);
+        if (!reservation)
+            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                "CaptureAdaptedWriter detected insufficient remaining space for path: ", _event->output_directory,
+                ", free bytes: ", free_bytes, ", in flight: ", budgets.inFlight(*filesystem),
+                ", required bytes: ", watermarks.critical_remain_bytes);
+        return reservation;
+    }
+
+    // The running capture's own continuation check against its own critical watermark, once per batch period.
     bool isRemainSpaceEnough() const noexcept
     {
         if (auto now = std::chrono::steady_clock::now();
@@ -400,6 +437,7 @@ private:
     std::filesystem::path _output_file_path;
     std::filesystem::path _output_cache_path;
     mutable std::chrono::steady_clock::time_point _last_stats_time;
+    Context::InFlightBudgets::Reservation _reservation;
 };
 
 // - MARK: Image Writer
