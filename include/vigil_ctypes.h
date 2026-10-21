@@ -327,8 +327,9 @@ typedef struct vg_config_storage_t
                                          is mounted at the path and removes what the directory holds. */
     const char *data_directory_path;  /**< Data storage root relative to a mount point, e.g. DCIM, no leading '/';
                                          DCIM when null or invalid. */
-    const char *relay_directory_path; /**< Filesystem path to the nginx relay directory for Vigil relay data; null
-                                         disables the relay. */
+    const char *relay_directory_path; /**< Filesystem path to the nginx relay directory for Vigil relay data, a
+                                         directory reserved for Vigil: it is removed with what it holds at init and
+                                         created again on a relay request; null disables the relay. */
 } vg_config_storage_t;
 
 typedef struct vg_config_t
