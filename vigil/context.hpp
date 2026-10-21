@@ -487,12 +487,17 @@ struct Context
             return _current;
         }
 
-        // Cancels the pending task unless a worker has claimed it. A claimed task belongs to its worker, which
-        // interrupts itself when a gate closes and completes the task.
-        void cancelPending() noexcept
+        // Cancels the pending task unless a worker has claimed it, or it is bound to `kept_revision`: a commit
+        // passes the channel revision it published, since a dispatcher may accept a task under the new settings
+        // between the publish and this cancel, and that task is the new settings' own (docs/PLAN.md section
+        // 7.1); teardown passes nothing and cancels whatever is pending, as no task is bound to revision 0 (the
+        // first publish bumps both channel revisions, and a task is accepted from a published snapshot only). A
+        // claimed task belongs to its worker, which interrupts itself when a gate closes and completes the task.
+        void cancelPending(size_t kept_revision = 0) noexcept
         {
             const std::unique_lock lock(_mutex);
-            if (_current && _current->event->status.load(std::memory_order_acquire) == WriteEvent::Status::Pending)
+            if (_current && _current->event->status.load(std::memory_order_acquire) == WriteEvent::Status::Pending
+                && _current->settings_revision != kept_revision)
                 retireUnsafe(WriteEvent::Status::Canceled);
         }
 

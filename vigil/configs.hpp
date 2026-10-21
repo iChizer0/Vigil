@@ -680,19 +680,20 @@ struct RecordConfig
     // flag. Returns EAGAIN, with nothing applied, when the snapshot changed since it was prepared (a media
     // refresh or another commit); the caller prepares again and retries. A file channel whose settings changed
     // cancels its pending task, which was bound to the old ones, after the publish and outside the settings
-    // mutex (docs/PLAN.md section 7.1); its running task finalizes on its own revision check, as today. A
-    // Video mode switch is such a change (section 8.2): the pending task of the old mode, of either kind, is
-    // canceled. A disabled Sound cancels a pending trigger; a playing one finishes (section 7.3).
+    // mutex (docs/PLAN.md section 7.1), keeping one accepted under the new ones in between; its running task
+    // finalizes on its own revision check, as today. A Video mode switch is such a change (section 8.2): the
+    // pending task of the old mode, of either kind, is canceled. A disabled Sound cancels a pending trigger; a
+    // playing one finishes (section 7.3).
     vg_sta_e sync(Context &ctx, const Prepared &prepared) const noexcept
     {
         const auto before = ctx.action_settings.get(); // the channel revisions under the base revision
         if (!ctx.action_settings.update(prepared.base_revision, prepared.settings))
             return EAGAIN;
         ctx.record_rule_enabled.store(rule_enabled, std::memory_order_release);
-        if (ctx.action_settings.channelRevision(CaptureType::Image) != before.photo_revision)
-            ctx.file_channels.photo.cancelPending();
-        if (ctx.action_settings.channelRevision(CaptureType::Video) != before.video_revision)
-            ctx.file_channels.video.cancelPending();
+        if (const auto rev = ctx.action_settings.channelRevision(CaptureType::Image); rev != before.photo_revision)
+            ctx.file_channels.photo.cancelPending(rev);
+        if (const auto rev = ctx.action_settings.channelRevision(CaptureType::Video); rev != before.video_revision)
+            ctx.file_channels.video.cancelPending(rev);
         if (!sound.enabled)
             ctx.sound_executor.cancelPending();
         return 0;
