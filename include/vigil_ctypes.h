@@ -307,12 +307,11 @@ typedef struct vg_config_storage_t
                          eject, format, or configure that Slot from it, nor call vg_service_deinit: it may run on
                          the Slot's own manager thread, which an eject or deinit would join, and a format or a
                          configuration change would deadlock with a concurrent disable of the Slot. */
-    void (*on_unmount_cb)(const char *dev, const char *mount_path); /**< Optional. Called from the destructor of a
-                         Slot other than the internal one, before it is unmounted, on whichever thread releases the
-                         last reference to it: the storage thread, an HTTP request's or the async task worker's (an
-                         eject, a file operation), deinit, or any thread whose storage status read held the Slot
-                         when it was removed or ejected, a callback's included; with Vigil's Slot locks held: return
-                         promptly and do not call the C API from it. */
+    void (*on_unmount_cb)(const char *dev, const char *mount_path); /**< Optional. Called before a Slot other than
+                         the internal one is unmounted, with Vigil's Slot locks held: on the storage thread when the
+                         device was removed, on the thread of the EJECT request (the async task worker's for an async
+                         one), or on the thread of vg_service_deinit. Return promptly and do not call the C API from
+                         it. */
     bool (*is_hidden_device_cb)(const char *dev); /**< Optional (nothing is hidden without it). Whether the block
                                                     device of that bare name (e.g. mmcblk0p1) is kept out of storage
                                                     management; its answer is ignored for internal_device_path. */

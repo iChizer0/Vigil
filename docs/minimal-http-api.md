@@ -99,15 +99,14 @@ action intervals, and the 10 ms rule evaluation and 50 ms worker probe periods b
 target, verified with fake callbacks on a development host: real-device latency, callback duration, and the gap
 between clips depend on the host's media pipeline and storage and are the integration's to measure.
 Two more premises of the host: storage calls on the slot's filesystem (the free-space probe at each admission, which
-runs on the rule thread and on an HTTP activation's thread, the directory creation and the rename at publication, on
-the slot's workers, and the filesystem sync before a slot is disabled or unmounted, on the thread of the switch, the
-eject, or the removal) return promptly, since a hanging device stalls those threads; and the host's video sink admits
-the files Vigil
-creates, because a host with a single video sink fails the second create, which counts like any other failure: a
+runs on the rule thread and on an HTTP activation's thread, the directory creation and the rename at publication, on the
+slot's workers, and the filesystem sync at a disable or before an unmount, on the thread of the switch, the eject, or
+the removal) return promptly, since a hanging device stalls those threads; and the host's video sink admits the files
+Vigil creates, because a host with a single video sink fails the second create, which counts like any other failure: a
 manual video capture that overlaps continuous recording fails the automatic clips meanwhile, and ten such failures take
 about 30 seconds (one 3-second cooldown each) to reach the limit above. Video frames must carry a key frame at least
-every 10 seconds, the buffer period: a clip's first and closing key frame are waited for at most that long, and a
-longer GOP cancels clips or ends them without a boundary.
+every 10 seconds, the buffer period: a clip's first and closing key frame are waited for at most that long, and a longer
+GOP cancels clips or ends them without a boundary.
 
 ### Rule Info
 
@@ -599,6 +598,7 @@ The payload depends on the `sTask` field.
 Runtime notes:
 
 - `FORMAT` and `EJECT` are cancelable only while queued, formatting is only allowed on state is `NOT_FORMATTED_OR_FORMAT_UNSUPPORTED` or `NOT_MOUNTED`.
+- `EJECT` answers after the slot is disabled, its filesystem synced and the unmount attempted (a sync or unmount failure is logged, not reported), and the slot dropped from the storage status (since 2026-10-21; before, the unmount followed on the thread of whichever request released the slot last); a device pulled and re-inserted while the eject runs comes back as a new slot, which the status lists after the answer. A `FREE_UP` or `REMOVE_FILES_OR_DIRECTORIES` of that slot that is still running holds its filesystem, so the unmount only detaches it until that request returns: let such a request finish, or cancel it, before ejecting.
 - `FREE_UP` and `REMOVE_FILES_OR_DIRECTORIES` are also cancelable while running.
 - Accepted cancellations may still report `sStatus: "CANCEL_REQUESTED"`; the final `CANCELED` state is visible through a later `ASYNC_STATUS` request.
 - Only one async task runs globally.

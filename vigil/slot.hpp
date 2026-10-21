@@ -94,7 +94,7 @@ public:
         : _ctx(ctx), _dev_path(std::move(dev_path)), _mount_path(std::move(mount_path)), _removable(removable),
           _internal(internal), _data_dir_path(std::move(data_dir_path)), _info_mutex(), _label(), _uuid(), _type(),
           _mutex(), _op_mutex(), _enabled(false), _failure(false), _stop_token(false), _on_destruction(false),
-          _manager_thread(nullptr), _photo_worker_thread(nullptr), _video_worker_thread(nullptr),
+          _dropped(false), _manager_thread(nullptr), _photo_worker_thread(nullptr), _video_worker_thread(nullptr),
           _state(SlotState::NotFormattedOrFormatUnsupported), _fsck(FSCK::Result::ErrorUnknown), _stats(),
           _quota_limit_bytes(-1), _quota_rotate(true), _index_manager(nullptr), _writer_task_count(0), _rotating(false),
           _write_stats(), _relay(ctx, _mount_path / _data_dir_path)
@@ -117,7 +117,8 @@ public:
         }
         const std::unique_lock lock(_mutex);
         disableInternal();
-        ensureStateForceUnmounted();
+        if (!_dropped) // a Slot dropped from the storage map was unmounted there (drop)
+            ensureStateForceUnmounted();
     }
 
     const std::filesystem::path &devPath() const noexcept
@@ -288,6 +289,8 @@ public:
         const std::unique_lock lock(_mutex);
         if (_state.load() == SlotState::Formatting)
             return EBUSY;
+        if (_dropped) // it left the storage map (drop); a copy of the map taken before may still name it
+            return ECANCELED;
 
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Enabling storage slot for device path ", _dev_path);
 
@@ -333,8 +336,31 @@ public:
         const std::unique_lock lock(_mutex);
         if (_state.load() == SlotState::Formatting)
             return EBUSY;
+        if (_dropped) // disabled and unmounted already (drop); a switch may hold a copy of the map that names it
+            return 0;
         disableInternal();
         doFsync();
+        return 0;
+    }
+
+    // Disables the Slot and unmounts its device, for a Slot that leaves the storage map (Storage::ejectSlot and
+    // Storage::removeSlot): the unmount, which syncs first and runs on_unmount_cb, happens here, under the Slot's
+    // mutex and on the dropping thread, before the map lets the Slot go, rather than in the destructor on whichever
+    // thread drops the last reference (a storage status copy, a file operation), which could be after a new Slot
+    // for the same device had mounted it at the same path. The destructor unmounts only a Slot that was not
+    // dropped: one that deinit destroys, or one that never entered the map. A dropped Slot is never enabled again.
+    // The internal Slot is not unmounted, as before; a deselected Slot keeps its mount (disable). The drop runs
+    // once: of an eject and a removal that race, the second finds the Slot dropped.
+    vg_sta_e drop() noexcept
+    {
+        const std::unique_lock lock(_mutex);
+        if (_state.load() == SlotState::Formatting)
+            return EBUSY;
+        if (_dropped)
+            return 0;
+        disableInternal();
+        ensureStateForceUnmounted();
+        _dropped = true;
         return 0;
     }
 
@@ -1242,10 +1268,10 @@ private:
         return true;
     }
 
-    // Syncs the filesystem mounted at the mount path (syncfs), before a disable and before an unmount. The path is
-    // opened read-only: a directory cannot be opened for writing (EISDIR), which left this sync unrun from
-    // 2026-05-29 to 2026-10-21, so a busy eject, whose unmount can only detach, answered with the last files still
-    // in the page cache.
+    // Syncs the filesystem mounted at the mount path (syncfs), at a disable (a switch) and before an unmount (an
+    // eject, a removal, deinit). The path is opened read-only: a directory cannot be opened for writing (EISDIR),
+    // which left this sync unrun from 2026-05-29 to 2026-10-21, so a busy eject, whose unmount can only detach,
+    // answered with the last files still in the page cache.
     bool doFsync() const noexcept
     {
         const auto fd = ::open(_mount_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -1288,7 +1314,8 @@ private:
         }
         {
             std::error_code ec;
-            std::filesystem::remove_all(_mount_path, ec);
+            std::filesystem::remove(_mount_path, ec); // empty once unmounted; a mount that landed there meanwhile
+                                                      // (a new Slot's, for the same device) is left alone
             if (ec)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove mount path ", _mount_path,
@@ -1843,6 +1870,7 @@ private:
     // Stop token for the manager and worker threads
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _stop_token;
     mutable std::atomic<bool> _on_destruction;
+    bool _dropped; // the drop unmounted the Slot (eject, removal); under _mutex
 
     // The manager thread and one channel worker thread per file channel (docs/PLAN.md section 7.2)
     std::unique_ptr<std::thread> _manager_thread;

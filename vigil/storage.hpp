@@ -129,15 +129,25 @@ public:
         }
         if (!slot || slot->isInternal())
             return ENOTSUP;
-        if (const auto ret = slot->disable(); ret != 0)
+        // Disabled and unmounted here, on this thread, before the map lets the Slot go (Slot::drop), so the answer
+        // follows the unmount. A request that still holds the Slot (a free-up, a removal of files) keeps its
+        // filesystem busy, so the unmount can only detach it until that request returns (docs/minimal-http-api.md,
+        // Storage Control).
+        if (const auto ret = slot->drop(); ret != 0)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to disable storage slot with device path ", slot->devPath(),
                 ", code: ", ret);
             return ret;
         }
         {
+            // Its own entry only: a removal (the device pulled during the eject) may have dropped this Slot before
+            // or after the drop above, erased its entry, and the same pass may have built a replacement for the
+            // re-added device under the same key by now, which is not this eject's to let go: erased undropped, its
+            // destructor would unmount the present device. removeSlot needs no such check: only the storage thread
+            // inserts, and it runs there.
             const std::unique_lock slots_lock(_slots_mutex);
-            _slots.erase(slot->devPath().string());
+            if (const auto it = _slots.find(slot->devPath().string()); it != _slots.end() && it->second == slot)
+                _slots.erase(it);
         }
         return 0;
     }
@@ -491,15 +501,17 @@ private:
         }
     }
 
-    // Drops the Slot of a device that was removed: disabled first, outside `_slots_mutex`, as ejectSlot does.
-    // The disable closes the Slot's admission and joins its threads (docs/PLAN.md section 9) before the map's
-    // reference goes, so that no later release destroys a running Slot: a copy of the map taken by getStatus, on
-    // a FILE callback for instance, may hold the last reference, and a Slot destroyed on its own worker would
-    // join itself. It also cancels the pending tasks bound to the Slot before syncEnabledSlotWithConfig, on this
-    // thread, enables a replacement, which keeps one admission registered at a time
-    // (Context::SlotAdmissionRegistry::open). The device is gone, so the Slot is dropped whatever `disable`
-    // returns; it refuses only a Slot being formatted, which holds the Slot's mutex through the format, so the
-    // warning below is for symmetry with ejectSlot.
+    // Drops the Slot of a device that was removed: disabled and unmounted first, outside `_slots_mutex`, as
+    // ejectSlot does (Slot::drop). The disable closes the Slot's admission and joins its threads (docs/PLAN.md
+    // section 9) before the map's reference goes, so that no later release destroys a running Slot: a copy of the
+    // map taken by getStatus, on a FILE callback for instance, may hold the last reference, and a Slot destroyed on
+    // its own worker would join itself. It also cancels the pending tasks bound to the Slot before
+    // syncEnabledSlotWithConfig, on this thread, enables a replacement, which keeps one admission registered at a
+    // time (Context::SlotAdmissionRegistry::open). The unmount runs here too, so that a late holder's release
+    // unmounts nothing: the pass below may build a new Slot for the same device, at the same mount path, before
+    // that release. The device is gone, so the Slot is dropped whatever `drop` returns; it refuses only a Slot
+    // being formatted, which holds the Slot's mutex through the format, so the warning below is for symmetry with
+    // ejectSlot.
     void removeSlot(const std::string &dev_path) noexcept
     {
         std::shared_ptr<Slot> slot;
@@ -510,7 +522,7 @@ private:
         }
         if (!slot)
             return;
-        if (const auto ret = slot->disable(); ret != 0)
+        if (const auto ret = slot->drop(); ret != 0)
             VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to disable storage slot with device path ", dev_path,
                 ", code: ", ret);
         {
