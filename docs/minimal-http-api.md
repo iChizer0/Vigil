@@ -379,7 +379,7 @@ Notes:
 - Returns error `EBUSY` if a file action is enabled and the storage system is not ready for writing; a rule-only or Sound-only activation needs no storage.
 - Returns error `EBUSY` if a file action is enabled and no file channel accepted the event: every enabled channel still holds a task (through the interval after its start, plus the cooldown after a failed one), the slot has no headroom for it or turned unusable after the precheck, or a commit changed the settings meanwhile; the event is still reported and Sound is triggered. A gate that closed after the precheck (the rule flag, the schedule, or the media pause, which the precheck does not read) answers `EBUSY` as well, and refuses Sound too.
 - A refused activation leaves no pending event behind: the next activation is admitted afresh (since 2026-10-19).
-- A Sound-only activation answers 0 once its owner is dispatched, also when the Sound trigger was dropped because one was pending or playing, or because the media pause, which the precheck does not read, refused it.
+- A Sound-only activation answers 0 once its owner is dispatched, also when the Sound trigger was dropped because one was pending or playing, because the media pause, which the precheck does not read, refused it, or because a tick of the rule loop that had read rules as disabled canceled it after a commit enabled them (the tick's Sound cancel does not reread the flag; its file cancel does).
 
 ## Storage API
 
