@@ -41,7 +41,19 @@ The phases are those of `docs/PLAN.md` section 11; the identifiers are the rows 
 | `134df6b` | 5B-3b | A callback on the thread of a C API call may call the C API; init and deinit return EDEADLK there. | API-3, SAFE-3 |
 | `bd74891` | 5B-4 | The README option list, the architecture graph checked against the code, the capability limits. | API-4, API-5 |
 | `6195994` | 5B-5a | Manual capture pinned through the real endpoint; a capture into a new directory, a failed capture's file, and a double completion fixed. | TEST-4, SAFE-5, SAFE-7 |
-| this commit | 5B-5b | Fresh standalone builds, the Timer pacing case, the evidence pass over the open rows, this document. | ENG-1 to ENG-4, ENG-6, RULE-1, RULE-2, RULE-6, RULE-7, EVT-4, ACT-3, ACT-4, GATE-1, SAFE-5, TEST-1, TEST-3, TEST-5 to TEST-9 |
+| `bb8ff42` | 5B-5b | Fresh standalone builds, the Timer pacing case, the evidence pass over the open rows, this document. | ENG-1 to ENG-4, ENG-6, RULE-1, RULE-2, RULE-6, RULE-7, EVT-4, ACT-3, ACT-4, GATE-1, SAFE-5, TEST-1, TEST-3, TEST-5 to TEST-9 |
+| `66322fb` | review | Hot-unplug: `Storage::removeSlot` disables a removed Slot before the map drops it; the registry's one-registration premise stated; `tests/test_storage.cpp` begun. | SAFE-8 |
+| `9c07970` | review | A commit keeps a task accepted under the settings it published (`FileChannel::cancelPending(kept_revision)`); every valid schedule POST is stored; the concurrent-POST stress case retired. | ACT-4, CFG-6, CFG-7, TEST-5 |
+| `a18c009` | review | A failed Slot refuses admission at once and cancels its pending tasks, the worker marking before it completes; a writer that cannot be built releases its reservation; the budgets declared before the channels; `HTTPRule::tryActivate` removed. | ACT-1, SAFE-7 |
+| `ef31cba` | review | The callback rule and the host premises on the headers (versions `2026.10.21`); the API document, the graph, the plan, the TODO rows, and this package corrected. | API-3, with notes on RULE-1, RULE-2, EVT-1, EVT-3, EVT-4, EVT-7, CFG-4, ACT-2, ACT-3, ACT-5, GATE-1, SAFE-5 to SAFE-8, TEST-6 |
+| `aa2b934` | review | A device that bounces within one netlink pass gets a new Slot; the pass pinned over a socket pair. | SAFE-8 |
+| `ee7c140` | review | `Slot::doFsync` opens the mount path read-only, so the sync before a disable or an unmount runs. | SAFE-8 |
+| `a634156` | review | `Slot::drop`: an ejected or removed Slot is unmounted at the drop, on that thread, once; an eject erases only the Slot it dropped; `on_unmount_cb`'s threads and the EJECT note restated. | SAFE-8, API-3 |
+| `9d934ba` | review | A selector that matches several Slots enables one, the one already enabled. | SAFE-8 |
+| `ad6d7e7` | review | The tick's cancel of a pending triggered task rereads the rule flag under the channel lock. | GATE-1 |
+| `d2ce3cc` | review | The manager's give-up cancels the pending tasks bound to the Slot. | ACT-1 |
+| `74d7213` | review | An add of the internal device's node rebuilds the internal Slot. | SAFE-8 |
+| this commit | review | The relay directory premise on the header; the example off `/tmp`; this package, the plan's build record, and TEST-8 brought up to the series. | API-3, TEST-8 |
 
 ## 2. Interfaces, documents, versions, fixtures, examples
 
@@ -88,7 +100,18 @@ done
 | TSan, allocator off | exit 0, 10 s | 0 | 12 | 143 passed, 0 failed | 0 | exit 0 |
 | jemalloc on | exit 0, 53 s | 0 | 12 | 143 passed, 0 failed | none expected | exit 0 |
 
-The twelve executables and their cases: inference rules 12, schedule rule 7, context 21, record configuration 16, rule endpoint 31, writers 6, C API 9, index manager helpers 3, peripheral rules 11, sound executor 10, channel worker 12, capture endpoint 5. Every earlier unit ran the same four configurations incrementally (the `/root/build/<unit>-matrix.sh` scripts; the counts per unit are in `docs/PLAN.md` section 12.1 and the commit messages).
+The twelve executables and their cases at `bb8ff42`: inference rules 12, schedule rule 7, context 21, record configuration 16, rule endpoint 31, writers 6, C API 9, index manager helpers 3, peripheral rules 11, sound executor 10, channel worker 12, capture endpoint 5. Every earlier unit ran the same four configurations incrementally (the `/root/build/<unit>-matrix.sh` scripts; the counts per unit are in `docs/PLAN.md` section 12.1 and the commit messages).
+
+Since the code review fixes of 2026-10-21 (the twelve commits after `bb8ff42`, section 1) there are thirteen executables with 154 cases: record configuration 18, storage 9 (`vigil_test_storage`, over no device, with the storage manager thread not started and a socket pair in place of the uevent socket), the rest as above. Each fix commit ran Debug, ASan/UBSan, and TSan incrementally (`/root/build/review/{debug,asan,tsan}`; the counts per commit are in the commit messages), and the final branch ran all four, jemalloc on from an empty directory (`/root/build/review/jemalloc`, the recipe above) and the demo from a Debug tree with examples on (`/root/build/review/debug-ex`):
+
+| Configuration | Configure and build (7 jobs) | Warnings | Discovered | Cases | Sanitizer reports | Demo |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Debug, allocator off (incremental) | exit 0, 10 s | 0 | 13 | 154 passed, 0 failed | none expected | exit 0 (`debug-ex`) |
+| ASan/UBSan, allocator off (incremental) | exit 0, 17 s | 0 | 13 | 154 passed, 0 failed | 0 | not run |
+| TSan, allocator off (incremental) | exit 0, 10 s | 0 | 13 | 154 passed, 0 failed | 0 | not run |
+| jemalloc on (fresh) | exit 0, 54 s | 0 | 13 | 154 passed, 0 failed | none expected | exit 0 |
+
+`/mnt` was empty and nothing was mounted after each run.
 
 ### 3.2 What the tests exercise and what they inject
 
@@ -150,6 +173,7 @@ Each is pinned with a test and dated in `docs/PLAN.md`; the default of the plan 
 - **The manual capture output check is lexical**: the path must start with `/mnt` or the configured internal mount point as strings.
 - **`doMount` detaches and clears an existing mount path**, the internal mount point included.
 - **A Slot in `ERROR` does not recover on its own** (the manager thread exits), see above.
+- **A task admitted just before its Slot turns `SATURATED` waits for `READY`** (by reading, `Slot::isReadyToWrite` and `FileChannelWorker::step`): the worker claims only while the Slot is `READY`, so a task admitted within the manager's 500 ms poll before the state flips stays pending with its reservation and the channel reports `PENDING`. With rotation on the state returns within about a second and the task runs; with rotation off, or nothing left to rotate, it waits until a person frees space or changes the quota, and then runs for its old event. Found by the review pass of 2026-10-21 and kept: the series cancels the pending tasks of the `ERROR` states, which never return on their own, while this one returns with space.
 - **No fake steady clock**: the ALWAYS_ON and Timer pacing cases wait for the context's time in real time (a fraction of a second and about three seconds) with bounded loops.
 - **`vigil_test_capture_endpoint` needs more than 532 MiB free** on the temporary directory's filesystem, the critical watermark of one image.
 - **The C ABI changed** with the two appended fields: rebuild the library and every caller together; version strings do not make old binaries compatible.

@@ -185,10 +185,12 @@ int main()
     config.media.sound_play_cb = sound_play_cb;
 
     // Storage
+    // The mount point and the relay directory are reserved for Vigil, which empties them: the mount point before
+    // it mounts the device (here derived from the device name, under /mnt), the relay directory at init.
     config.storage.internal_device_path = "/dev/null";
-    config.storage.internal_mount_point = "/tmp";
+    config.storage.internal_mount_point = nullptr;
     config.storage.data_directory_path = "data";
-    config.storage.relay_directory_path = "relay";
+    config.storage.relay_directory_path = "/tmp/vigil-example-relay";
     config.storage.on_mount_cb = on_mount_cb;
     config.storage.on_unmount_cb = on_unmount_cb;
     config.storage.is_hidden_device_cb = is_hidden_device_cb;
