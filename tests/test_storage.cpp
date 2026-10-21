@@ -9,6 +9,8 @@
 // bound to it is pinned by `closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_serve_both_channels_at_once`
 // (`tests/test_channel_worker.cpp`), and a Slot made READY by hand pins what the failure mark does.
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -45,6 +47,14 @@ struct StorageTestAccess
     {
         const std::unique_lock lock(storage._slots_mutex);
         storage._slots.emplace(slot->devPath().string(), slot);
+    }
+
+    // The entry for `slot`'s device replaced with `slot`: what the netlink pass leaves once a removal erased the old
+    // Slot and the pass built a new one for the re-added device under the same key.
+    static void replace(Storage &storage, const std::shared_ptr<Slot> &slot)
+    {
+        const std::unique_lock lock(storage._slots_mutex);
+        storage._slots[slot->devPath().string()] = slot;
     }
 
     static bool holds(const Storage &storage, const std::string &dev_path)
@@ -164,6 +174,132 @@ private:
     }
 };
 
+// Waits for `pred` with a bound, yielding: a case's barrier, never a sleep as evidence.
+template<typename Pred>
+bool WaitFor(const Pred &pred)
+{
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!pred())
+    {
+        if (std::chrono::steady_clock::now() > deadline)
+            return false;
+        std::this_thread::yield();
+    }
+    return true;
+}
+
+// The unmount callbacks of one case: how many, the last one's thread and mount path; and, when a case armed it, a
+// hold inside the next callback until the case releases it, which keeps the caller at a fixed point inside
+// Slot::drop with the Slot's locks taken: the hold a test has on an eject between its lookup and its erase.
+struct UnmountRecorder
+{
+    static void callback(const char *, const char *mount_path)
+    {
+        {
+            const std::lock_guard lock(mutex());
+            ++count_();
+            thread_() = std::this_thread::get_id();
+            mount_() = mount_path ? mount_path : "";
+        }
+        if (hold_next_().exchange(false))
+        {
+            held_() = true;
+            while (!release_().load())
+                std::this_thread::yield();
+        }
+    }
+
+    static void clear()
+    {
+        const std::lock_guard lock(mutex());
+        count_() = 0;
+        thread_() = std::thread::id();
+        mount_().clear();
+        hold_next_() = false;
+        held_() = false;
+        release_() = false;
+    }
+
+    // Arms the hold for the next callback.
+    static void armHold()
+    {
+        hold_next_() = true;
+    }
+
+    // Whether a callback is inside its hold.
+    static bool held()
+    {
+        return held_().load();
+    }
+
+    // Lets the held callback return.
+    static void release()
+    {
+        release_() = true;
+    }
+
+    static int count()
+    {
+        const std::lock_guard lock(mutex());
+        return count_();
+    }
+
+    static std::thread::id thread()
+    {
+        const std::lock_guard lock(mutex());
+        return thread_();
+    }
+
+    static std::string mount()
+    {
+        const std::lock_guard lock(mutex());
+        return mount_();
+    }
+
+private:
+    static std::mutex &mutex()
+    {
+        static std::mutex m;
+        return m;
+    }
+
+    static int &count_()
+    {
+        static int n = 0;
+        return n;
+    }
+
+    static std::thread::id &thread_()
+    {
+        static std::thread::id id;
+        return id;
+    }
+
+    static std::string &mount_()
+    {
+        static std::string s;
+        return s;
+    }
+
+    static std::atomic<bool> &hold_next_()
+    {
+        static std::atomic<bool> b = false;
+        return b;
+    }
+
+    static std::atomic<bool> &held_()
+    {
+        static std::atomic<bool> b = false;
+        return b;
+    }
+
+    static std::atomic<bool> &release_()
+    {
+        static std::atomic<bool> b = false;
+        return b;
+    }
+};
+
 struct Fixture
 {
     std::string root;
@@ -172,13 +308,16 @@ struct Fixture
     vg_config_t config;
     std::shared_ptr<Context> ctx;
 
-    // `log_cb` replaces the fake configuration's logging callback when given.
-    explicit Fixture(vg_sta_e (*log_cb)(vg_log_level_e, const char *, size_t) = nullptr)
+    // `log_cb` replaces the fake configuration's logging callback when given, and `on_unmount_cb` is the storage
+    // callback of that name, null in the fake configuration.
+    explicit Fixture(vg_sta_e (*log_cb)(vg_log_level_e, const char *, size_t) = nullptr,
+        void (*on_unmount_cb)(const char *, const char *) = nullptr)
         : root(MakeTempDir()), dev(root + "/no-such-dev"), mount(root + "/no-such-mnt"),
           config(MakeFakeConfig(root.c_str()))
     {
         if (log_cb)
             config.basic.log_cb = log_cb;
+        config.storage.on_unmount_cb = on_unmount_cb;
         ctx = std::make_shared<Context>(config);
     }
 
@@ -350,10 +489,99 @@ VG_TEST_CASE(a_failed_slot_refuses_admission_at_once_and_cancels_what_it_admitte
     VG_CHECK_EQ(slot->registration(), registration);
 }
 
+VG_TEST_CASE(an_eject_or_a_removal_unmounts_the_slot_on_its_own_thread_before_the_map_lets_it_go)
+{
+    // Slot::drop, which an eject and a removal run: the Slot is disabled and unmounted, on_unmount_cb included, on
+    // the dropping thread and before the map's reference goes, so that a holder which lets go later (a storage
+    // status copy, a file operation) unmounts nothing, which by then could be a new Slot's mount of the same device
+    // at the same path; a dropped Slot is never enabled again. Over no device the unmount itself fails, since
+    // nothing is mounted, and the callback is what the case observes.
+    UnmountRecorder::clear();
+    Fixture f(nullptr, &UnmountRecorder::callback);
+    Storage storage(StorageConfig(std::string(f.dev), std::string()), *f.ctx, /*run_manager_thread*/ false);
+
+    // A removal, with the test holding a reference: the callback has run, here, when the branch returns, and the
+    // late release on another thread adds no call.
+    auto slot = f.makeSlot();
+    StorageTestAccess::add(storage, slot);
+    VG_REQUIRE(slot->enable() == 0);
+    StorageTestAccess::remove(storage, f.dev);
+    VG_CHECK_EQ(UnmountRecorder::count(), 1);
+    VG_CHECK(UnmountRecorder::thread() == std::this_thread::get_id());
+    VG_CHECK_EQ(UnmountRecorder::mount(), f.mount);
+    VG_CHECK(!slot->isEnabled());
+    VG_CHECK_EQ(slot->enable(), ECANCELED);
+    auto next = f.makeSlot(); // the same device, plugged in again, before the old Slot's last reference goes
+    StorageTestAccess::add(storage, next);
+    VG_REQUIRE(next->enable() == 0);
+    std::thread([s = std::move(slot)]() mutable { s.reset(); }).join();
+    VG_CHECK_EQ(UnmountRecorder::count(), 1);
+
+    // An eject, with the test holding a reference: the callback has run, here, when the eject answers.
+    VG_CHECK_EQ(storage.ejectSlot(f.dev), 0);
+    VG_CHECK_EQ(UnmountRecorder::count(), 2);
+    VG_CHECK(UnmountRecorder::thread() == std::this_thread::get_id());
+    VG_CHECK(!StorageTestAccess::holds(storage, f.dev));
+    VG_CHECK(!next->isEnabled());
+    VG_CHECK_EQ(next->enable(), ECANCELED);
+    VG_CHECK_EQ(next->drop(), 0); // a removal that raced the eject: dropped already, nothing runs again
+    VG_CHECK_EQ(next->disable(), 0);
+    VG_CHECK_EQ(UnmountRecorder::count(), 2);
+    next.reset();
+    VG_CHECK_EQ(UnmountRecorder::count(), 2);
+}
+
+VG_TEST_CASE(an_eject_erases_only_the_slot_it_dropped)
+{
+    // Storage::ejectSlot erases its Slot's map entry after the drop, and by then the entry may hold another Slot: a
+    // removal (the device pulled) that won the race on the Slot's mutex dropped and erased this one, and the same
+    // netlink pass built a replacement for the re-added device under the same key, as a device that bounces within
+    // one pass gets a new Slot in that pass. The eject's drop then finds the Slot dropped, and its erase must leave
+    // the replacement alone: erased undropped, the replacement's destructor would unmount the present device under
+    // the map lock, on the request thread, and the device would be unmanaged until its next add event. A test
+    // cannot order two drops on one mutex, so it reaches that state from the other side: the eject's own drop is
+    // held inside the unmount callback, with the Slot's locks taken, while the test replaces the map entry.
+    UnmountRecorder::clear();
+    Fixture f(nullptr, &UnmountRecorder::callback);
+    Storage storage(StorageConfig(std::string(f.dev), std::string()), *f.ctx, /*run_manager_thread*/ false);
+    auto slot = f.makeSlot();
+    StorageTestAccess::add(storage, slot);
+    VG_REQUIRE(slot->enable() == 0);
+
+    UnmountRecorder::armHold();
+    vg_sta_e ejected = -1;
+    std::thread eject([&] { ejected = storage.ejectSlot(f.dev); });
+    struct Release // lets the held eject go and joins it, also when a required check throws
+    {
+        std::thread &eject;
+        ~Release()
+        {
+            UnmountRecorder::release();
+            if (eject.joinable())
+                eject.join();
+        }
+    } release { eject };
+    VG_REQUIRE(WaitFor([] { return UnmountRecorder::held(); }));
+    auto replacement = f.makeSlot(); // the re-added device's Slot, built by the pass once the removal erased the old
+    StorageTestAccess::replace(storage, replacement);
+    UnmountRecorder::release();
+    eject.join();
+    VG_CHECK_EQ(ejected, 0); // the Slot the request named is gone
+    VG_CHECK_EQ(UnmountRecorder::count(), 1);
+    VG_CHECK(StorageTestAccess::get(storage, f.dev) == replacement); // left alone
+    VG_CHECK(!slot->isEnabled());
+    VG_CHECK_EQ(slot->enable(), ECANCELED);
+    VG_REQUIRE(replacement->enable() == 0); // undropped: it serves the device
+    VG_CHECK(f.registered(replacement.get()));
+    StorageTestAccess::remove(storage, f.dev); // its own removal, on this thread
+    VG_CHECK_EQ(UnmountRecorder::count(), 2);
+    VG_CHECK(!StorageTestAccess::holds(storage, f.dev));
+}
+
 VG_TEST_CASE(a_disable_syncs_the_filesystem_at_the_mount_path)
 {
-    // Slot::doFsync runs at a disable (a switch, an eject, a removal) and before an unmount: it opens the mount
-    // path read-only, as a directory cannot be opened for writing (EISDIR), which had left the sync unrun since
+    // Slot::doFsync runs at a disable (a switch) and before an unmount (an eject, a removal, deinit): it opens the
+    // mount path read-only, as a directory cannot be opened for writing (EISDIR), which had left the sync unrun since
     // 2026-05-29 and logged a failure at every disable. Over a directory in the temporary root the disable must
     // report no such failure (the sync is of the temporary filesystem); over the fixture's nonexistent mount path
     // the open fails as before, which shows the record catches the line.
