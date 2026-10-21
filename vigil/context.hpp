@@ -84,9 +84,11 @@ struct Context
         {
             resetInference();
             shared_inference_result.reset();
-            file_channels.cancelPendingTriggered(); // a claimed task is completed by its worker; a continuous
-                                                    // clip is no rule event (docs/PLAN.md section 8.2)
-            sound_executor.cancelPending();         // a playing callback finishes on its own
+            file_channels.cancelPendingTriggered(); // rechecks the flag under the channel lock; a claimed task is
+                                                    // completed by its worker; a continuous clip is no rule event
+                                                    // (docs/PLAN.md section 8.2)
+            sound_executor.cancelPending();         // a playing callback finishes on its own; a trigger accepted
+                                                    // after a commit enabled rules since the read above is dropped
             return;
         }
 
@@ -501,13 +503,17 @@ struct Context
                 retireUnsafe(WriteEvent::Status::Canceled);
         }
 
-        // Cancels the pending task if it is triggered: what disabling rules does (docs/PLAN.md section 8.1). A
-        // pending continuous clip is left for its worker, since the rule flag is not its gate.
+        // Cancels the pending task if it is triggered and rules are disabled: what disabling rules does
+        // (docs/PLAN.md section 8.1). The flag is read again here, under the channel lock where admission reads
+        // it: the tick reads it before this cancel, and a commit can enable rules and an activation be accepted
+        // in between, which a cancel on the tick's stale read would retire after its RULE event reported it
+        // accepted. A pending continuous clip is left for its worker, since the rule flag is not its gate.
         void cancelPendingTriggered() noexcept
         {
             const std::unique_lock lock(_mutex);
             if (_current && _current->kind == FileTask::Kind::Triggered
-                && _current->event->status.load(std::memory_order_acquire) == WriteEvent::Status::Pending)
+                && _current->event->status.load(std::memory_order_acquire) == WriteEvent::Status::Pending
+                && !_ctx.record_rule_enabled.load(std::memory_order_relaxed))
                 retireUnsafe(WriteEvent::Status::Canceled);
         }
 

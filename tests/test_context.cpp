@@ -196,6 +196,15 @@ VG_TEST_CASE(tick_while_disabled_resets_input_and_cancels_the_current_event)
     VG_CHECK(last->event->status.load() == WriteEvent::Status::Canceled);
     VG_CHECK_EQ(last->event->owner_uid, owner->uid);
     VG_CHECK(last->owner == owner);
+
+    // The tick's cancel after a commit enabled rules again, as a tick that read the flag disabled runs it: the
+    // cancel rereads the flag under the channel lock, so a task accepted under the enabled rules since is kept
+    // (2026-10-21).
+    f.ctx.record_rule_enabled.store(true);
+    VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER)));
+    f.ctx.file_channels.cancelPendingTriggered();
+    VG_CHECK(f.ctx.file_channels.video.current() != nullptr);
+    f.ctx.file_channels.cancelPending();
 }
 
 VG_TEST_CASE(reset_inference_clears_everything_or_only_one_source)
@@ -319,7 +328,8 @@ VG_TEST_CASE(claim_cancel_and_complete_are_identity_aware)
     video.complete(nullptr, WriteEvent::Status::Failed);
     VG_CHECK(video.current() == b);
 
-    // A pending task is what cancelPending (the disabled tick) retires.
+    // A pending task is what cancelPending (the teardown; the disabled tick's cancelPendingTriggered likewise)
+    // retires.
     f.ctx.file_channels.cancelPending();
     VG_CHECK(video.current() == nullptr);
     VG_CHECK(video.last() == b);
