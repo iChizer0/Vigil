@@ -616,6 +616,12 @@ struct Context
         std::shared_ptr<FileTask> _last;
     };
 
+    // In-flight budgets (docs/PLAN.md section 9): `types::InFlightBudgets`, shared by automatic Photo and Video
+    // and manual capture on the same filesystem. Declared before the file channels, whose tasks hold
+    // reservations in it, so that it outlives them.
+    using InFlightBudgets = types::InFlightBudgets;
+    InFlightBudgets in_flight_budgets;
+
     // The two automatic file channels and what is reported across them (docs/PLAN.md section 6.2).
     struct FileChannels
     {
@@ -717,18 +723,14 @@ struct Context
         std::shared_ptr<EventOwner> _owner;
     } mutable last_dispatched_owner;
 
-    // In-flight budgets (docs/PLAN.md section 9): `types::InFlightBudgets`, shared by automatic Photo and Video
-    // and manual capture on the same filesystem.
-    using InFlightBudgets = types::InFlightBudgets;
-    InFlightBudgets in_flight_budgets;
-
     // The admission interface of the enabled Slot (docs/PLAN.md sections 7.1, 8.1, and 9), which the Slot
     // registers while it is enabled and a file channel reads inside its admission section.
     struct SlotAdmission
     {
         virtual ~SlotAdmission() = default;
 
-        // Whether the Slot can take a task now: enabled and in its ready state (admission, not continuation).
+        // Whether the Slot can take a task now: enabled, not failed, and in its ready state (admission, not
+        // continuation).
         virtual bool isReadyToWrite() const noexcept = 0;
 
         // The quota and free-space probes of one task against the aggregate admission mark, with the task's own

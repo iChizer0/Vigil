@@ -936,14 +936,9 @@ private:
 class HTTPRule: public BaseRule
 {
 public:
-    HTTPRule(const HTTPRuleConfig &, const Context &ctx) noexcept : BaseRule(VG_RULE_TYPE_HTTP, 0), _ctx(ctx) { }
+    HTTPRule(const HTTPRuleConfig &, const Context &) noexcept : BaseRule(VG_RULE_TYPE_HTTP, 0) { }
 
     ~HTTPRule() = default;
-
-    vg_sta_e tryActivate() noexcept
-    {
-        return Activate(_ctx);
-    }
 
     // Dispatches one HTTP owner: EBUSY when a file action is enabled and no file channel accepted a task; 0 for
     // a rule-only or Sound-only configuration once the owner is dispatched (docs/PLAN.md section 5.2). Needs no
@@ -968,9 +963,6 @@ private:
     {
         return nullptr;
     }
-
-private:
-    const Context &_ctx;
 };
 
 class AlwaysOnRule: public BaseRule
