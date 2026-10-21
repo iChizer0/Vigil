@@ -4,7 +4,7 @@
 #ifdef VG_CAPI_VERSION
 #error "Duplicate definition of VG_CAPI_VERSION"
 #else
-#define VG_CAPI_VERSION "2026.10.20"
+#define VG_CAPI_VERSION "2026.10.21"
 #endif
 
 #include "vigil_ctypes.h"
@@ -42,7 +42,11 @@ vg_sta_e vg_service_init(vg_config_t *config);
  * Vigil thread this function would have to join the thread it runs on, which terminates the process, while
  * vg_service_init returns EALREADY. Any other C API function may be called from a callback, also on the thread of
  * the C API call that invoked it, unless the callback's own description says otherwise; while the runtime is being
- * built or torn down such a call receives ESRCH.
+ * built or torn down such a call receives ESRCH. One rule holds for every callback that runs on a storage Slot's
+ * own thread (the file and mount callbacks, and the media callbacks of the automatic Photo and Video workers): it
+ * must not eject, format, or configure that Slot through the storage API. An eject would join the thread it runs
+ * on, and a format or a configuration change would wait on the Slot's mutex while a concurrent disable (an eject,
+ * a switch, a removal) holds it to join that thread. Reading the storage status is fine.
  */
 vg_sta_e vg_service_deinit();
 
@@ -54,7 +58,13 @@ vg_sta_e vg_service_deinit();
  * @param frame Pointer to the frame metadata and payload description; the payload is copied during the call.
  * @return vg_sta_e 0 when accepted, EINVAL for a null frame or one without a payload (null data or zero bytes_len),
  * or an error status on failure.
- * @note May block if internal buffers are full until space becomes available when recording.
+ * @note Never waits for space: the buffers keep the last 10 seconds, trimmed at a key frame, and drop what is older;
+ * the call only takes a buffer lock, which a writer holds while it takes one frame. Vigil records from what the
+ * host enqueues, so frames must keep arriving while recording can run: a clip ends at the input-loss wait without
+ * them, and a triggered clip starts from the frames buffered before it, however old. While its pipeline is stopped,
+ * the host keeps writing suspended (vg_media_scoped_suspend_write, which admits no Photo, Video, or Sound meanwhile)
+ * and ends the suspension with vg_media_scoped_resume_write(true), which drops the stale frames; a resume without a
+ * suspension drops nothing. A key frame is expected at least every 10 seconds (see vg_video_frame_t).
  */
 vg_sta_e vg_media_enqueue_video_frame(const vg_video_frame_t *frame);
 
@@ -63,7 +73,8 @@ vg_sta_e vg_media_enqueue_video_frame(const vg_video_frame_t *frame);
  *
  * @param frame Pointer to the audio frame metadata and payload description; the payload is copied during the call.
  * @return vg_sta_e 0 when accepted, EINVAL for a null frame or one without a payload, or an error status on failure.
- * @note May block if internal buffers are full until space becomes available when recording.
+ * @note Never waits for space: the buffers keep the last 10 seconds, trimmed at a video key frame, and drop what is
+ * older; the call only takes a buffer lock, which a writer holds while it takes one frame.
  */
 vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
 
@@ -84,9 +95,13 @@ vg_sta_e vg_media_scoped_suspend_write(bool wait);
  * @brief Resumes media writing operations, optionally resetting the internal media queue (thread-safe).
  *
  * @param reset_media_queue When true, clears any queued media frames that were not yet written.
- * @return vg_sta_e 0 on success, otherwise an error status.
+ * @return vg_sta_e 0 on success, ECANCELED when no suspension is in progress (nothing is cleared then), otherwise an
+ * error status.
  * @note Use with reset_media_queue=true to discard any stale media frames that may have accumulated while writing was
- * suspended.
+ * suspended, and to end the suspension that spans a stall of the host's pipeline: the buffer is trimmed only as
+ * frames arrive, so a triggered clip would start from the frames buffered before the stall, however old, and a
+ * continuous clip's boundary key frame survives a pause when no frame arrives; a resume without the reset records
+ * those frames first. Only the resume that ends the outermost suspension clears them.
  */
 vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue);
 
@@ -101,6 +116,9 @@ vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue);
  * @param data Pointer to the protobuf-encoded message buffer.
  * @param data_len Length of the protobuf buffer in bytes.
  * @return vg_sta_e 0 when accepted, otherwise error status.
+ * @note The message's timestamp_ms is the event time in Unix milliseconds, set by the host: it is reported as the
+ * event time of FRAME and direct EVENT owners (0 included, never replaced by the current time) and must not be
+ * negative, which would wrap the event UID counter.
  */
 vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len);
 
