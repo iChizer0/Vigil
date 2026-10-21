@@ -90,6 +90,12 @@ struct StorageTestAccess
     {
         storage.syncAndUpdateSlotsWithNetlink();
     }
+
+    // The enabling that follows the netlink pass in the storage manager's loop.
+    static vg_sta_e sync(Storage &storage)
+    {
+        return storage.syncEnabledSlotWithConfig();
+    }
 };
 
 } // namespace vigil::storage
@@ -110,6 +116,13 @@ struct SlotTestAccess
     {
         slot._state.store(SlotState::Ready, std::memory_order_release);
         slot._registration.store(slot._ctx.slot_admission.open(slot), std::memory_order_release);
+    }
+
+    // The UUID the probe would read from a device.
+    static void setUUID(Slot &slot, std::string uuid)
+    {
+        const std::unique_lock lock(slot._info_mutex);
+        slot._uuid = std::move(uuid);
     }
 };
 
@@ -487,6 +500,49 @@ VG_TEST_CASE(a_failed_slot_refuses_admission_at_once_and_cancels_what_it_admitte
     VG_CHECK(!f.ctx->dispatchRuleEvent(owner));
     VG_CHECK(f.registered(slot.get()));
     VG_CHECK_EQ(slot->registration(), registration);
+}
+
+VG_TEST_CASE(a_selector_that_matches_several_slots_enables_one_and_keeps_the_enabled_one)
+{
+    // Of several Slots a selector matches (a UUID shared by cards cloned from one image), the sync enables one:
+    // the one already enabled stays the target, whatever the map's iteration order, and every other enabled Slot
+    // is disabled first, so at most one admission is registered (docs/PLAN.md section 9). Until 2026-10-21 the
+    // last match in map order was the target and an enabled match was never disabled, so a second match was
+    // enabled next to the first, whose registration the second's open overwrote. The UUIDs are set by hand, since
+    // a Slot over no device has none; the selections below reach the defect in either map order.
+    Fixture f;
+    const std::string uuid = "1234-ABCD";
+    Storage storage(StorageConfig(std::string(), std::string()), *f.ctx, /*run_manager_thread*/ false);
+    const auto make = [&](const char *name) {
+        auto slot = std::make_shared<Slot>(*f.ctx, f.root + "/no-such-" + name, f.root + "/no-such-mnt-" + name,
+            /*removable*/ true, /*internal*/ false, "DCIM");
+        SlotTestAccess::setUUID(*slot, uuid);
+        StorageTestAccess::add(storage, slot);
+        return slot;
+    };
+    auto a = make("a"), b = make("b");
+    const auto select = [&](std::string dev_path, std::string by_uuid) {
+        VG_CHECK_EQ(storage.setConfig(StorageConfig(std::move(dev_path), std::move(by_uuid))), 0);
+        VG_CHECK_EQ(StorageTestAccess::sync(storage), 0);
+    };
+    const auto only = [&](const std::shared_ptr<Slot> &enabled, const std::shared_ptr<Slot> &other) {
+        return enabled->isEnabled() && !other->isEnabled() && f.registered(enabled.get());
+    };
+
+    select(a->devPath().string(), "");
+    VG_CHECK(only(a, b));
+    select("", uuid); // both match: the enabled one stays
+    VG_CHECK(only(a, b));
+    select(b->devPath().string(), ""); // the other by path: a switch
+    VG_CHECK(only(b, a));
+    select("", uuid);
+    VG_CHECK(only(b, a));
+    size_t selected = 0;
+    for (const auto &status: storage.getStatus().slots_status)
+        selected += status.selected;
+    VG_CHECK_EQ(selected, size_t { 2 }); // each matching slot reports it
+    select("", "no-such-uuid");          // matches none: the enabled one is disabled
+    VG_CHECK(!a->isEnabled() && !b->isEnabled() && f.registered(nullptr));
 }
 
 VG_TEST_CASE(an_eject_or_a_removal_unmounts_the_slot_on_its_own_thread_before_the_map_lets_it_go)

@@ -755,10 +755,11 @@ struct Context
 
         // Opens admission for `slot`: the tasks accepted from here on bind to the returned registration, which
         // is never 0 and never reused. At most one registration is open at a time, which the storage module
-        // keeps: its manager thread disables a Slot before it enables the one the configuration selects, and
-        // eject and removal disable a Slot before they drop it (Storage::ejectSlot and Storage::removeSlot),
-        // each disable closing the registration it opened. So nothing is overwritten here; were it, the
-        // previous Slot's close would be a no-op and its pending tasks would stay bound to it.
+        // keeps: its manager thread disables a Slot before it enables the one the configuration selects (of
+        // several the selector matches, the one already enabled), and eject and removal disable a Slot before
+        // they drop it (Storage::ejectSlot and Storage::removeSlot), each disable closing the registration it
+        // opened. So nothing is overwritten here; were it, the previous Slot's close would be a no-op and its
+        // pending tasks would stay bound to it.
         uint64_t open(SlotAdmission &slot) noexcept
         {
             const std::unique_lock lock(_mutex);
