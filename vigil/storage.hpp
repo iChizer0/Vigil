@@ -550,7 +550,10 @@ private:
     // Enables the selected Slot only after every other enabled Slot was disabled, which closed its admission and
     // joined its two channel workers and its manager thread (docs/PLAN.md section 9): the replacement opens once
     // the old consumers are drained, and a task never moves to another device (one pending across the switch is
-    // canceled when the old Slot's admission closes).
+    // canceled when the old Slot's admission closes). Of several Slots the selector matches (a UUID shared by cards
+    // cloned from one image), the one already enabled stays the target, whatever the map's order, and every other
+    // enabled Slot, selected or not, is disabled first: at most one Slot is enabled, and so at most one admission
+    // is registered (Context::SlotAdmissionRegistry::open).
     vg_sta_e syncEnabledSlotWithConfig()
     {
         const auto current_cfg = getConfig();
@@ -571,7 +574,7 @@ private:
             const std::shared_lock lock2(_slots_mutex);
             for (const auto &[_, s]: _slots)
             {
-                if (isSelectedSlot(s, current_cfg))
+                if (isSelectedSlot(s, current_cfg) && !(target_slot && target_slot->isEnabled()))
                     target_slot = s;
                 else if (s->isEnabled())
                     enabled_slots_without_target.emplace_back(s);
