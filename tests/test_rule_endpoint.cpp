@@ -1732,4 +1732,70 @@ VG_TEST_CASE(http_activation_runs_the_rule_callback_outside_the_rule_lock)
     VG_CHECK_EQ(f.activateHTTP(), kEndpointErrorBase + EPERM); // the selected rule is no longer HTTP
 }
 
+VG_TEST_CASE(timer_rule_paces_on_the_context_clock_and_does_not_catch_up_after_a_closure)
+{
+    // TIMER fires on the first tick after its selection and then no earlier than its interval after the tick it
+    // last fired on, read from the context's steady time, which moves on the tick (docs/PLAN.md section 5.1). A
+    // held channel does not pace it: the owner is reported with nothing accepted. While rules are disabled the
+    // rule is not evaluated at all, so a closure longer than the interval yields one owner after reopening, not
+    // one per missed interval. Real time passes here, as the clock has no fake; every wait is bounded.
+    const auto interval = std::chrono::seconds(1);
+    Fixture f;
+    f.start();
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
+    VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(1)), 0);
+    auto &video = f.ctx->file_channels.of(CaptureType::Video);
+
+    f.evaluate(); // the first interval is elapsed at selection
+    auto events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_TIMER);
+    VG_CHECK(events[0].writer_created);
+    const auto first = f.ctx->shared_time.steadyTime();
+    const auto task = video.current();
+    VG_REQUIRE(task != nullptr);
+
+    // Re-armed no earlier than the interval after the tick it fired on, the channel still holding the task.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    bool dispatched = false;
+    while (!dispatched && std::chrono::steady_clock::now() < deadline)
+    {
+        f.evaluate();
+        dispatched = RuleEventRecorder::size() == size_t { 1 };
+        const auto since_first = f.ctx->shared_time.steadyTime() - first;
+        if (dispatched)
+            VG_CHECK(since_first >= interval);
+        else
+            VG_CHECK(since_first < interval);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    VG_REQUIRE(dispatched);
+    events = RuleEventRecorder::take();
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_TIMER);
+    VG_CHECK(!events[0].writer_created); // refused by the held channel, reported all the same
+    VG_CHECK(video.current() == task);
+    const auto second = f.ctx->shared_time.steadyTime();
+
+    // Disabled for longer than two intervals: nothing is evaluated meanwhile (the pending task is canceled by
+    // the disable), one owner comes on the first tick after reopening, and none on the ticks right after it.
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(false, "MP4", 5000)), 0);
+    while (std::chrono::steady_clock::now() - second < 2 * interval + std::chrono::milliseconds(100))
+    {
+        f.evaluate();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+    VG_CHECK(video.current() == nullptr);
+    VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
+    f.evaluate();
+    events = RuleEventRecorder::take();
+    VG_REQUIRE(events.size() == size_t { 1 });
+    VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_TIMER);
+    VG_CHECK(events[0].writer_created);
+    const auto reopened = f.ctx->shared_time.steadyTime();
+    for (int i = 0; i < 5 && f.ctx->shared_time.steadyTime() - reopened < interval; ++i)
+        f.evaluate(); // the ticks right after it, within the interval
+    VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+}
+
 VG_TEST_MAIN()
