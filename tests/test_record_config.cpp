@@ -2,12 +2,16 @@
 // C1) and for the action settings snapshot, its revisions, and the watermarks it is mapped onto (section 7.1;
 // matrix A4 and C2).
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <initializer_list>
+#include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include "vigil/configs.hpp"
@@ -500,6 +504,129 @@ VG_TEST_CASE(sync_cancels_the_pending_task_of_a_channel_whose_settings_changed)
     VG_CHECK(video.current() == claimed);
     VG_CHECK(claimed->event->status.load() == WriteEvent::Status::Writing);
     VG_CHECK(f.ctx.action_settings.channelRevision(CaptureType::Video) != claimed->settings_revision); // stops it
+}
+
+VG_TEST_CASE(cancel_pending_keeps_a_task_bound_to_the_kept_revision)
+{
+    // The cancel predicate: RecordConfig::sync cancels the pending task after the publish and outside the settings
+    // mutex, so a dispatcher can accept a task under the new settings in between, and the cancel keeps the task
+    // bound to the revision the commit published while it retires one bound to another. Without a revision, as at
+    // teardown, it cancels whatever is pending. The commit itself is pinned by the next case.
+    Fixture f;
+    auto &video = f.ctx.file_channels.video;
+    const auto owner
+        = [] { return std::make_shared<EventOwner>(VG_RULE_TYPE_TIMER, "", "", EventOwner::SourceDelivery::Event); };
+    const RecordConfig cfg(Document({ { "/bRuleEnabled", true }, { "/dActions/dVideo/bEnabled", true } }), f.ctx);
+    VG_CHECK_EQ(cfg.sync(f.ctx, cfg.prepare(f.ctx)), 0);
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner()));
+    const auto accepted = video.current();
+    VG_REQUIRE(accepted != nullptr);
+    const auto published = f.ctx.action_settings.channelRevision(CaptureType::Video);
+    VG_CHECK_EQ(accepted->settings_revision, published);
+
+    video.cancelPending(published); // the commit that published these settings
+    VG_CHECK(video.current() == accepted);
+    VG_CHECK(accepted->event->status.load() == WriteEvent::Status::Pending);
+
+    video.cancelPending(published + 1); // a later commit
+    VG_CHECK(video.current() == nullptr);
+    VG_CHECK(accepted->event->status.load() == WriteEvent::Status::Canceled);
+
+    VG_CHECK(f.ctx.dispatchRuleEvent(owner()));
+    const auto again = video.current();
+    VG_REQUIRE(again != nullptr);
+    video.cancelPending(); // teardown
+    VG_CHECK(video.current() == nullptr);
+    VG_CHECK(again->event->status.load() == WriteEvent::Status::Canceled);
+}
+
+VG_TEST_CASE(a_commit_keeps_a_task_accepted_under_the_settings_it_published)
+{
+    // The commit, deterministically: RecordConfig::sync publishes, then cancels on the Photo channel before the
+    // Video channel, each cancel taking its channel's lock. A Photo admission that blocks inside the Slot's probe
+    // holds the Photo channel lock, so the commit waits there after its publish; a continuous clip accepted on
+    // the Video channel meanwhile is bound to the Video revision the commit published, and the commit's Video
+    // cancel, once the admission lets go, must keep it. The case relies on the Photo cancel preceding the Video
+    // one in sync: swapped, the commit would pass before the clip is accepted and the case would pin nothing.
+    struct BlockingAdmission: FakeSlotAdmission
+    {
+        using FakeSlotAdmission::FakeSlotAdmission;
+        std::atomic<bool> block_next = false, blocked = false, release = false;
+
+        Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &admission,
+            FileSize task_bytes) noexcept override
+        {
+            if (block_next.exchange(false))
+            {
+                blocked = true;
+                while (!release.load())
+                    std::this_thread::yield();
+            }
+            return FakeSlotAdmission::tryAdmit(admission, task_bytes);
+        }
+    };
+    const auto wait_for = [](const auto &pred) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (!pred())
+        {
+            if (std::chrono::steady_clock::now() > deadline)
+                return false;
+            std::this_thread::yield();
+        }
+        return true;
+    };
+
+    Context ctx(MakeFakeConfig());
+    BlockingAdmission slot(ctx);
+    auto &photo = ctx.file_channels.photo;
+    auto &video = ctx.file_channels.video;
+    const RecordConfig before(Document({ { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true } }), ctx);
+    const RecordConfig after(Document({ { "/bRuleEnabled", true }, { "/dActions/dPhoto/bEnabled", true },
+                                 { "/dActions/dPhoto/iIntervalMs", 2500 }, { "/bContinuousRecordEnabled", true } }),
+        ctx);
+    VG_REQUIRE(before.sync(ctx, before.prepare(ctx)) == 0);
+
+    std::thread admission, commit;
+    struct Unblock // lets the admission go and joins both threads, also when a required check throws
+    {
+        BlockingAdmission &slot;
+        std::thread &admission, &commit;
+        ~Unblock()
+        {
+            slot.release = true;
+            for (auto *const thread: { &admission, &commit })
+                if (thread->joinable())
+                    thread->join();
+        }
+    } unblock { slot, admission, commit };
+
+    // A Photo admission under the old settings, held inside the Slot's probe with the Photo channel lock taken.
+    slot.block_next = true;
+    const auto owner = std::make_shared<EventOwner>(VG_RULE_TYPE_TIMER, "", "", EventOwner::SourceDelivery::Event);
+    std::shared_ptr<FileTask> photo_task;
+    admission = std::thread([&] { photo_task = photo.tryAccept(owner, ctx.action_settings.get()); });
+    VG_REQUIRE(wait_for([&] { return slot.blocked.load(); }));
+
+    // The commit publishes, then waits for the Photo channel lock before its Video cancel.
+    const auto revision = ctx.action_settings.getRevision();
+    const auto prepared = after.prepare(ctx);
+    vg_sta_e committed = -1;
+    commit = std::thread([&] { committed = after.sync(ctx, prepared); });
+    VG_REQUIRE(wait_for([&] { return ctx.action_settings.getRevision() != revision; }));
+
+    // Between the publish and the Video cancel: a continuous clip under the published Video revision.
+    const auto clip = video.tryAcceptContinuous(ctx.action_settings.get());
+    VG_REQUIRE(clip != nullptr);
+    VG_CHECK_EQ(clip->settings_revision, ctx.action_settings.channelRevision(CaptureType::Video));
+    slot.release = true;
+    admission.join();
+    commit.join();
+    VG_CHECK_EQ(committed, 0);
+    VG_REQUIRE(photo_task != nullptr);
+    VG_CHECK(photo_task->event->status.load() == WriteEvent::Status::Canceled); // bound to the old Photo settings
+    VG_CHECK(video.current() == clip); // kept: bound to the revision the commit published
+    VG_CHECK(clip->event->status.load() == WriteEvent::Status::Pending);
+    ctx.file_channels.cancelPending();
 }
 
 VG_TEST_CASE(default_action_settings_exist_before_any_configuration)

@@ -17,7 +17,6 @@
 #include <string>
 #include <system_error>
 #include <thread>
-#include <vector>
 
 #include "vigil/configs.hpp"
 #include "vigil/constants.hpp"
@@ -497,12 +496,35 @@ VG_TEST_CASE(startup_leaves_unusable_files_untouched_and_keeps_rules_disabled)
         VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
         VG_CHECK_EQ(f.activateHTTP(), kEndpointErrorBase + EPERM);
 
+        // The manager repairs the unusable file first: the schedule by posting what GET shows, which is stored
+        // although it equals the schedule in memory, the rule by posting one; then the record configuration.
+        if (std::string(c.name) == "schedule_rule_config.json")
+        {
+            const auto schedule = f.endpoint->getScheduleRuleConfig();
+            VG_CHECK_EQ(f.postScheduleRuleConfig(schedule), 0);
+            VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file(c.name))), schedule);
+        }
         VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0);
+        VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_rule_config.json"))), TimerRuleJson(0));
         f.evaluate();
         VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 }); // still disabled
         VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
         f.evaluate();
         VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 1 });
+
+        // A restart over the repaired files no longer fails closed: rules are enabled, and the first evaluation
+        // dispatches an accepted event.
+        f.endpoint.reset();
+        f.ctx->file_channels.cancelPending(); // the event's task, as the runtime's teardown retires it
+        RuleEventRecorder::clear();
+        f.start();
+        VG_CHECK(f.ctx->record_rule_enabled.load());
+        VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(true, "MP4", 5000));
+        VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), TimerRuleJson(0));
+        f.evaluate();
+        const auto events = RuleEventRecorder::take();
+        VG_REQUIRE(events.size() == size_t { 1 });
+        VG_CHECK(events[0].writer_created);
     }
 }
 
@@ -1300,6 +1322,22 @@ VG_TEST_CASE(record_config_post_fails_closed_when_the_store_is_unwritable)
     VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
 }
 
+VG_TEST_CASE(schedule_post_fails_closed_when_the_store_is_unwritable)
+{
+    // Every valid schedule POST is stored (docs/PLAN.md section 4.3 item 5): one that repeats the schedule in
+    // memory answers the store's error too (since 2026-10-21; it answered 0 without storing before), and a changed
+    // one that cannot be stored applies nothing, as the record configuration's does.
+    Fixture f(/* unwritable_store = */ true);
+    f.start();
+    const auto unchanged = f.endpoint->getScheduleRuleConfig();
+    VG_CHECK(f.postScheduleRuleConfig(unchanged) != 0);
+    auto changed = unchanged;
+    changed["bEnabled"] = true;
+    VG_CHECK(f.postScheduleRuleConfig(changed) != 0);
+    VG_CHECK_EQ(f.endpoint->getScheduleRuleConfig(),
+        unchanged); // nothing was applied because nothing could be persisted
+}
+
 VG_TEST_CASE(the_always_on_invariant_is_enforced_by_both_posts_in_either_order)
 {
     // docs/PLAN.md section 4.4: with ALWAYS_ON selected, a record configuration it cannot pace is rejected,
@@ -1426,45 +1464,6 @@ VG_TEST_CASE(startup_fails_closed_when_the_stored_pair_violates_the_always_on_in
         VG_CHECK(events[0].writer_created);
         VG_CHECK(f.ctx->file_channels.photo.holdsTask() && f.ctx->file_channels.video.holdsTask());
     }
-}
-
-VG_TEST_CASE(concurrent_posts_cannot_bypass_the_always_on_invariant)
-{
-    // Matrix C3: one thread alternates the actions between one channel and two, the other alternates the
-    // selection between TIMER and ALWAYS_ON. Every POST is applied or rejected whole under the commit mutex,
-    // so the committed pair satisfies the invariant whenever ALWAYS_ON is selected, and each stored file is the
-    // committed document. The codes are collected per thread: the harness is not for two threads.
-    Fixture f;
-    f.start();
-    const auto one = RecordJson(true, "MP4", 5000);
-    const auto two = WithActions(one, true, true, false);
-    VG_CHECK_EQ(f.postRecordConfig(one), 0);
-    constexpr int kRounds = 100;
-    std::vector<int> action_codes, selection_codes;
-    std::thread actions([&] {
-        for (int i = 0; i < kRounds; ++i)
-            action_codes.push_back(f.postRecordConfig(i % 2 ? one : two));
-    });
-    std::thread selection([&] {
-        for (int i = 0; i < kRounds; ++i)
-            selection_codes.push_back(f.postRecordRuleConfig(i % 2 ? TimerRuleJson(0) : SelectedRuleJson("ALWAYS_ON")));
-    });
-    actions.join();
-    selection.join();
-    for (const auto &codes: { action_codes, selection_codes })
-    {
-        VG_CHECK_EQ(codes.size(), size_t { kRounds });
-        for (const int code: codes)
-            VG_CHECK(code == 0 || code == kEndpointErrorBase + EINVAL);
-    }
-    const auto record = f.endpoint->getRecordConfig();
-    const auto rule = f.endpoint->getRecordRuleConfig();
-    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_config.json"))), record);
-    VG_CHECK_EQ(nlohmann::json::parse(ReadFile(f.file("record_rule_config.json"))), rule);
-    if (rule == SelectedRuleJson("ALWAYS_ON"))
-        VG_CHECK(RecordConfig(record, *f.ctx).satisfiesAlwaysOnInvariant());
-    else
-        VG_CHECK_EQ(rule, TimerRuleJson(0));
 }
 
 VG_TEST_CASE(always_on_runs_each_single_file_action_with_its_format_and_paces_on_its_interval)

@@ -422,14 +422,16 @@ public:
             auto schedule_rule_config = std::make_unique<ScheduleRuleConfig>(j, *_ctx);
             const std::unique_lock lock(_schedule_rule_mutex);
 
+            // Every valid POST is stored, as the record rule POST does, so that posting the schedule GET shows
+            // repairs a file that could not be loaded at startup (docs/PLAN.md section 4.3, item 5); the rule is
+            // rebuilt only when the schedule changed.
+            if (store)
+            {
+                if (ret = _schedule_rule_config_store->saveToFile(j); ret != 0)
+                    throw Exception("Failed to store schedule rule config to file");
+            }
             if (!_schedule_rule_config || *schedule_rule_config != *_schedule_rule_config)
             {
-                if (store)
-                {
-                    if (ret = _schedule_rule_config_store->saveToFile(j); ret != 0)
-                        throw Exception("Failed to store schedule rule config to file");
-                }
-
                 _schedule_rule.reset();
                 _schedule_rule = std::make_unique<ScheduleRule>(*schedule_rule_config, *_ctx);
                 _schedule_rule_config = std::move(schedule_rule_config);
