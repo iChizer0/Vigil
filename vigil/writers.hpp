@@ -302,19 +302,21 @@ public:
             throw Exception("CaptureAdaptedWriter initialized with empty output file name");
         }
 
+        // The output directory first: the budget below probes its filesystem, and until 2026-10-20 a capture
+        // into a directory that did not exist yet failed that probe before the directory was created.
+        if (!EnsureDirectoryExists(_event->output_directory, true, false, &this->ctxRef()))
+        {
+            this->setEventStatus(WriteEvent::Status::Failed);
+            throw Exception(
+                "CaptureAdaptedWriter failed to ensure output directory exists: " + _event->output_directory.string());
+        }
+
         // Admission against the shared in-flight budget of the output filesystem (docs/PLAN.md section 9); the
         // reservation is held until this writer is destroyed, after the rename.
         if (!(_reservation = reserveBudget()))
         {
             this->setEventStatus(WriteEvent::Status::Failed);
             throw Exception("CaptureAdaptedWriter detected insufficient remaining space");
-        }
-
-        if (!EnsureDirectoryExists(_event->output_directory, true, false, &this->ctxRef()))
-        {
-            this->setEventStatus(WriteEvent::Status::Failed);
-            throw Exception(
-                "CaptureAdaptedWriter failed to ensure output directory exists: " + _event->output_directory.string());
         }
 
         _output_file_path = _event->output_directory / _event->file_name;
@@ -327,9 +329,31 @@ public:
         }
     }
 
+    // Publishes the file by renaming it from its cache name when the task recorded something: Completed, or
+    // Interrupted with what was written. A Failed task's partial file is removed instead, as the automatic
+    // channel never publishes one (docs/PLAN.md section 7.2), so FAILED leaves no file at the output path;
+    // before 2026-10-20 it was renamed to the final name like a completed one.
     virtual ~CaptureAdaptedWriter() noexcept
     {
-        if (std::error_code ec; std::filesystem::exists(_output_cache_path, ec))
+        const auto status = this->event()->status.load(std::memory_order_acquire);
+        const bool recorded = status == WriteEvent::Status::Completed || status == WriteEvent::Status::Interrupted;
+        if (std::error_code ec; !std::filesystem::exists(_output_cache_path, ec))
+        {
+            if (recorded)
+                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
+                    "CaptureAdaptedWriter cache file does not exist at path: ", _output_cache_path);
+            else
+                VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_INFO, "CaptureAdaptedWriter recorded nothing (",
+                    WriteEvent::StatusString(status), "), no file at path: ", _output_file_path);
+        }
+        else if (!recorded)
+        {
+            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_INFO,
+                "CaptureAdaptedWriter removing the partial file of a task that ", WriteEvent::StatusString(status),
+                " at path: ", _output_cache_path);
+            std::filesystem::remove_all(_output_cache_path, ec);
+        }
+        else
         {
             EnsureOwnerAndPermissions(_output_cache_path, kStorageDefaultUid, kStorageDefaultGid,
                 fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::group_write
@@ -343,16 +367,6 @@ public:
                     " to final output path ", _output_file_path, ": ", ec.message());
                 std::filesystem::remove_all(_output_cache_path, ec);
             }
-        }
-        else if (this->event()->status.load(std::memory_order_acquire) == WriteEvent::Status::Canceled)
-        {
-            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_INFO,
-                "CaptureAdaptedWriter recorded nothing, no file at path: ", _output_file_path);
-        }
-        else
-        {
-            VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
-                "CaptureAdaptedWriter cache file does not exist at path: ", _output_cache_path);
         }
         _capture.handleCompletedCaptureEvent(_event);
     }

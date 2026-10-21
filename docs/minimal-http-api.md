@@ -609,7 +609,7 @@ Get the current capture status.
         "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
         "sFormat": "MP4", // String, capture format ("MP4", "JPG", "RAW")
         "iVideoLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
-        "sStatus": "WRITING", // String, write event status ("PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED" (stopped after it started, by a pause, a stop, or input loss; the file is kept), "CANCELED" (nothing was recorded and no file exists: media was paused, or no key frame arrived within the key frame wait or before the capture was stopped), "UNKNOWN")
+        "sStatus": "WRITING", // String, write event status ("PENDING" (accepted, not yet running; also while media is paused), "WRITING", "COMPLETED" (an image was captured, or a video clip reached its length or its stop and ended on the next key frame, or at the key frame wait without one), "FAILED" (a callback failed, the writer could not be built, or the output filesystem had no headroom; the capture leaves no file), "INTERRUPTED" (a pause, the service stopping, input loss, or free space below the critical watermark, checked every 60 seconds, ended a video after it started; the file is kept), "CANCELED" (nothing was recorded and no file exists: media was paused, or no key frame arrived within the key frame wait or before the capture was stopped), "UNKNOWN")
         "iTimestamp": 1736870400000, // Integer, Unix timestamp in milliseconds
         "sFileName": "Capture 20260114 143000 123456.mp4" // String, generated file name
     },
@@ -656,8 +656,10 @@ Start a new capture session.
 
 Notes:
 
-- Returns error `EBUSY`if a capture is already in progress.
-- The output path must be an absolute path under the configured storage mount point.
+- Returns error `EBUSY` if a capture is already in progress: one capture runs at a time.
+- The output path must be an absolute path under the configured storage mount point. The output directory is created when it does not exist (and stays when the capture then fails); the file is written under its name prefixed with a dot in that directory and renamed to `sFileName` when the capture ends, and a stale file of the dot-prefixed name is removed first.
+- A capture is admitted against the same per-filesystem in-flight budget as automatic recording: when the output filesystem's free space, minus what admitted tasks may still write there, is at or below the capture's critical watermark, the capture fails before any callback (`FAILED`, no file); while it runs, its own estimate is in flight on that filesystem and counts against automatic admission there.
+- Nothing runs while media is paused: the capture waits as `PENDING` and runs once media resumes.
 
 ### Stop Capture
 
@@ -682,6 +684,7 @@ Notes:
 
 - Returns error `ENOENT` if no capture is in progress.
 - Returns error `EALREADY` if capture stop is already in progress.
+- A stop ends a video capture on the next key frame, the frames until then included, as `COMPLETED` (at the key frame wait without one; a clip that has not seen its first key frame is `CANCELED`). An image capture that has not run yet is still taken. The request is cleared with the capture.
 
 ## Files API
 
