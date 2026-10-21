@@ -9,6 +9,7 @@
 // bound to it is pinned by `closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_serve_both_channels_at_once`
 // (`tests/test_channel_worker.cpp`), and a Slot made READY by hand pins what the failure mark does.
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -21,6 +22,7 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <sys/socket.h>
 #include <unistd.h>
@@ -120,6 +122,48 @@ std::string MakeTempDir()
     return path;
 }
 
+// The log lines of one case, for what a Slot reports only there; vg_config_basic_t callbacks carry no user_data,
+// so the record is process-wide and a case clears it first.
+struct LogRecorder
+{
+    static vg_sta_e callback(vg_log_level_e level, const char *msg, size_t bytes_len)
+    {
+        {
+            const std::lock_guard lock(mutex());
+            lines().emplace_back(msg ? msg : "", bytes_len);
+        }
+        return TestLogCallback(level, msg, bytes_len);
+    }
+
+    static void clear()
+    {
+        const std::lock_guard lock(mutex());
+        lines().clear();
+    }
+
+    static bool contains(std::string_view text)
+    {
+        const std::lock_guard lock(mutex());
+        for (const auto &line: lines())
+            if (line.find(text) != std::string::npos)
+                return true;
+        return false;
+    }
+
+private:
+    static std::mutex &mutex()
+    {
+        static std::mutex m;
+        return m;
+    }
+
+    static std::vector<std::string> &lines()
+    {
+        static std::vector<std::string> v;
+        return v;
+    }
+};
+
 struct Fixture
 {
     std::string root;
@@ -128,10 +172,13 @@ struct Fixture
     vg_config_t config;
     std::shared_ptr<Context> ctx;
 
-    Fixture()
+    // `log_cb` replaces the fake configuration's logging callback when given.
+    explicit Fixture(vg_sta_e (*log_cb)(vg_log_level_e, const char *, size_t) = nullptr)
         : root(MakeTempDir()), dev(root + "/no-such-dev"), mount(root + "/no-such-mnt"),
           config(MakeFakeConfig(root.c_str()))
     {
+        if (log_cb)
+            config.basic.log_cb = log_cb;
         ctx = std::make_shared<Context>(config);
     }
 
@@ -301,6 +348,29 @@ VG_TEST_CASE(a_failed_slot_refuses_admission_at_once_and_cancels_what_it_admitte
     VG_CHECK(!f.ctx->dispatchRuleEvent(owner));
     VG_CHECK(f.registered(slot.get()));
     VG_CHECK_EQ(slot->registration(), registration);
+}
+
+VG_TEST_CASE(a_disable_syncs_the_filesystem_at_the_mount_path)
+{
+    // Slot::doFsync runs at a disable (a switch, an eject, a removal) and before an unmount: it opens the mount
+    // path read-only, as a directory cannot be opened for writing (EISDIR), which had left the sync unrun since
+    // 2026-05-29 and logged a failure at every disable. Over a directory in the temporary root the disable must
+    // report no such failure (the sync is of the temporary filesystem); over the fixture's nonexistent mount path
+    // the open fails as before, which shows the record catches the line.
+    LogRecorder::clear();
+    Fixture f(&LogRecorder::callback);
+    const auto mount = f.root + "/mnt";
+    VG_REQUIRE(std::filesystem::create_directory(mount));
+    {
+        Slot slot(*f.ctx, f.dev, mount, /*removable*/ true, /*internal*/ false, "DCIM");
+        VG_CHECK_EQ(slot.disable(), 0);
+    }
+    VG_CHECK(!LogRecorder::contains("for syncing"));
+    {
+        Slot slot(*f.ctx, f.dev, f.mount, /*removable*/ true, /*internal*/ false, "DCIM");
+        VG_CHECK_EQ(slot.disable(), 0);
+    }
+    VG_CHECK(LogRecorder::contains("for syncing: 2")); // ENOENT
 }
 
 VG_TEST_CASE(a_device_that_bounces_within_one_pass_gets_a_new_slot_and_one_added_and_removed_within_it_gets_none)

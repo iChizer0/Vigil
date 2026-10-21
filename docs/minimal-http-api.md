@@ -99,8 +99,9 @@ action intervals, and the 10 ms rule evaluation and 50 ms worker probe periods b
 target, verified with fake callbacks on a development host: real-device latency, callback duration, and the gap
 between clips depend on the host's media pipeline and storage and are the integration's to measure.
 Two more premises of the host: storage calls on the slot's filesystem (the free-space probe at each admission, which
-runs on the rule thread and on an HTTP activation's thread, and the directory creation and the rename at publication,
-on the slot's workers) return promptly, since a hanging device stalls those threads; and the host's video sink admits
+runs on the rule thread and on an HTTP activation's thread, the directory creation and the rename at publication, on
+the slot's workers, and the filesystem sync before a slot is disabled or unmounted, on the thread of the switch, the
+eject, or the removal) return promptly, since a hanging device stalls those threads; and the host's video sink admits
 the files Vigil
 creates, because a host with a single video sink fails the second create, which counts like any other failure: a
 manual video capture that overlaps continuous recording fails the automatic clips meanwhile, and ten such failures take

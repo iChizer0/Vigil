@@ -1242,9 +1242,13 @@ private:
         return true;
     }
 
+    // Syncs the filesystem mounted at the mount path (syncfs), before a disable and before an unmount. The path is
+    // opened read-only: a directory cannot be opened for writing (EISDIR), which left this sync unrun from
+    // 2026-05-29 to 2026-10-21, so a busy eject, whose unmount can only detach, answered with the last files still
+    // in the page cache.
     bool doFsync() const noexcept
     {
-        const auto fd = ::open(_mount_path.c_str(), O_RDWR | O_CLOEXEC);
+        const auto fd = ::open(_mount_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
         if (fd < 0)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to open mount path ", _mount_path,
