@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -77,10 +78,14 @@ struct FakeSlot: FakeSlotAdmission
 
     std::optional<VideoWriter<FakeAdapter>::WaitBounds> wait_bounds; // injected into every video writer
     std::atomic<int> prepared = 0;                                   // continuous clips whose backlog was prepared
-    std::function<void()> on_prepare; // runs after the backlog was prepared: what arrives after the claim
+    std::function<void()> on_prepare;            // runs after the backlog was prepared: what arrives after the claim
+    std::atomic<bool> throw_on_create = false;   // a writer that cannot be built
+    std::atomic<bool> marked_while_held = false; // the channel still held the task when markFailed ran
 
     std::unique_ptr<FakeAdapter> createWriter(const std::shared_ptr<FileTask> &task)
     {
+        if (throw_on_create)
+            throw std::runtime_error("injected: the writer cannot be built");
         if (task->type == CaptureType::Image)
             return std::make_unique<ImageWriter<FakeAdapter>>(std::ref(media), std::ref(ctx), task->settings,
                 task->event, task->settings_revision, task->kind);
@@ -112,8 +117,12 @@ struct FakeSlot: FakeSlotAdmission
         ++published;
     }
 
+    // The mark is counted here only; the real Slot also refuses admission and cancels its pending tasks from the
+    // mark on (tests/test_storage.cpp), so a Video task claimed after the Photo limit, as a case below does, is
+    // the fake's leniency.
     void markFailed() noexcept
     {
+        marked_while_held = ctx.file_channels.holdsTask();
         ++failure_marks;
     }
 
@@ -374,6 +383,7 @@ VG_TEST_CASE(a_failed_task_holds_through_the_cooldown_and_the_limit_stops_the_wo
     task = f.dispatch();
     VG_CHECK(worker.step() == Step::Stop); // the second consecutive failure reaches the limit
     VG_CHECK_EQ(f.slot.failure_marks.load(), 1);
+    VG_CHECK(f.slot.marked_while_held); // marked before the task was completed: the Slot refuses admission first
     VG_CHECK(task->event->status.load() == WriteEvent::Status::Failed); // completed before the stop
     VG_CHECK(photo.current() == nullptr && photo.last() == task);
     VG_CHECK_EQ(f.media.captures, 4);
@@ -510,6 +520,23 @@ VG_TEST_CASE(the_budget_is_reserved_at_acceptance_and_released_on_every_terminal
         VG_CHECK(task->event->status.load() == WriteEvent::Status::Failed);
         VG_CHECK(f.slot.publications.empty());
         VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
+    }
+    {
+        Fixture f; // a writer that cannot be built: released at once, not with the worker's frame after the hold
+        f.enable(CaptureType::Image, kLong);
+        f.slot.throw_on_create = true;
+        const auto task = f.dispatch();
+        auto &photo = f.channel(CaptureType::Image);
+        Worker worker(f.ctx, f.slot, CaptureType::Image);
+        Fixture::Running running(f.slot, worker);
+        VG_REQUIRE(Fixture::waitFor([&] { return f.inFlight() == 0; }));
+        VG_CHECK(photo.current() == task); // still held: the interval and the cooldown have not elapsed
+        f.slot.stop = true;                // which ends the hold
+        running.join();
+        VG_CHECK(task->event->status.load() == WriteEvent::Status::Failed);
+        VG_CHECK(photo.current() == nullptr && photo.last() == task);
+        VG_CHECK(f.slot.publications.empty());
+        VG_CHECK_EQ(f.media.captures, 0);
     }
     {
         Fixture f; // cancellation: the gate was closed before anything was recorded

@@ -157,10 +157,10 @@ public:
 
     // - MARK: Slot Admission (docs/PLAN.md sections 7.1 and 8.1)
 
-    // The Slot can take a task while it is not stopping and in its ready state.
+    // The Slot can take a task while it is not stopping, not failed, and in its ready state.
     bool isReadyToWrite() const noexcept override
     {
-        return !_stop_token.load(std::memory_order_acquire)
+        return !_stop_token.load(std::memory_order_acquire) && !_failure.load(std::memory_order_acquire)
                && (_state.load(std::memory_order_acquire) == SlotState::Ready);
     }
 
@@ -611,6 +611,7 @@ public:
 protected:
     friend SlotAdaptedWriter<Slot>;
     friend FileChannelWorker<Slot>;
+    friend struct SlotTestAccess; // defined by the module tests only
 
     inline Context &ctxRef() const
     {
@@ -795,9 +796,15 @@ protected:
 
     // One channel's worker reached its consecutive failure limit: the manager thread takes the Slot to the
     // error state, as before, so the other channel stops too (a retained limitation; docs/PLAN.md section 7.2).
+    // The worker marks before it completes its task. The admission stays registered, as it did, but refuses
+    // from here (isReadyToWrite), and the tasks pending on either channel, bound to this Slot, are canceled
+    // instead of left unclaimed until the Slot is disabled: a dispatcher's admission section holds its channel
+    // lock, which the cancel takes after it, so a task admitted before the mark is canceled and none is admitted
+    // after it. The manager's next poll, up to 500 ms later, is when the state follows.
     void markFailed() noexcept
     {
         _failure.store(true, std::memory_order_release);
+        _ctx.file_channels.cancelPendingBoundTo(_registration.load(std::memory_order_acquire));
     }
 
     std::string_view name() const noexcept

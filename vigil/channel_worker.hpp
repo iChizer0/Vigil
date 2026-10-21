@@ -34,7 +34,9 @@ using namespace vigil::types;
 //                                                         the media backlog before a continuous clip's writer is
 //                                                         built: kept from the boundary key frame when it is
 //                                                         still buffered, dropped otherwise (section 8.2)
-//   void markFailed();                                    the consecutive failure limit was reached
+//   void markFailed();                                    the consecutive failure limit was reached: the Slot
+//                                                         refuses admission from here and cancels its pending
+//                                                         tasks; called before the task is completed
 //   std::string_view name() const;                        for logging
 //
 // The writer W runs its task to the terminal status with operator(), reports endTime(), and hands over the
@@ -45,10 +47,11 @@ using namespace vigil::types;
 // file, then the hold: the channel holds a Completed or Failed
 // task until the interval (plus the cooldown after a failure) has elapsed from the writer's start, and only
 // then completes it, while Canceled and Interrupted (a closed gate) complete at once. A constructor failure is
-// a failed task like any other. The cooldown and the consecutive failure limit, which marks the adapter failed
-// and ends the loop, are constructor parameters with the production defaults (section 13). A Slot runs one
-// worker per file channel, Photo and Video: each claims from its own channel and counts its own failures, and
-// the two share the Slot's probes, its budget registry, and its publication lock.
+// a failed task like any other, its reservation released at once. The cooldown and the consecutive failure
+// limit, which marks the adapter failed before the task is completed and ends the loop, are constructor
+// parameters with the production defaults (section 13). A Slot runs one worker per file channel, Photo and
+// Video: each claims from its own channel and counts its own failures, and the two share the Slot's probes, its
+// budget registry, and its publication lock.
 //
 // A continuous clip (section 8.2) runs through the same loop as a Video task without an owner and without an
 // interval, so a Completed clip is completed at once and the next one, admitted by the rule loop, follows it;
@@ -124,7 +127,7 @@ private:
     bool runTask(const std::shared_ptr<FileTask> &task) noexcept
     {
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting a ", channelName(), " writer task for ", _adapter.name());
-        auto admission = std::move(task->reservation); // released below, or with this frame on a failure
+        auto admission = std::move(task->reservation); // released after publication, or at once on a throw
         const bool continuous = task->kind == FileTask::Kind::Continuous;
         const auto boundary = std::exchange(_boundary, std::nullopt); // what the previous clip left for this one
         auto status = WriteEvent::Status::Failed;
@@ -148,6 +151,7 @@ private:
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, channelName(), " writer task failed for ", _adapter.name(), ": ",
                 e.what());
+            admission.release(); // nothing is published, so nothing is in flight through the hold
         }
         return finishTask(task, status, end);
     }
@@ -173,17 +177,19 @@ private:
             while (std::chrono::steady_clock::now() < end && !_adapter.stopRequested())
                 std::this_thread::sleep_for(kHoldPollInterval);
         }
-        _ctx.file_channels.of(task->type).complete(task, status);
-        if (_adapter.stopRequested())
-            return false;
-        if (_consecutive_failures >= _consecutive_failure_max)
+        // The limit marks the adapter failed before the task is completed: the Slot refuses admission from then
+        // on and cancels what is pending on it, so nothing is admitted once the channel is idle, and nothing
+        // stays pending on a failed Slot. A stop that arrived meanwhile ends the loop without the mark, as before.
+        const bool stopping = _adapter.stopRequested();
+        const bool limit_reached = !stopping && _consecutive_failures >= _consecutive_failure_max;
+        if (limit_reached)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "The ", channelName(), " worker of ", _adapter.name(),
                 " reached the consecutive failure limit, stopping");
             _adapter.markFailed();
-            return false;
         }
-        return true;
+        _ctx.file_channels.of(task->type).complete(task, status);
+        return !stopping && !limit_reached;
     }
 
     Context &_ctx;
