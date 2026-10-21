@@ -22,10 +22,13 @@ struct FakeSlotAdmission: Context::SlotAdmission
     static constexpr Context::InFlightBudgets::FilesystemId kFilesystem = 42;
 
     Context &ctx;
+    const Context::InFlightBudgets::FilesystemId filesystem; // the fake filesystem the budget is kept for
     std::atomic<bool> ready = true;
     std::atomic<FileSize> free_bytes = std::numeric_limits<FileSize>::max() / 2;
 
-    explicit FakeSlotAdmission(Context &c) : ctx(c)
+    // `filesystem` is a real filesystem's id when a test shares the budget with a manual capture there.
+    explicit FakeSlotAdmission(Context &c, Context::InFlightBudgets::FilesystemId fs = kFilesystem)
+        : ctx(c), filesystem(fs)
     {
         open();
     }
@@ -61,7 +64,7 @@ struct FakeSlotAdmission: Context::SlotAdmission
 
     Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &admission, FileSize task_bytes) noexcept override
     {
-        return ctx.in_flight_budgets.tryReserve(kFilesystem, task_bytes, free_bytes.load(),
+        return ctx.in_flight_budgets.tryReserve(filesystem, task_bytes, free_bytes.load(),
             admission.critical_remain_bytes);
     }
 

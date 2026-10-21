@@ -1314,11 +1314,15 @@ private:
 class CaptureEndpoint final
 {
 public:
-    CaptureEndpoint(std::shared_ptr<Context> ctx) : _ctx(std::move(ctx))
+    // `run_capture_thread == false` is a test seam: no capture thread is started and the test drives
+    // captureTaskLoop() through CaptureEndpointTestAccess. Production code always runs the thread.
+    CaptureEndpoint(std::shared_ptr<Context> ctx, bool run_capture_thread = true) : _ctx(std::move(ctx))
     {
         if (!_ctx)
             throw Exception("Context pointer cannot be null in CaptureEndpoint");
 
+        if (!run_capture_thread)
+            return;
         _capture_thread = std::make_unique<std::thread>(&CaptureEndpoint::captureThreadTask, this);
         if (!_capture_thread)
             throw Exception("Failed to create capture thread in CaptureEndpoint");
@@ -1548,12 +1552,20 @@ private:
 
 protected:
     friend CaptureAdaptedWriter<CaptureEndpoint>;
+    friend struct CaptureEndpointTestAccess; // defined by the module tests only
 
+    // Completes `event` when it is the active capture. The adapter calls this from its destructor once the
+    // writer is done, and the loop's catch calls it for a writer that could not be built, which is a second
+    // call when the writer's constructor threw after the adapter was built: it returns without touching a
+    // capture started in between (until 2026-10-20 it dropped that capture).
     void handleCompletedCaptureEvent(std::shared_ptr<CaptureEvent> event) noexcept
     {
         const std::unique_lock lock(_event_mutex);
         if (event != _event_active)
-            VG_LOG(_ctx->log, VG_LOG_LEVEL_WARN, "Completed capture event does not match current event pointer");
+        {
+            VG_LOG(_ctx->log, VG_LOG_LEVEL_DEBUG, "Capture event is already completed, nothing to do");
+            return;
+        }
         _event_last = std::move(event);
         _event_active.reset();
         _finish_current_capture.store(false, std::memory_order_release);
