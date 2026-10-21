@@ -1,7 +1,7 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2026-10-20
+Revised: 2026-10-21
 Version: 2.0.0
 
 ## Rule API
@@ -12,6 +12,13 @@ Get or set the rule enablement and the post-trigger actions. The payload is the 
 (`record_config.json`): the library accepts no other version and never rewrites a stored file it cannot read, so an
 external manager migrates older files. `GET` returns the canonical document; `POST` takes the document shown below
 and stores it in canonical form; every field is required (see below).
+
+A stored record configuration, record rule, or schedule file that cannot be loaded at startup is left in place, and
+rules and continuous recording stay off until a valid document is posted here: `GET` meanwhile reports the defaults in
+the unusable file's place (every action disabled, the `ALWAYS_ON` rule, or the disabled schedule, whose gate is always
+open), and that `POST` turns on what `GET` shows. So post the unusable file's own document again first (its rule or
+schedule configuration), then this one; every valid schedule `POST` is stored, so posting back what its `GET` shows
+repairs the file.
 
 **Path:** `.../vigil/rule/config`
 
@@ -52,7 +59,9 @@ one is pending or playing is dropped). `bContinuousRecordEnabled` records MP4 cl
 media allow, whatever `bRuleEnabled` is; it is no rule event, so no rule callback reports it and its files carry
 `event_uid` 0. While it is set, `dVideo` keeps its stored value but no triggered video is admitted for a rule event
 (Photo and Sound are unaffected, and an HTTP activation then needs storage only when Photo is enabled); switching it
-either way finishes the running clip first, under its own identity, before the other mode's first clip starts. A clip
+either way finishes the running clip first, under its own identity, before the other mode's first clip starts, and
+after a completed triggered clip the first continuous clip also waits for the rest of that clip's interval, as any
+next task of the channel does. A clip
 that loses the schedule, media, or storage ends early and is kept, and the next clip starts at the first key frame
 after it is admitted, so nothing from a closed interval is recorded. `ALWAYS_ON`, the default record rule, cannot be
 combined with it even while `bRuleEnabled` is false (see Always-On Rule): select another record rule first.
@@ -62,7 +71,8 @@ non-positive or non-integer interval, an unknown photo format, and any other `iS
 (`30022`); a rejected payload changes neither the runtime nor the stored file. A SED rule with Sound enabled can
 retrigger itself through the microphone; any guard time belongs to the host's playback. Unknown fields are
 ignored and dropped from the stored document. `EAGAIN` (`30011`) means the action settings changed (a media refresh or
-another commit) while the document was being prepared or applied; post it again. Request bodies are limited to 1 MiB; a
+another commit) while the document was being prepared or applied; post it again, since the document may already be
+stored when `EAGAIN` answers, with the runtime still on the previous one. Request bodies are limited to 1 MiB; a
 larger body is rejected before parsing (the C API returns `EFAULT` with no JSON body). A first start without
 `record_config.json` reports every action disabled.
 
@@ -88,6 +98,15 @@ nothing. The timing in this document (the buffer period, the clip length and its
 action intervals, and the 10 ms rule evaluation and 50 ms worker probe periods behind them) is the host logic's
 target, verified with fake callbacks on a development host: real-device latency, callback duration, and the gap
 between clips depend on the host's media pipeline and storage and are the integration's to measure.
+Two more premises of the host: storage calls on the slot's filesystem (the free-space probe at each admission, which
+runs on the rule thread and on an HTTP activation's thread, and the directory creation and the rename at publication,
+on the slot's workers) return promptly, since a hanging device stalls those threads; and the host's video sink admits
+the files Vigil
+creates, because a host with a single video sink fails the second create, which counts like any other failure: a
+manual video capture that overlaps continuous recording fails the automatic clips meanwhile, and ten such failures take
+about 30 seconds (one 3-second cooldown each) to reach the limit above. Video frames must carry a key frame at least
+every 10 seconds, the buffer period: a clip's first and closing key frame are waited for at most that long, and a
+longer GOP cancels clips or ends them without a boundary.
 
 ### Rule Info
 
@@ -104,16 +123,16 @@ Get the information about the rule system.
     "bReadyForNewEvent": true, // Boolean, whether a new recording event can be started (false while a file channel holds a triggered task: pending, writing, or finished but still within its interval and failure cooldown; a continuous clip does not count)
     "dLastRuleEvent": { // Object or null: the most recently accepted triggered file task: the held one while a file channel holds one (the one accepted last when both do), otherwise the last retired one; a continuous clip is no rule event and shows under dActionStates.dVideo only
         "sStatus": "COMPLETED", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED" (a gate, pause, stop, settings change, or input loss stopped a task that had started; its file is kept), "CANCELED" (nothing was recorded, so no file exists: retired before a writer claimed it, the gate was already closed when the writer started, or no key frame arrived before the clip's key frame wait, gate, or end), "UNKNOWN"
-        "iTimestamp": 1735574000, // Integer, Unix timestamp in milliseconds
+        "iTimestamp": 1735574400000, // Integer, Unix timestamp in milliseconds: the owner's event time
         "iOwnerUID": 1735574400123 // Integer, UID of the owner that created the event (exact 64-bit value); 0 for a continuous clip (dActionStates.dVideo.dEvent)
     },
     "dLastRuleEventOwner": { // Object or null: the owner of dLastRuleEvent
         "sRuleType": "TIMER", // String, rule type; "UNKNOWN" for a direct EVENT delivered without a rule
-        "sRuleID": "Hourly Timer", // String, the condition: the inference member ID, the GPIO signal (e.g. "RISING"), or the TTY command; empty for other rules
+        "sRuleID": "", // String, the condition: the inference member ID, the GPIO signal (e.g. "RISING"), the TTY command, or the SED rule's sID; empty for other rules
         "sSourceID": "", // String, the inference source for inference and direct EVENT owners, the pin name for GPIO, the TTY name for TTY, otherwise empty
         "sSourceDelivery": "EVENT", // String, "FRAME" for inference frame owners, "EVENT" for every other owner
-        "iTimestamp": 1735574400, // Integer, event time in Unix milliseconds: the input's timestamp for FRAME and EVENT owners, otherwise the time the condition was observed
-        "iDispatchTimestamp": 1735574400, // Integer, Unix milliseconds when Vigil created the owner; equals iTimestamp for owners without an input
+        "iTimestamp": 1735574400000, // Integer, event time in Unix milliseconds: the input's timestamp for FRAME and EVENT owners, otherwise the time the condition was observed
+        "iDispatchTimestamp": 1735574400000, // Integer, Unix milliseconds when Vigil created the owner; equals iTimestamp for owners without an input
         "iUID": 1735574400123 // Integer, unique owner ID (exact 64-bit value), also carried by the rule and file callbacks
     },
     "dLastDispatchedOwner": { // Object or null: the owner of the most recent dispatch, whatever the actions did with it, in the shape of dLastRuleEventOwner; it moves ahead of dLastRuleEventOwner when the file actions rejected or did not apply to the event
@@ -123,10 +142,10 @@ Get the information about the rule system.
         "dPhoto": {
             "bEnabled": true, // Boolean, whether the action is enabled in the general rule configuration
             "bReady": false, // Boolean, enabled and holding no task: the next event can be admitted here, subject to the gates and the storage slot
-            "sState": "WRITING", // String, one of: "IDLE" (no task held), "PENDING" (accepted, no worker has claimed it yet), "WRITING", "HOLDING" (the task finished, sStatus is terminal, and the channel still holds it: through its interval after a completed task, or its failure cooldown after a failed one; an interrupted or canceled task is retired at once)
+            "sState": "WRITING", // String, one of: "IDLE" (no task held), "PENDING" (accepted, no worker has claimed it yet), "WRITING", "HOLDING" (the task finished, sStatus is terminal, and the channel still holds it: through its interval after a completed task, or its interval plus the failure cooldown after a failed one; an interrupted or canceled task is retired at once)
             "dEvent": { // Object or null: the held task's event, in the shape of dLastRuleEvent
                 "sStatus": "WRITING",
-                "iTimestamp": 1735574000,
+                "iTimestamp": 1735574400000,
                 "iOwnerUID": 1735574400123
             }
         },
@@ -156,11 +175,11 @@ Get the information about the rule system.
         },
         // ... More TTY devices
     },
-    "bVideoClipLengthSeconds": 60, // Integer, target video clip length in seconds (estimated, may inaccurate because the GOP length varies)
+    "bVideoClipLengthSeconds": 60, // Integer (the b prefix is kept for compatibility), target video clip length in seconds; a clip ends at the first key frame after it, so its length varies with the GOP
     "bMediaPaused": false, // Boolean, whether media capture is currently paused (e.g., due to configuration update in underlying encoder system)
-    "bRecordEnabled": true, // Boolean, whether the record rule is currently enabled, the schedule rule is also required to be enabled for recording to be triggered
+    "bRecordEnabled": true, // Boolean, whether rules are enabled (bRuleEnabled of the general rule configuration); the schedule must also be open for a rule to trigger
     "dRecordSlot": {
-        // ... Refer to the storage slot object in Storage Status API response for the schema of this field, null if no available slot is ready for recording
+        // ... Refer to the storage slot object in Storage Status API response for the schema of this field: the enabled slot, whatever its readiness (its state says whether it can record, except that a slot which reached its failure limit refuses at once and shows ERROR from the manager's next poll); null while no slot is enabled
     }
 }
 ```
@@ -260,7 +279,7 @@ The rule reads AcousticsLab inference frames from the Unix socket `/dev/shm/acou
 {
     "sCurrentSelected": "TIMER",
     "dTimer": {
-        "iIntervalSeconds": 60 // Integer, trigger interval in seconds, must be >= 0, activation will be ignored while previous event is still writing
+        "iIntervalSeconds": 60 // Integer, trigger interval in seconds, must be >= 0; an activation while a file channel still holds its previous task (through the interval after its start, plus the cooldown after a failed one) is reported and triggers Sound, but admits no new file on that channel
     },
     "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
     "message": "" // String, optional, present only on failure
@@ -274,8 +293,8 @@ The rule reads AcousticsLab inference frames from the Unix socket `/dev/shm/acou
     "sCurrentSelected": "GPIO",
     "dGPIO": {
         "sName": "GPIO_01", // String, GPIO pin name (or provide "iNum" instead)
-        "sState": "FLOATING", // String, GPIO pin state, one of: "DISABLED", "FLOATING", "PULL_UP", "PULL_DOWN"
-        "sSignal": "HIGH", // String, GPIO pin signal to trigger recording, one of: "HIGH", "LOW", "RISING", "FALLING", activation will be ignored while previous event is still writing
+        "sState": "FLOATING", // String, GPIO pin state, one of: "FLOATING", "PULL_UP", "PULL_DOWN" ("DISABLED" is rejected: a rule needs a readable pin)
+        "sSignal": "HIGH", // String, GPIO pin signal to trigger recording, one of: "HIGH", "LOW", "RISING", "FALLING"; an activation while a file channel still holds its previous task (through the interval after its start, plus the cooldown after a failed one) is reported and triggers Sound, but admits no new file on that channel
         "iDebounceDurationMs": 100 // Integer, debounce duration in milliseconds, must be >= 0
     },
     "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
@@ -292,7 +311,7 @@ Rule events from a GPIO rule (the rule callback and `dLastRuleEventOwner`) carry
     "sCurrentSelected": "TTY",
     "dTTY": {
         "sName": "ttyS0", // String, TTY name
-        "sCommand": "RECORD" // String, non-empty command string to activate recording, activation will be ignored while previous event is still writing
+        "sCommand": "RECORD" // String, non-empty command string to activate recording; an activation while a file channel still holds its previous task (through the interval after its start, plus the cooldown after a failed one) is reported and triggers Sound, but admits no new file on that channel
     },
     "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
     "message": "" // String, optional, present only on failure
@@ -358,9 +377,9 @@ Notes:
 - Returns error `EPERM` if the schedule rule evaluates to false.
 - Returns error `EPERM` if the current selected rule is not `HTTP`.
 - Returns error `EBUSY` if a file action is enabled and the storage system is not ready for writing; a rule-only or Sound-only activation needs no storage.
-- Returns error `EBUSY` if a pending activation request is still being processed.
-- Returns error `EBUSY` if a file action is enabled and no file channel accepted the event (every enabled channel still holds a task); the event is still reported.
+- Returns error `EBUSY` if a file action is enabled and no file channel accepted the event: every enabled channel still holds a task (through the interval after its start, plus the cooldown after a failed one), the slot has no headroom for it or turned unusable after the precheck, or a commit changed the settings meanwhile; the event is still reported and Sound is triggered. A gate that closed after the precheck (the rule flag, the schedule, or the media pause, which the precheck does not read) answers `EBUSY` as well, and refuses Sound too.
 - A refused activation leaves no pending event behind: the next activation is admitted afresh (since 2026-10-19).
+- A Sound-only activation answers 0 once its owner is dispatched, also when the Sound trigger was dropped because one was pending or playing, or because the media pause, which the precheck does not read, refused it.
 
 ## Storage API
 
@@ -590,7 +609,9 @@ Runtime notes:
 
 ## Capture API
 
-The Capture API provides manual control over media capture, independent of the rule-based recording system.
+The Capture API provides manual control over media capture, independent of the rule-based recording system, except
+that the `ALWAYS_ON` rule opens no clip while a capture (or any other media operation) is active, and that a host with
+a single video sink cannot run a video capture and a recording at once (see the capability limits).
 
 ### Capture Status
 

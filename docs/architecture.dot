@@ -151,8 +151,8 @@ digraph G {
       style="rounded,dashed";
       color=gray60;
       infer_q [label="Inference Queue\nstd::deque<InferenceResult>\nCapacity 60, Oldest Dropped\nCleared While Rules Disabled", shape=note];
-      slot_media_buf [label="Slot Media Buffer\nRule-Based + Continuous Recording\nSorted by PTS\nKeyframe-Aware Drop\nkeepFrom(boundary)", shape=note];
-      capture_media_buf [label="Capture Media Buffer\nManual Capture\nSorted by PTS\nKeyframe-Aware Drop", shape=note];
+      slot_media_buf [label="Slot Media Buffer\nRule-Based + Continuous Recording\nOrdered by Enqueue Time\nKeyframe-Aware Drop\nkeepFrom(boundary)", shape=note];
+      capture_media_buf [label="Capture Media Buffer\nManual Capture\nOrdered by Enqueue Time\nKeyframe-Aware Drop", shape=note];
     }
 
     subgraph cluster_ctx_shared {
@@ -323,6 +323,7 @@ digraph G {
   rule_ep -> ctrl_rule_enabled [color=blue, xlabel="enable/disable"];
   rule_ep -> shared_writer_cfg [color=blue, xlabel="update"];
   schedule_ep -> rule_schedule [color=blue, xlabel="create/update"];
+  schedule_ep -> ctrl_schedule_open [color=blue, xlabel="publish on change"];
   record_ep -> rule_thread [color=blue, xlabel="swap rule"];
   record_ep -> rule_http [color=blue, xlabel="activate"];
   record_ep -> slot_admission [color=blue, xlabel="HTTP precheck"];
@@ -441,8 +442,8 @@ digraph G {
   // EDGES: Capture Endpoint Relationships
   // ============================================================
 
-  capture_start_ep -> capture_adapter [color=blue, xlabel="create"];
-  capture_start_ep -> capture_media_buf [color=blue, xlabel="clearToLastKeyFrame()"];
+  capture_thread -> capture_adapter [color=blue, xlabel="create"];
+  capture_thread -> capture_media_buf [color=blue, xlabel="clearToLastKeyFrame()"];
   capture_start_ep -> capture_thread [color=blue, xlabel="owns"];
   capture_thread -> capture_adapter [color=orange, style=dashed, xlabel="poll & write"];
   capture_adapter -> budgets [color=blue, xlabel="reserve"];

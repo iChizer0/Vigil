@@ -1361,6 +1361,9 @@ private:
         return false;
     }
 
+    // Mounts the device at the mount path, a directory reserved for Vigil (the internal_mount_point of
+    // vg_config_storage_t included, as its header says): whatever is mounted there is detached first, and what the
+    // directory holds is removed, so a path that is not Vigil's own would lose its contents.
     bool doMount() const noexcept
     {
         {

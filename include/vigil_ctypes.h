@@ -4,7 +4,7 @@
 #ifdef VG_CTYPES_VERSION
 #error "Duplicate definition of VG_CTYPES_VERSION"
 #else
-#define VG_CTYPES_VERSION "2026.10.20"
+#define VG_CTYPES_VERSION "2026.10.21"
 #endif
 
 #include <stdbool.h>
@@ -32,7 +32,10 @@ typedef enum vg_log_level_e {
 /**
  * @brief One encoded video frame. Enqueued by the host, it must carry a payload (non-null data, positive
  * bytes_len), which Vigil copies during the call. Handed to a write callback, data is Vigil's copy: read-only
- * and valid for the duration of the call.
+ * and valid for the duration of the call. Vigil expects a key frame at least every 10 seconds, the buffer period:
+ * the buffer is trimmed at key frames, a triggered clip starts at the oldest buffered key frame and ends at the
+ * first one after its length, and a writer waits at most 10 seconds for a key frame; with a longer GOP, clips are
+ * canceled or end without one.
  */
 typedef struct vg_video_frame_t
 {
@@ -63,9 +66,12 @@ typedef struct vg_audio_frame_t
  * recording Slot. Strings and buffers passed to a callback are borrowed for the duration of the call. Threads:
  * the file, capture, and thumbnail callbacks run on Vigil's Photo and Video workers and on the capture thread,
  * and sound_play_cb on the sound worker, all outside Vigil's locks, so they may call the C API except the scoped
- * suspension functions (see vg_media_scoped_suspend_write); max_bytes_estimate_cb is called on the thread of
- * vg_service_init, of a record configuration or manual capture POST, and of vg_media_scoped_resume_write, there
- * under the suspension lock, so keep it a pure function that does not call the C API.
+ * suspension functions (see vg_media_scoped_suspend_write) and, on a Photo or Video worker, except the storage API
+ * calls that eject, format, or configure that worker's Slot (an eject would join the thread they run on, a format
+ * or a configuration change would deadlock with a concurrent disable of the Slot); max_bytes_estimate_cb is called
+ * on the thread of vg_service_init, of a record configuration or manual capture POST, and of
+ * vg_media_scoped_resume_write, there under the suspension lock, so keep it a pure function that does not call the
+ * C API.
  *
  * @note Layout: sound_play_cb was appended in 2026.10.19. Growing this structure shifts the fields that follow it
  * in vg_config_t, and the initialization API has no size or version negotiation, so the library and every caller
@@ -128,8 +134,9 @@ typedef enum vg_rule_type_e {
 typedef struct vg_rule_evt_t
 {
     vg_rule_type_e type;         /**< Type of the rule that owns the event; UNKNOWN for a direct EVENT input. */
-    const char *id;              /**< The condition: the inference member ID, the GPIO signal, or the TTY command; empty
-                                    otherwise. Internal managed string, null terminated, do not free. */
+    const char *id;              /**< The condition: the inference member ID, the GPIO signal, the TTY command, or the
+                                    SED rule's ID; empty otherwise. Internal managed string, null terminated, do not
+                                    free. */
     int64_t timestamp;           /**< Event time in Unix milliseconds: the input's timestamp for FRAME and direct EVENT
                                     owners, otherwise when the condition was observed. */
     uint64_t uid;                /**< Unique identifier for the rule event, can be used for event correlation. */
@@ -186,8 +193,11 @@ typedef struct vg_config_basic_t
     void (*on_file_event_cb)(const vg_file_evt_t *evt); /**< Optional. Called once per file a recording Slot
                          publishes (manual capture files are not reported), from the worker that published it,
                          after it released its media operation and the publication lock; a slot's Photo and Video
-                         workers publish independently, so two calls may overlap. Return promptly, and do not call
-                         vg_service_init or vg_service_deinit from it. */
+                         workers publish independently, so two calls may overlap. Return promptly; do not call
+                         vg_service_init or vg_service_deinit from it, and do not eject, format, or configure the
+                         publishing Slot from it: an eject would join the worker it runs on, and a format or a
+                         configuration change would deadlock with a concurrent disable of the Slot (reading the
+                         storage status is fine). */
     const char *config_directory;                       /**< Required (EINVAL when null): the configuration root,
                                                            read during vg_service_init. */
 } vg_config_basic_t;
@@ -293,18 +303,25 @@ typedef struct vg_config_ttys_t
 typedef struct vg_config_storage_t
 {
     void (*on_mount_cb)(const char *dev, const char *mount_path);   /**< Optional. Called after a Slot is mounted,
-                         on the storage or the Slot's thread, with no Vigil lock held. */
+                         on the storage or the Slot's thread, with no Vigil lock held. Return promptly, and do not
+                         eject, format, or configure that Slot from it, nor call vg_service_deinit: it may run on
+                         the Slot's own manager thread, which an eject or deinit would join, and a format or a
+                         configuration change would deadlock with a concurrent disable of the Slot. */
     void (*on_unmount_cb)(const char *dev, const char *mount_path); /**< Optional. Called from the destructor of a
-                         Slot other than the internal one, before it is unmounted, on the thread that releases it
-                         (storage, an HTTP request, or deinit), with Vigil's Slot locks held: return promptly and do
-                         not call the C API from it. */
+                         Slot other than the internal one, before it is unmounted, on whichever thread releases the
+                         last reference to it: the storage thread, an HTTP request's or the async task worker's (an
+                         eject, a file operation), deinit, or any thread whose storage status read held the Slot
+                         when it was removed or ejected, a callback's included; with Vigil's Slot locks held: return
+                         promptly and do not call the C API from it. */
     bool (*is_hidden_device_cb)(const char *dev); /**< Optional (nothing is hidden without it). Whether the block
                                                     device of that bare name (e.g. mmcblk0p1) is kept out of storage
                                                     management; its answer is ignored for internal_device_path. */
     const char *internal_device_path; /**< Device path to the internal storage device, e.g. /dev/mmcblk0p1; null for
                                          no internal device. */
     const char *internal_mount_point; /**< Filesystem path to the internal storage mount point; derived from the
-                                         device name when null. */
+                                         device name when null. The mount paths, this one included, are directories
+                                         reserved for Vigil: before it mounts a device there, it detaches whatever
+                                         is mounted at the path and removes what the directory holds. */
     const char *data_directory_path;  /**< Data storage root relative to a mount point, e.g. DCIM, no leading '/';
                                          DCIM when null or invalid. */
     const char *relay_directory_path; /**< Filesystem path to the nginx relay directory for Vigil relay data; null
