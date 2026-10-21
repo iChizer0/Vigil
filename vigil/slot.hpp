@@ -1035,6 +1035,11 @@ private:
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Storage slot for device path ", _dev_path,
                 " has reached maximum recovery attempts or marked as failed, giving up and entering error state");
             _state.store(SlotState::Error, std::memory_order_release);
+            // Nothing brings READY back until a person recovers the Slot, so a task admitted just before it left
+            // READY (within one worker probe) would stay pending with its reservation until then: canceled here as
+            // the failure mark cancels (markFailed), after the dispatcher's admission section, which holds the
+            // channel lock. The admission stays registered and refuses by the state.
+            _ctx.file_channels.cancelPendingBoundTo(_registration.load(std::memory_order_acquire));
         }
     }
 
