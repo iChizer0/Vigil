@@ -380,19 +380,25 @@ private:
         };
         std::unordered_map<std::string, SlotInfo> dev_2_slot_info_vec;
 
+        // The internal device's Slot, at internal_mount_point or at its own mount path, whatever the node's type:
+        // built by the one-time scan, and again by an add of the same node, so that the internal device keeps its
+        // kind across a bounce of its node (a remove, then an add) instead of coming back as an ordinary Slot at
+        // /mnt, which an eject could drop and which would lose the internal format guards, the preserved space,
+        // and the internal root ownership policy.
+        const char *const internal_dev_path = _ctx.c_api.storage.internal_device_path;
+        const auto internal_slot_info = [this, internal_dev_path]() {
+            std::string mount_point;
+            if (_ctx.c_api.storage.internal_mount_point)
+                mount_point = _ctx.c_api.storage.internal_mount_point;
+            else
+                mount_point = getMountPath(std::filesystem::path(internal_dev_path).filename().string());
+            return SlotInfo { std::move(mount_point), false, true };
+        };
+
         if (!_initial_scan_done)
         {
-            if (_ctx.c_api.storage.internal_device_path)
-            {
-                std::string mount_point;
-                if (_ctx.c_api.storage.internal_mount_point)
-                    mount_point = _ctx.c_api.storage.internal_mount_point;
-                else
-                    mount_point = getMountPath(
-                        std::filesystem::path(_ctx.c_api.storage.internal_device_path).filename().string());
-                dev_2_slot_info_vec.emplace(_ctx.c_api.storage.internal_device_path,
-                    SlotInfo { std::move(mount_point), false, true });
-            }
+            if (internal_dev_path)
+                dev_2_slot_info_vec.emplace(internal_dev_path, internal_slot_info());
 
             try
             {
@@ -458,7 +464,9 @@ private:
                     const std::string dev_path = "/dev/" + devname;
                     if (action == "add")
                     {
-                        if (devtype == "partition")
+                        if (internal_dev_path && dev_path == internal_dev_path)
+                            dev_2_slot_info_vec.emplace(dev_path, internal_slot_info());
+                        else if (devtype == "partition")
                             dev_2_slot_info_vec.emplace(dev_path,
                                 SlotInfo { getMountPath(devname), isDevRemovable(devname), false });
                     }
