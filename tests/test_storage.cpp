@@ -4,9 +4,10 @@
 // uevent socket and scan /sys/class/block, and its Slots would check and mount the host's partitions under /mnt.
 // The device and mount paths are in a temporary directory and do not exist, so nothing is mounted, formatted, or
 // removed, and a Slot's own threads probe a device that is not there, which is enough for the lifecycle under
-// test; the bounce case names two fixed paths, /dev/vigil-test-bounce and /mnt/rc_vigil-test-bounce, which it
-// requires absent. A Slot over no device admits no task, so what closing its admission does to the pending tasks
-// bound to it is pinned by `closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_serve_both_channels_at_once`
+// test; the bounce cases name three fixed paths, /dev/vigil-test-bounce, /mnt/rc_vigil-test-bounce, and
+// /dev/vigil-test-internal, which they require absent. A Slot over no device admits no task, so what closing its
+// admission does to the pending tasks bound to it is pinned by
+// `closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_serve_both_channels_at_once`
 // (`tests/test_channel_worker.cpp`), and a Slot made READY by hand pins what the failure mark does.
 
 #include <atomic>
@@ -313,24 +314,35 @@ private:
     }
 };
 
+// What a case changes in the fake configuration, which has no storage callback and no internal device.
+struct FixtureOptions
+{
+    vg_sta_e (*log_cb)(vg_log_level_e, const char *, size_t) = nullptr; // replaces the logging callback
+    void (*on_unmount_cb)(const char *, const char *) = nullptr;        // the storage callback of that name
+    const char *internal_device_path = nullptr; // internal_device_path, mounted at the fixture's `internal_mount`
+};
+
 struct Fixture
 {
     std::string root;
     std::string dev;
     std::string mount;
+    std::string internal_mount;
     vg_config_t config;
     std::shared_ptr<Context> ctx;
 
-    // `log_cb` replaces the fake configuration's logging callback when given, and `on_unmount_cb` is the storage
-    // callback of that name, null in the fake configuration.
-    explicit Fixture(vg_sta_e (*log_cb)(vg_log_level_e, const char *, size_t) = nullptr,
-        void (*on_unmount_cb)(const char *, const char *) = nullptr)
+    explicit Fixture(const FixtureOptions &options = {})
         : root(MakeTempDir()), dev(root + "/no-such-dev"), mount(root + "/no-such-mnt"),
-          config(MakeFakeConfig(root.c_str()))
+          internal_mount(root + "/no-such-internal-mnt"), config(MakeFakeConfig(root.c_str()))
     {
-        if (log_cb)
-            config.basic.log_cb = log_cb;
-        config.storage.on_unmount_cb = on_unmount_cb;
+        if (options.log_cb)
+            config.basic.log_cb = options.log_cb;
+        config.storage.on_unmount_cb = options.on_unmount_cb;
+        if (options.internal_device_path)
+        {
+            config.storage.internal_device_path = options.internal_device_path;
+            config.storage.internal_mount_point = internal_mount.c_str();
+        }
         ctx = std::make_shared<Context>(config);
     }
 
@@ -553,7 +565,7 @@ VG_TEST_CASE(an_eject_or_a_removal_unmounts_the_slot_on_its_own_thread_before_th
     // at the same path; a dropped Slot is never enabled again. Over no device the unmount itself fails, since
     // nothing is mounted, and the callback is what the case observes.
     UnmountRecorder::clear();
-    Fixture f(nullptr, &UnmountRecorder::callback);
+    Fixture f(FixtureOptions { .on_unmount_cb = &UnmountRecorder::callback });
     Storage storage(StorageConfig(std::string(f.dev), std::string()), *f.ctx, /*run_manager_thread*/ false);
 
     // A removal, with the test holding a reference: the callback has run, here, when the branch returns, and the
@@ -598,7 +610,7 @@ VG_TEST_CASE(an_eject_erases_only_the_slot_it_dropped)
     // cannot order two drops on one mutex, so it reaches that state from the other side: the eject's own drop is
     // held inside the unmount callback, with the Slot's locks taken, while the test replaces the map entry.
     UnmountRecorder::clear();
-    Fixture f(nullptr, &UnmountRecorder::callback);
+    Fixture f(FixtureOptions { .on_unmount_cb = &UnmountRecorder::callback });
     Storage storage(StorageConfig(std::string(f.dev), std::string()), *f.ctx, /*run_manager_thread*/ false);
     auto slot = f.makeSlot();
     StorageTestAccess::add(storage, slot);
@@ -642,7 +654,7 @@ VG_TEST_CASE(a_disable_syncs_the_filesystem_at_the_mount_path)
     // report no such failure (the sync is of the temporary filesystem); over the fixture's nonexistent mount path
     // the open fails as before, which shows the record catches the line.
     LogRecorder::clear();
-    Fixture f(&LogRecorder::callback);
+    Fixture f(FixtureOptions { .log_cb = &LogRecorder::callback });
     const auto mount = f.root + "/mnt";
     VG_REQUIRE(std::filesystem::create_directory(mount));
     {
@@ -709,6 +721,45 @@ VG_TEST_CASE(a_device_that_bounces_within_one_pass_gets_a_new_slot_and_one_added
     uevents.send("add", "vigil-test-disk", "disk");
     StorageTestAccess::pass(storage);
     VG_CHECK_EQ(storage.getStatus().slots_status.size(), size_t { 0 });
+}
+
+VG_TEST_CASE(the_internal_device_keeps_its_slot_kind_across_a_bounce_of_its_node)
+{
+    // The netlink add branch builds internal_device_path's Slot as the one-time scan does, whatever the node's
+    // type: internal, at the internal mount point, not removable. So a bounce of its node (a remove, then an add,
+    // within one pass or across passes) brings the internal Slot back, rather than an ordinary one at /mnt, which
+    // an eject could drop and which would lose the internal format guards, the preserved space, and the internal
+    // root policy (docs/PLAN.md section 9). Over a nonexistent device, with the scan marked done, the first add
+    // stands for the scan's Slot.
+    const std::string devname = "vigil-test-internal";
+    const std::string dev_path = "/dev/" + devname;
+    VG_REQUIRE(!std::filesystem::exists(dev_path)); // a fixed path
+    Fixture f(FixtureOptions { .internal_device_path = dev_path.c_str() });
+    UeventPeer uevents;
+    Storage storage(StorageConfig(std::string(dev_path), std::string()), *f.ctx, /*run_manager_thread*/ false);
+    StorageTestAccess::attachUeventSocket(storage, uevents.storage_fd);
+
+    uevents.send("add", devname);
+    StorageTestAccess::pass(storage);
+    auto first = StorageTestAccess::get(storage, dev_path);
+    VG_REQUIRE(first != nullptr);
+    VG_CHECK(first->isInternal());
+    VG_CHECK(!first->isRemovable());
+    VG_CHECK_EQ(first->mountPath().string(), f.internal_mount);
+    VG_REQUIRE(first->enable() == 0);
+
+    uevents.send("remove", devname);
+    uevents.send("add", devname, "disk"); // the node's type is not read for the internal device
+    StorageTestAccess::pass(storage);
+    auto second = StorageTestAccess::get(storage, dev_path);
+    VG_REQUIRE(second != nullptr);
+    VG_CHECK(second != first);
+    VG_CHECK(!first->isEnabled());
+    VG_CHECK(second->isInternal());
+    VG_CHECK(!second->isRemovable());
+    VG_CHECK_EQ(second->mountPath().string(), f.internal_mount);
+    VG_CHECK_EQ(storage.ejectSlot(dev_path), ENOTSUP); // refused for the internal Slot, as for the scan's
+    VG_CHECK_EQ(storage.getStatus().slots_status.size(), size_t { 1 });
 }
 
 VG_TEST_MAIN()

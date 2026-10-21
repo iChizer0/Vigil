@@ -314,9 +314,13 @@ typedef struct vg_config_storage_t
                          it. */
     bool (*is_hidden_device_cb)(const char *dev); /**< Optional (nothing is hidden without it). Whether the block
                                                     device of that bare name (e.g. mmcblk0p1) is kept out of storage
-                                                    management; its answer is ignored for internal_device_path. */
-    const char *internal_device_path; /**< Device path to the internal storage device, e.g. /dev/mmcblk0p1; null for
-                                         no internal device. */
+                                                    management. The one-time scan builds internal_device_path's Slot
+                                                    whatever the answer for its name; a hidden name's device events
+                                                    are ignored afterwards, that device's included, so a hidden
+                                                    internal device's Slot is never dropped or rebuilt by them. */
+    const char *internal_device_path; /**< Device path to the internal storage device, e.g. /dev/mmcblk0p1: the
+                                         node's own path, /dev/ plus its kernel name, which the device events name
+                                         (a symlink would match none of them); null for no internal device. */
     const char *internal_mount_point; /**< Filesystem path to the internal storage mount point; derived from the
                                          device name when null. The mount paths, this one included, are directories
                                          reserved for Vigil: before it mounts a device there, it detaches whatever
