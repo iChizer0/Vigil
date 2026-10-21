@@ -43,7 +43,9 @@ using namespace vigil::slot;
 class Storage
 {
 public:
-    Storage(const StorageConfig &cfg, Context &ctx)
+    // `run_manager_thread == false` is a test seam: no manager thread is started, and the test drives the Slot
+    // map through StorageTestAccess. Production code always runs the thread.
+    Storage(const StorageConfig &cfg, Context &ctx, bool run_manager_thread = true)
         : _ctx(ctx), _data_dir_path(kDataDirDefaultPath), _config_mutex(), _config(cfg), _stop_token(false),
           _manager_thread(nullptr), _ejection_in_progress(false), _slots_mutex(), _slots(), _netlink_fd(-1),
           _initial_scan_done(false)
@@ -77,7 +79,8 @@ public:
         }
 
         // Start manager thread
-        _manager_thread = std::make_unique<std::thread>(&Storage::managerThreadTask, this);
+        if (run_manager_thread)
+            _manager_thread = std::make_unique<std::thread>(&Storage::managerThreadTask, this);
     }
 
     ~Storage() noexcept
@@ -458,20 +461,7 @@ private:
         for (const auto &dev_path: dev_2_remove)
         {
             dev_2_slot_info_vec.erase(dev_path);
-            std::shared_ptr<Slot> slot = nullptr;
-            {
-                const std::unique_lock lock(_slots_mutex);
-                if (auto it = _slots.find(dev_path); it != _slots.end())
-                {
-                    slot = it->second;
-                    _slots.erase(it);
-                }
-            }
-            if (slot)
-            {
-                slot.reset();
-                VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Removed storage slot for device ", dev_path);
-            }
+            removeSlot(dev_path);
         }
 
         {
@@ -498,6 +488,36 @@ private:
         }
     }
 
+    // Drops the Slot of a device that was removed: disabled first, outside `_slots_mutex`, as ejectSlot does.
+    // The disable closes the Slot's admission and joins its threads (docs/PLAN.md section 9) before the map's
+    // reference goes, so that no later release destroys a running Slot: a copy of the map taken by getStatus, on
+    // a FILE callback for instance, may hold the last reference, and a Slot destroyed on its own worker would
+    // join itself. It also cancels the pending tasks bound to the Slot before syncEnabledSlotWithConfig, on this
+    // thread, enables a replacement, which keeps one admission registered at a time
+    // (Context::SlotAdmissionRegistry::open). The device is gone, so the Slot is dropped whatever `disable`
+    // returns; it refuses only a Slot being formatted, which holds the Slot's mutex through the format, so the
+    // warning below is for symmetry with ejectSlot.
+    void removeSlot(const std::string &dev_path) noexcept
+    {
+        std::shared_ptr<Slot> slot;
+        {
+            const std::shared_lock lock(_slots_mutex);
+            if (const auto it = _slots.find(dev_path); it != _slots.end())
+                slot = it->second;
+        }
+        if (!slot)
+            return;
+        if (const auto ret = slot->disable(); ret != 0)
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to disable storage slot with device path ", dev_path,
+                ", code: ", ret);
+        {
+            const std::unique_lock lock(_slots_mutex);
+            _slots.erase(dev_path);
+        }
+        slot.reset();
+        VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Removed storage slot for device ", dev_path);
+    }
+
     bool isSelectedSlot(const std::shared_ptr<Slot> &slot, const StorageConfig &config) const noexcept
     {
         if (!slot) [[unlikely]]
@@ -512,10 +532,10 @@ private:
         return dev_path_match && uuid_match;
     }
 
-    // Enables the selected Slot only after every other enabled Slot was disabled, which joined its two channel
-    // workers and its manager thread (docs/PLAN.md section 9): the replacement opens once the old consumers are
-    // drained, and a task never moves to another device (one pending across the switch is stale to the new
-    // workers, which cancel it).
+    // Enables the selected Slot only after every other enabled Slot was disabled, which closed its admission and
+    // joined its two channel workers and its manager thread (docs/PLAN.md section 9): the replacement opens once
+    // the old consumers are drained, and a task never moves to another device (one pending across the switch is
+    // canceled when the old Slot's admission closes).
     vg_sta_e syncEnabledSlotWithConfig()
     {
         const auto current_cfg = getConfig();
@@ -572,6 +592,8 @@ private:
     static inline constexpr const std::chrono::milliseconds kManagerLoopInterval = std::chrono::milliseconds(100);
 
 private:
+    friend struct StorageTestAccess; // defined by the module tests only
+
     Context &_ctx;
 
     std::filesystem::path _data_dir_path;
