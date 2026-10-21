@@ -1,10 +1,13 @@
-// Characterization tests for Storage over no device (docs/PLAN.md section 9): the manager thread is not started,
-// and each test drives the Slot map through StorageTestAccess. The device and mount paths do not exist, so
-// nothing is mounted, formatted, or removed; a Slot's own threads probe a device that is not there, which is
-// enough for the lifecycle under test. Such a Slot admits no task, so what closing its admission does to the
-// pending tasks bound to it is pinned by
-// `closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_serve_both_channels_at_once`
-// (`tests/test_channel_worker.cpp`).
+// Characterization tests for Storage over no device (docs/PLAN.md section 9). Two premises keep them off the host's
+// devices, and every case must keep both: a Storage is built with `run_manager_thread` false, and the netlink pass
+// runs only after `attachUeventSocket` gave it a socket pair. Without either, as root, the pass would open the real
+// uevent socket and scan /sys/class/block, and its Slots would check and mount the host's partitions under /mnt.
+// The device and mount paths are in a temporary directory and do not exist, so nothing is mounted, formatted, or
+// removed, and a Slot's own threads probe a device that is not there, which is enough for the lifecycle under
+// test; the bounce case names two fixed paths, /dev/vigil-test-bounce and /mnt/rc_vigil-test-bounce, which it
+// requires absent. A Slot over no device admits no task, so what closing its admission does to the pending tasks
+// bound to it is pinned by `closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_serve_both_channels_at_once`
+// (`tests/test_channel_worker.cpp`), and a Slot made READY by hand pins what the failure mark does.
 
 #include <cstdint>
 #include <cstdlib>
@@ -14,9 +17,13 @@
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
+
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include "vigil/configs.hpp"
 #include "vigil/context.hpp"
@@ -48,6 +55,28 @@ struct StorageTestAccess
     static void remove(Storage &storage, const std::string &dev_path)
     {
         storage.removeSlot(dev_path);
+    }
+
+    // The Slot held for `dev_path` (null: none).
+    static std::shared_ptr<Slot> get(const Storage &storage, const std::string &dev_path)
+    {
+        const std::shared_lock lock(storage._slots_mutex);
+        const auto it = storage._slots.find(dev_path);
+        return it == storage._slots.end() ? nullptr : it->second;
+    }
+
+    // Makes the netlink pass read its uevents from `fd`, which Storage closes with itself, with the initial scan
+    // marked done: a pass then handles the messages queued on `fd` and nothing else.
+    static void attachUeventSocket(Storage &storage, int fd)
+    {
+        storage._netlink_fd = fd;
+        storage._initial_scan_done = true;
+    }
+
+    // The netlink pass of the storage manager, without the enabling that follows it (syncEnabledSlotWithConfig).
+    static void pass(Storage &storage)
+    {
+        storage.syncAndUpdateSlotsWithNetlink();
     }
 };
 
@@ -122,6 +151,45 @@ struct Fixture
     bool registered(const Slot *slot) const
     {
         return ctx->slot_admission.with([slot](const Context::SlotAdmission *p) { return p == slot; });
+    }
+};
+
+// A socket pair standing for the uevent socket: `storage_fd` is attached to the Storage, which closes it, and
+// `send` queues one datagram laid out as the kernel's (the header line, then KEY=VALUE pairs, each NUL-terminated)
+// with the four keys the pass reads, which it parses as it does a real one.
+struct UeventPeer
+{
+    int storage_fd;
+    int fd;
+
+    UeventPeer()
+    {
+        int pair[2];
+        if (::socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0, pair) != 0)
+            throw std::runtime_error("socketpair failed");
+        storage_fd = pair[0];
+        fd = pair[1];
+    }
+
+    ~UeventPeer()
+    {
+        ::close(fd);
+    }
+
+    void send(std::string_view action, std::string_view devname, std::string_view devtype = "partition") const
+    {
+        std::string msg;
+        const auto append = [&msg](std::string_view s) {
+            msg += s;
+            msg += '\0';
+        };
+        append(std::string(action) + "@/devices/virtual/block/" + std::string(devname));
+        append("ACTION=" + std::string(action));
+        append("DEVNAME=" + std::string(devname));
+        append("SUBSYSTEM=block");
+        append("DEVTYPE=" + std::string(devtype));
+        if (::send(fd, msg.data(), msg.size(), 0) != static_cast<ssize_t>(msg.size()))
+            throw std::runtime_error("send failed");
     }
 };
 
@@ -233,6 +301,60 @@ VG_TEST_CASE(a_failed_slot_refuses_admission_at_once_and_cancels_what_it_admitte
     VG_CHECK(!f.ctx->dispatchRuleEvent(owner));
     VG_CHECK(f.registered(slot.get()));
     VG_CHECK_EQ(slot->registration(), registration);
+}
+
+VG_TEST_CASE(a_device_that_bounces_within_one_pass_gets_a_new_slot_and_one_added_and_removed_within_it_gets_none)
+{
+    // The netlink pass reads every queued uevent before it acts, and arrival order decides for a device whose
+    // events are both queued: a remove discards an add that came before it and leaves one that came after. A
+    // device that bounces within one pass (a remove, then an add) has its old Slot dropped, disabled first, and a
+    // new one created in the same pass, which the sync that follows the pass enables; one added and removed within
+    // one pass has none. The devices named here do not exist, so the pass's Slots are not removable and never
+    // mount; a whole disk's add names no partition and is ignored, and its remove finds no Slot.
+    Fixture f;
+    UeventPeer uevents;
+    const std::string devname = "vigil-test-bounce";
+    const std::string dev_path = "/dev/" + devname;
+    VG_REQUIRE(!std::filesystem::exists(dev_path) && !std::filesystem::exists("/mnt/rc_" + devname)); // fixed paths
+    Storage storage(StorageConfig(std::string(dev_path), std::string()), *f.ctx, /*run_manager_thread*/ false);
+    StorageTestAccess::attachUeventSocket(storage, uevents.storage_fd);
+
+    uevents.send("add", devname);
+    StorageTestAccess::pass(storage);
+    auto first = StorageTestAccess::get(storage, dev_path);
+    VG_REQUIRE(first != nullptr);
+    VG_CHECK(!first->isRemovable());
+    VG_CHECK(!first->isInternal());
+    VG_REQUIRE(first->enable() == 0);
+    VG_CHECK(f.registered(first.get()));
+
+    uevents.send("remove", devname);
+    uevents.send("add", devname);
+    StorageTestAccess::pass(storage);
+    auto second = StorageTestAccess::get(storage, dev_path);
+    VG_REQUIRE(second != nullptr);
+    VG_CHECK(second != first);
+    VG_CHECK(!first->isEnabled());
+    VG_CHECK_EQ(first->registration(), uint64_t { 0 });
+    VG_CHECK(!second->isEnabled()); // enabled by the sync that follows the pass, not by the pass
+    VG_CHECK(f.registered(nullptr));
+    VG_CHECK_EQ(storage.getStatus().slots_status.size(), size_t { 1 });
+
+    VG_REQUIRE(second->enable() == 0);
+    uevents.send("add", devname); // before the remove: discarded by it (the hold alone would not: removeSlot drops it
+                                  // before the loop that erases the held devices' adds runs)
+    uevents.send("remove", devname);
+    StorageTestAccess::pass(storage);
+    VG_CHECK(!StorageTestAccess::holds(storage, dev_path));
+    VG_CHECK(!second->isEnabled());
+    VG_CHECK(f.registered(nullptr));
+    VG_CHECK_EQ(storage.getStatus().slots_status.size(), size_t { 0 });
+
+    uevents.send("remove", devname); // unknown by now: nothing to do
+    uevents.send("remove", "vigil-test-disk", "disk");
+    uevents.send("add", "vigil-test-disk", "disk");
+    StorageTestAccess::pass(storage);
+    VG_CHECK_EQ(storage.getStatus().slots_status.size(), size_t { 0 });
 }
 
 VG_TEST_MAIN()

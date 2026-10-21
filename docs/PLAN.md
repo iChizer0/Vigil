@@ -362,6 +362,8 @@ Status 2026-10-21 (code review of 2026-10-20, F1): the removal branch of the sto
 
 Status 2026-10-21 (code review of 2026-10-20, F6): `Context::in_flight_budgets` is declared before the file channels, whose tasks hold reservations in it, so that it outlives them; a test that left a task claimed at teardown released into a destroyed member.
 
+Status 2026-10-21 (code review of 2026-10-20, F7, pre-existing): the netlink pass collected the removes and erased each removed device from its adds afterwards, whatever the order the two arrived in, so a device that bounced within one pass (a remove, then an add, both queued before the pass read them; the passes are at least 100 ms apart) lost its Slot until its next add event, which the one-time initial scan never supplies. A remove now discards only an add that came before it, so arrival order decides: a bounce drops the old Slot and creates a new one in the same pass, and a device added and removed within one pass gets none. Pinned over a socket pair standing for the uevent socket, the initial scan marked done, by `a_device_that_bounces_within_one_pass_gets_a_new_slot_and_one_added_and_removed_within_it_gets_none` (`tests/test_storage.cpp`).
+
 ## 10. C API changes and compatibility boundary
 
 In `include/vigil_ctypes.h`:

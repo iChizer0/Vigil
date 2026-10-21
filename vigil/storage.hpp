@@ -453,16 +453,19 @@ private:
                                 SlotInfo { getMountPath(devname), isDevRemovable(devname), false });
                     }
                     else if (action == "remove")
+                    {
+                        // Arrival order decides for a device whose events are both queued: an add before the remove
+                        // is discarded here, one after it stands, so a device that bounces within one pass (a
+                        // remove, then an add) gets a new Slot once removeSlot has dropped the old one below.
+                        dev_2_slot_info_vec.erase(dev_path);
                         dev_2_remove.emplace_back(dev_path);
+                    }
                 }
             }
         }
 
         for (const auto &dev_path: dev_2_remove)
-        {
-            dev_2_slot_info_vec.erase(dev_path);
             removeSlot(dev_path);
-        }
 
         {
             const std::shared_lock lock(_slots_mutex);
