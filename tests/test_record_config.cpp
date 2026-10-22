@@ -586,6 +586,12 @@ VG_TEST_CASE(a_commit_keeps_a_task_accepted_under_the_settings_it_published)
         ctx);
     VG_REQUIRE(before.sync(ctx, before.prepare(ctx)) == 0);
 
+    // What the two threads share with this one, declared before the guard that joins them, so that a required check
+    // that throws frees none of it under a running thread. The commit is prepared against the published revision.
+    const auto owner = std::make_shared<EventOwner>(VG_RULE_TYPE_TIMER, "", "", EventOwner::SourceDelivery::Event);
+    std::shared_ptr<FileTask> photo_task;
+    const auto prepared = after.prepare(ctx);
+    vg_sta_e committed = -1;
     std::thread admission, commit;
     struct Unblock // lets the admission go and joins both threads, also when a required check throws
     {
@@ -602,15 +608,11 @@ VG_TEST_CASE(a_commit_keeps_a_task_accepted_under_the_settings_it_published)
 
     // A Photo admission under the old settings, held inside the Slot's probe with the Photo channel lock taken.
     slot.block_next = true;
-    const auto owner = std::make_shared<EventOwner>(VG_RULE_TYPE_TIMER, "", "", EventOwner::SourceDelivery::Event);
-    std::shared_ptr<FileTask> photo_task;
     admission = std::thread([&] { photo_task = photo.tryAccept(owner, ctx.action_settings.get()); });
     VG_REQUIRE(wait_for([&] { return slot.blocked.load(); }));
 
     // The commit publishes, then waits for the Photo channel lock before its Video cancel.
     const auto revision = ctx.action_settings.getRevision();
-    const auto prepared = after.prepare(ctx);
-    vg_sta_e committed = -1;
     commit = std::thread([&] { committed = after.sync(ctx, prepared); });
     VG_REQUIRE(wait_for([&] { return ctx.action_settings.getRevision() != revision; }));
 
