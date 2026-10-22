@@ -66,7 +66,7 @@ The phases are those of `docs/PLAN.md` section 11; the identifiers are the rows 
 
 **Documents.** `README.txt` (requirements, every CMake option, the test and sanitizer builds), `docs/architecture.dot` (checked against the code in Phase 5B-4), `docs/PLAN.md` (the plan with the status of every section and unit), `docs/TODO.md` (the checklist with evidence), this document.
 
-**Example.** `example/main.cpp` zero-initializes `vg_config_t`, sets `sound_play_cb` and `on_file_event_cb`, and prints the event time and the dispatch time of a rule event; it is a demonstration with dummy callbacks, not a test.
+**Example.** `example/main.cpp` zero-initializes `vg_config_t`, sets `sound_play_cb` and `on_file_event_cb`, and prints the event time and the dispatch time of a rule event; it is a demonstration with dummy callbacks, not a test. It hides every block device from storage management, so run as root it mounts nothing of the host's (its internal device, `/dev/null`, is one libblkid refuses), and its relay directory is under `/run`, which only root can write.
 
 ## 3. Build and test commands and results
 

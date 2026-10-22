@@ -147,10 +147,14 @@ void on_unmount_cb(const char *dev, const char *mount_path)
     std::cout << "Unmounted " << dev << " at " << mount_path << std::endl;
 }
 
+// Every block device is kept out of storage management: a Slot is built for each partition not hidden, mounts it
+// under /mnt if it can, whether or not it is selected, and sets the mounted root to 1000:1000, mode 0777, so a host
+// answers false only for the devices Vigil may manage (its card slot's partitions), never for the system's own. The
+// internal device's Slot is built whatever the answer.
 bool is_hidden_device_cb(const char *dev)
 {
     (void)dev;
-    return false;
+    return true;
 }
 
 int main()
@@ -186,11 +190,13 @@ int main()
 
     // Storage
     // The mount point and the relay directory are reserved for Vigil, which empties them: the mount point before
-    // it mounts the device (here derived from the device name, under /mnt), the relay directory at init.
+    // it mounts the device (here derived from the device name, under /mnt), the relay directory at init. The relay
+    // directory's parent is writable by root only, not /tmp: a relay request sets the owner and mode of the directory
+    // the path leads to, through a link if one is there.
     config.storage.internal_device_path = "/dev/null";
     config.storage.internal_mount_point = nullptr;
     config.storage.data_directory_path = "data";
-    config.storage.relay_directory_path = "/tmp/vigil-example-relay";
+    config.storage.relay_directory_path = "/run/vigil-example-relay";
     config.storage.on_mount_cb = on_mount_cb;
     config.storage.on_unmount_cb = on_unmount_cb;
     config.storage.is_hidden_device_cb = is_hidden_device_cb;
