@@ -561,7 +561,8 @@ private:
     // canceled when the old Slot's admission closes). Of several Slots the selector matches (a UUID shared by cards
     // cloned from one image), the one already enabled stays the target, whatever the map's order, and every other
     // enabled Slot, selected or not, is disabled first: at most one Slot is enabled, and so at most one admission
-    // is registered (Context::SlotAdmissionRegistry::open).
+    // is registered (Context::SlotAdmissionRegistry::open, which names the one window, two overlapping ejects, where
+    // the replacement opens before a dropped Slot's consumers are joined; no task moves even then).
     vg_sta_e syncEnabledSlotWithConfig()
     {
         const auto current_cfg = getConfig();
