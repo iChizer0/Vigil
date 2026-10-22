@@ -1,6 +1,5 @@
-// Characterization tests for Context: inference intake, the per-tick input hand-off, rule event
-// creation/reporting, and the owner identity that the C event projection is built from
-// (docs/PLAN.md sections 5.1, 6.1, 6.2; matrix R1 and W1). Everything here is today's behavior.
+// Context: inference intake, the per-tick input hand-off, dispatch and its reporting, file channel admission, and the
+// owner identity the C events are built from.
 
 #include <atomic>
 #include <chrono>
@@ -53,10 +52,9 @@ void Publish(Context &ctx, std::shared_ptr<FileWriterSettings> photo, std::share
 struct Fixture
 {
     Context ctx;
-    FakeSlotAdmission slot; // registered and ready: admission needs a usable Slot (docs/PLAN.md section 8.1)
+    FakeSlotAdmission slot; // registered and ready: admission needs a usable Slot
 
-    // With rules enabled and the Video channel enabled: a dispatch accepts into enabled channels only, and the
-    // system enables one whenever rules are enabled (docs/PLAN.md section 4.1).
+    // Rules and the Video channel enabled.
     Fixture() : ctx(MakeFakeConfig()), slot(ctx)
     {
         RuleEventRecorder::clear();
@@ -187,7 +185,7 @@ VG_TEST_CASE(tick_while_disabled_resets_input_and_cancels_the_current_event)
     f.ctx.record_rule_enabled.store(false);
     const auto before = f.ctx.shared_time.steadyTime();
     f.ctx.tick();
-    VG_CHECK(f.ctx.shared_time.steadyTime() > before); // the clocks advance on a disabled tick too (since 2026-10-19)
+    VG_CHECK(f.ctx.shared_time.steadyTime() > before); // the clocks advance on a disabled tick too
     VG_CHECK_EQ(f.ctx.inference_queue.size(), size_t { 0 });
     VG_CHECK(!f.ctx.shared_inference_result.has_value());
     VG_CHECK(f.ctx.file_channels.video.current() == nullptr);
@@ -197,9 +195,8 @@ VG_TEST_CASE(tick_while_disabled_resets_input_and_cancels_the_current_event)
     VG_CHECK_EQ(last->event->owner_uid, owner->uid);
     VG_CHECK(last->owner == owner);
 
-    // The tick's cancel after a commit enabled rules again, as a tick that read the flag disabled runs it: the
-    // cancel rereads the flag under the channel lock, so a task accepted under the enabled rules since is kept
-    // (2026-10-21).
+    // A tick that read the flag disabled runs its cancel after a commit enabled rules again: the cancel rereads the
+    // flag under the channel lock, so a task accepted since is kept.
     f.ctx.record_rule_enabled.store(true);
     VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER)));
     f.ctx.file_channels.cancelPendingTriggered();
@@ -243,7 +240,7 @@ VG_TEST_CASE(rule_event_is_reported_on_every_dispatch_but_the_writer_event_is_cr
     VG_CHECK_EQ(current->settings_revision, f.ctx.action_settings.get().video_revision);
     VG_CHECK_EQ(current->event->owner_uid, owner1->uid);
     VG_CHECK(current->event->status.load() == WriteEvent::Status::Pending);
-    VG_CHECK_EQ(current->event->timestamp, int64_t { 5000 }); // the owner's event time (the clock before 2026-10-19)
+    VG_CHECK_EQ(current->event->timestamp, int64_t { 5000 }); // the owner's event time, not the clock
     VG_CHECK(f.ctx.last_dispatched_owner.get() == owner1);
 
     // A second owner while one task is held: reported and recorded as the last dispatched owner, but no new task.
@@ -259,8 +256,8 @@ VG_TEST_CASE(rule_event_is_reported_on_every_dispatch_but_the_writer_event_is_cr
     VG_CHECK(events[0].writer_created);
     VG_CHECK_EQ(events[0].uid, owner1->uid);
     VG_CHECK_EQ(events[0].timestamp, int64_t { 5000 });
-    VG_CHECK_EQ(events[0].dispatch_timestamp, owner1->dispatch_timestamp); // appended 2026-10-19 (Phase 4B)
-    VG_CHECK(!events[0].id_is_null);                                       // borrowed strings are empty, never null
+    VG_CHECK_EQ(events[0].dispatch_timestamp, owner1->dispatch_timestamp);
+    VG_CHECK(!events[0].id_is_null); // borrowed strings are empty, never null
     VG_CHECK_EQ(events[0].id, "");
     VG_CHECK(!events[0].source_id_is_null);
     VG_CHECK_EQ(events[0].source_id, "");
@@ -316,7 +313,7 @@ VG_TEST_CASE(claim_cancel_and_complete_are_identity_aware)
     VG_CHECK(video.current() == nullptr);
     VG_CHECK(video.last() == a);
     VG_CHECK(a->event->status.load() == WriteEvent::Status::Interrupted);
-    f.ctx.record_rule_enabled.store(true); // the gate applies at admission (docs/PLAN.md section 8.1)
+    f.ctx.record_rule_enabled.store(true); // the gate applies at admission
 
     // A newer task B is never touched by the stale completion of A.
     VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_HTTP)));
@@ -328,8 +325,7 @@ VG_TEST_CASE(claim_cancel_and_complete_are_identity_aware)
     video.complete(nullptr, WriteEvent::Status::Failed);
     VG_CHECK(video.current() == b);
 
-    // A pending task is what cancelPending (the teardown; the disabled tick's cancelPendingTriggered likewise)
-    // retires.
+    // A pending task is what cancelPending retires.
     f.ctx.file_channels.cancelPending();
     VG_CHECK(video.current() == nullptr);
     VG_CHECK(video.last() == b);
@@ -338,7 +334,7 @@ VG_TEST_CASE(claim_cancel_and_complete_are_identity_aware)
 
 VG_TEST_CASE(channels_hold_tasks_independently_and_a_stale_task_never_touches_a_newer_one)
 {
-    // Two enabled channels, built directly (docs/PLAN.md section 7.2).
+    // Two enabled channels, built directly.
     Fixture f;
     auto &photo = f.ctx.file_channels.photo;
     auto &video = f.ctx.file_channels.video;
@@ -401,7 +397,7 @@ VG_TEST_CASE(dispatch_accepts_into_every_enabled_channel_and_reports_either_acce
     auto &video = f.ctx.file_channels.video;
     Publish(f.ctx, ChannelSettings(f.ctx, CaptureType::Image), ChannelSettings(f.ctx, CaptureType::Video));
 
-    // writer_created is file acceptance in at least one channel (docs/PLAN.md section 6.2).
+    // writer_created is file acceptance in at least one channel.
     const auto owner1 = Owner(VG_RULE_TYPE_TIMER);
     const auto owner2 = Owner(VG_RULE_TYPE_HTTP);
     const auto owner3 = Owner(VG_RULE_TYPE_TIMER);
@@ -432,10 +428,8 @@ VG_TEST_CASE(dispatch_accepts_into_every_enabled_channel_and_reports_either_acce
 
 VG_TEST_CASE(admission_needs_a_usable_slot_with_headroom_and_a_rejected_owner_leaves_nothing_pending)
 {
-    // The deliberate change of docs/PLAN.md section 8.1: a file action is admitted at dispatch, on the registered
-    // Slot with its budget reserved, or rejected with nothing pending, so the next owner proceeds instead of
-    // waiting behind a pending event. The task binds the Slot it was admitted on: closing that Slot's admission
-    // retires it, and a reopened Slot has a new registration.
+    // The task binds the Slot it was admitted on: closing that Slot's admission retires it, and a reopened Slot has a
+    // new registration.
     Fixture f;
     auto &video = f.ctx.file_channels.video;
     const auto task_bytes = f.ctx.action_settings.get().settings->video->watermarks.task_bytes;
@@ -486,12 +480,8 @@ VG_TEST_CASE(admission_needs_a_usable_slot_with_headroom_and_a_rejected_owner_le
 
 VG_TEST_CASE(closing_a_registration_cancels_its_tasks_after_another_one_opened)
 {
-    // The storage module keeps one registration open at a time (docs/PLAN.md section 9) but for one window: an
-    // eject that returns clears the single ejection flag while another eject's drop has yet to close its admission,
-    // so its manager can enable another Slot, whose open replaces the registration. The dropped Slot's close still
-    // cancels the tasks bound to it, or a task admitted just before the drop would stay pending with no worker to
-    // claim it, its channel refusing every task until rules were disabled or the channel's recording changed; and
-    // the other Slot's task stays, since a registration is never reused, and so does its registration.
+    // Overlapping ejects can let another Slot open before the dropped one closes: that close still cancels the
+    // dropped Slot's task, and the other Slot's task and registration stay.
     Fixture f;
     auto &video = f.ctx.file_channels.video;
     auto &photo = f.ctx.file_channels.photo;
@@ -522,9 +512,8 @@ VG_TEST_CASE(closing_a_registration_cancels_its_tasks_after_another_one_opened)
 
 VG_TEST_CASE(admission_rejects_when_a_gate_closed_between_evaluation_and_dispatch)
 {
-    // The gates are read inside the admission section (docs/PLAN.md section 8.1): rules disabled, the schedule
-    // closed, or media paused since the caller evaluated them reject the file action, with the owner still
-    // reported and nothing pending.
+    // Rules disabled, the schedule closed, or media paused since the caller evaluated them: the owner is still
+    // reported, with nothing pending.
     Fixture f;
     const auto rejected = [&] {
         const auto owner = Owner(VG_RULE_TYPE_TIMER);
@@ -552,10 +541,7 @@ VG_TEST_CASE(admission_rejects_when_a_gate_closed_between_evaluation_and_dispatc
 
 VG_TEST_CASE(continuous_admission_needs_no_owner_and_no_rule_flag_and_counts_as_no_rule_event)
 {
-    // docs/PLAN.md section 8.2 (Phase 5A-2): with continuous recording configured, dispatchContinuous admits a
-    // UID-zero clip without an owner on the Video channel, against the schedule, the pause, and the Slot, not
-    // the rule flag; nothing is reported, the last dispatched owner stays, and the triggered view rule info
-    // reads ignores the clip. Triggered Video is suppressed meanwhile; Photo is not.
+    // Triggered Video is suppressed while continuous recording is configured; Photo is not.
     Fixture f;
     f.ctx.tick(); // the shared clocks, which a clip's event time comes from
     auto &photo = f.ctx.file_channels.photo;
@@ -628,7 +614,7 @@ VG_TEST_CASE(continuous_admission_needs_no_owner_and_no_rule_flag_and_counts_as_
     video.cancelPending();
 
     // Without a Photo channel a rule event has no file action: it is reported with nothing accepted, and the
-    // dispatch answers as a rule-only configuration does (docs/PLAN.md section 5.2).
+    // dispatch answers as a rule-only configuration does.
     f.ctx.record_rule_enabled.store(true);
     Publish(f.ctx, nullptr, ChannelSettings(f.ctx, CaptureType::Video), true);
     VG_CHECK(!f.ctx.action_settings.get().settings->fileChannel());
@@ -649,9 +635,8 @@ VG_TEST_CASE(continuous_admission_needs_no_owner_and_no_rule_flag_and_counts_as_
 
 VG_TEST_CASE(the_continuation_gate_of_a_running_task_depends_on_its_kind)
 {
-    // docs/PLAN.md section 8.2: a triggered task runs while rules are enabled, a continuous clip while the
-    // schedule is open, and either while the Video revision it was bound to is current, which a mode switch
-    // moves, so a handover finishes the running clip of the old mode.
+    // A triggered task runs while rules are enabled, a continuous clip while the schedule is open, and either only
+    // while the Video revision it was bound to is current.
     Fixture f;
     const auto &video = f.ctx.file_channels.video;
     const auto rev = f.ctx.action_settings.channelRevision(CaptureType::Video);
@@ -680,7 +665,6 @@ VG_TEST_CASE(the_continuation_gate_of_a_running_task_depends_on_its_kind)
 
 VG_TEST_CASE(source_less_owners_report_event_delivery)
 {
-    // Decided on 2026-10-19 (docs/PLAN.md section 6.1): owners without a source still carry EVENT delivery.
     Fixture f;
     const vg_rule_type_e types[] = { VG_RULE_TYPE_TIMER, VG_RULE_TYPE_HTTP, VG_RULE_TYPE_ALWAYS_ON, VG_RULE_TYPE_SED,
         VG_RULE_TYPE_GPIO, VG_RULE_TYPE_TTY };
@@ -786,8 +770,7 @@ VG_TEST_CASE(always_on_waits_for_the_current_event_and_for_media)
         VG_CHECK(rule(f.ctx) != nullptr);
     }
     {
-        // Without a usable Slot each interval's dispatch is rejected and reported, and the interval is consumed
-        // as before: the pacing is unchanged by admission at dispatch (docs/PLAN.md sections 4.4 and 8.1).
+        // Without a usable Slot each interval's dispatch is rejected and reported, and the interval is consumed.
         f.slot.ready = false;
         const AlwaysOnRule rule(AlwaysOnRuleConfig {}, f.ctx);
         const auto owner = rule(f.ctx);
@@ -845,8 +828,6 @@ VG_TEST_CASE(media_barrier_refuses_admission_while_paused_and_a_waiting_pause_dr
 
 VG_TEST_CASE(in_flight_budgets_admit_against_the_free_space_minus_reservations_and_release)
 {
-    // docs/PLAN.md section 9: an admission counts what earlier admissions may still write to the same
-    // filesystem, reserves its own bytes in the same critical section, and releases them when its holder goes.
     Fixture f;
     auto &budgets = f.ctx.in_flight_budgets;
     constexpr Context::InFlightBudgets::FilesystemId fs = 7, other = 8;

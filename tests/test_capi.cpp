@@ -1,9 +1,6 @@
-// Characterization tests for the C API lifecycle (docs/PLAN.md section 8.3): the instance guard, nested
-// scoped suspension, reentry from a callback while the runtime is being built or torn down, and a nested C API
-// call from a callback on the thread of a C API call. The runtime
-// is real (rule, storage, and capture threads, plus the selected Slot's manager and channel workers) over the
-// fake configuration: the internal "device" is a path that does not exist, every scanned block device is
-// hidden, and no media sink is reachable, so nothing here touches a device or needs privileges.
+// The C API lifecycle over a real runtime and the fake configuration: the internal "device" is a path that does not
+// exist, every scanned block device is hidden, and no media sink is reachable, so nothing here touches a device or
+// needs privileges.
 
 #include <atomic>
 #include <cerrno>
@@ -115,8 +112,7 @@ bool MediaPaused()
     return Get(&vg_http_api_rule_info_get).at("bMediaPaused").get<bool>();
 }
 
-// The storage manager thread adds the internal Slot on its first scan and enables it once it is selected, both
-// on its own schedule: a condition to wait for, not a delay.
+// The storage thread adds and enables the internal Slot on its own schedule: a condition to wait for, not a delay.
 nlohmann::json WaitForInternalSlot(const Fixture &f, bool enabled)
 {
     while (true)
@@ -144,9 +140,7 @@ int Post(vg_sta_e (*api)(const vg_http_api_request_t *, vg_http_api_response_t *
     return result.at("code").get<int>();
 }
 
-// Selects the internal "device" as the enabled Slot through the C API: its manager thread and its Photo and
-// Video channel workers start and idle, since the device does not exist (docs/PLAN.md section 7.2), and its
-// destructor logs and joins them during teardown.
+// The internal Slot's manager and channel workers start and idle, since the device does not exist.
 nlohmann::json SelectInternalSlot(const Fixture &f)
 {
     nlohmann::json config;
@@ -223,8 +217,8 @@ VG_TEST_CASE(scoped_suspension_nests_and_resumes_only_when_balanced)
 VG_TEST_CASE(a_callback_can_reenter_the_c_api_while_the_runtime_is_built_or_torn_down)
 {
     Fixture f;
-    // The runtime logs while it is built; a log callback that calls back into the C API from that thread
-    // finds no instance yet, instead of blocking on the lock init used to hold (a deadlock before 2026-10-19).
+    // The runtime logs while it is built; a log callback that calls back into the C API from that thread finds no
+    // instance yet instead of blocking.
     Reentry::arm();
     VG_REQUIRE(vg_service_init(&f.config) == 0);
     Reentry::disarm();
@@ -266,9 +260,7 @@ VG_TEST_CASE(request_bodies_are_bounded_before_parsing)
 
 VG_TEST_CASE(activation_without_a_file_action_needs_no_storage_and_plays_the_sound)
 {
-    // Rule-only and Sound-only configurations through the C API (docs/PLAN.md sections 4.1 and 5.2), with no
-    // Slot selected: the activation is dispatched without storage, the RULE callback reports it without file
-    // acceptance, and the Sound worker plays the trigger; a file action makes storage a precondition again.
+    // No Slot is selected: only a file action makes storage a precondition.
     Fixture f;
     f.config.media.sound_play_cb = &SoundCalls::play;
     SoundCalls::count = 0;
@@ -308,11 +300,8 @@ VG_TEST_CASE(activation_without_a_file_action_needs_no_storage_and_plays_the_sou
 
 VG_TEST_CASE(continuous_recording_is_accepted_through_the_c_api_and_suppresses_the_video_action_for_activation)
 {
-    // docs/PLAN.md sections 4.1 and 8.2 (Phase 5A-3) through the C API, with no Slot ready: the switch is
-    // accepted and returned canonically, rule info reports the Video channel as continuous and not ready for a
-    // rule event, the rule loop admits nothing without storage, an HTTP activation of a Video-only
-    // configuration needs no storage since triggered Video is suppressed, and ALWAYS_ON cannot be selected
-    // over it.
+    // With no Slot ready the rule loop admits nothing, and ALWAYS_ON cannot be selected while continuous recording is
+    // on.
     Fixture f;
     RuleEventRecorder::clear();
     VG_REQUIRE(vg_service_init(&f.config) == 0);
@@ -345,9 +334,7 @@ VG_TEST_CASE(continuous_recording_is_accepted_through_the_c_api_and_suppresses_t
 
 VG_TEST_CASE(the_selected_slot_starts_its_manager_and_both_channel_workers_and_deinit_joins_them)
 {
-    // The runtime's full thread set (docs/PLAN.md sections 7.2 and 8.3): selecting the internal Slot starts its
-    // manager thread and its Photo and Video workers, deinit joins them, and the runtime builds again on the
-    // stored selection.
+    // The runtime builds again on the stored selection.
     Fixture f;
     VG_REQUIRE(vg_service_init(&f.config) == 0);
     auto slot = SelectInternalSlot(f);
@@ -363,10 +350,7 @@ VG_TEST_CASE(the_selected_slot_starts_its_manager_and_both_channel_workers_and_d
 
 VG_TEST_CASE(init_validates_the_configuration_and_the_api_refuses_empty_frames_and_unreleased_responses)
 {
-    // The C API boundary (docs/PLAN.md section 10): a configuration without its directory is refused before
-    // anything is built, a frame without a payload is refused instead of being kept by reference, a response
-    // structure must be zero-initialized or released (the release macro clears it completely since
-    // 2026-10-20, so it can be reused), and a GPIO query that fails without writing its list lists nothing.
+    // A GPIO query that fails without writing its list lists nothing.
     Fixture f;
     auto no_directory = f.config;
     no_directory.basic.config_directory = nullptr;
@@ -404,11 +388,8 @@ VG_TEST_CASE(init_validates_the_configuration_and_the_api_refuses_empty_frames_a
 
 VG_TEST_CASE(a_callback_on_the_thread_of_a_c_api_call_can_call_the_c_api_but_not_the_lifecycle)
 {
-    // The RULE callback of an HTTP activation runs on the activation's thread, inside the C API call. A nested
-    // C API call from it borrows the activation's hold on the instance instead of locking it again (undefined
-    // before 2026-10-20), so it can read rule info and post a configuration; deinit, which would wait for the
-    // exclusive lock against the hold the thread itself keeps, and init, which would lock shared again for its
-    // existence check, return EDEADLK instead.
+    // The RULE callback of an HTTP activation runs inside the C API call: a nested call borrows the activation's
+    // hold on the instance, and init and deinit return EDEADLK.
     Fixture f;
     RuleEventRecorder::clear();
     struct HookGuard

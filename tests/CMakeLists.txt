@@ -1,4 +1,4 @@
-# Module-owned tests (docs/PLAN.md section 11, unit 1A). Enabled with -DVIGIL_BUILD_TESTS=ON.
+# Module-owned tests, enabled with -DVIGIL_BUILD_TESTS=ON.
 # Every test is a self-contained executable registered with CTest. None of them needs a
 # peripheral, a storage device, a media sink, or elevated privileges.
 

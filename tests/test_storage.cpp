@@ -1,16 +1,10 @@
-// Characterization tests for Storage over no device (docs/PLAN.md section 9). Two premises keep them off the host's
-// devices, and every case must keep both: a Storage is built with `run_manager_thread` false, and the netlink pass
-// runs only after `attachUeventSocket` gave it a socket pair. Without either, as root, the pass would open the real
-// uevent socket and scan /sys/class/block, and its Slots would check and mount the host's partitions under /mnt.
-// The device and mount paths are in a temporary directory and do not exist, but for one case's device, a zero-filled
-// file on which blkid finds no filesystem (it must stay so: a Slot checks and mounts a device it recognizes); so
-// nothing is mounted, formatted, or removed, and a Slot's own threads probe a device that is not there or holds
-// nothing to mount, which is enough for the lifecycle under test; the bounce cases name three fixed paths,
-// /dev/vigil-test-bounce, /mnt/rc_vigil-test-bounce, and /dev/vigil-test-internal, which they require absent. A Slot
-// over no device admits no task, so what closing its admission does to the pending tasks bound to it is pinned by
-// `closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_serve_both_channels_at_once`
-// (`tests/test_channel_worker.cpp`), and a Slot made READY by hand pins what the failure mark and a saturation do.
-// One case times a wait, since what it pins is the absence of work over time: the manager's wait for a format.
+// Storage over no device. Two premises keep these cases off the host's devices, and every case must keep both: a
+// Storage is built with `run_manager_thread` false, and the netlink pass runs only on the socket pair of
+// `attachUeventSocket`; otherwise, as root, the pass would scan /sys/class/block and mount the host's partitions.
+// The device and mount paths are in a temporary directory, but for the bounce cases' fixed paths,
+// /dev/vigil-test-bounce, /mnt/rc_vigil-test-bounce, and /dev/vigil-test-internal, which they require absent. No
+// device exists but one case's zero-filled file, on which blkid finds no filesystem (it must stay so: a Slot mounts a
+// device it recognizes). One case times a wait, since what it pins is the absence of work over time.
 
 #include <atomic>
 #include <chrono>
@@ -136,8 +130,7 @@ struct SlotTestAccess
         slot._quota_rotate.store(rotate, std::memory_order_release);
     }
 
-    // Whether the Slot still holds one of the threads it started (its manager or a channel worker), which a disable
-    // joins and releases.
+    // Whether the Slot still holds its manager or a channel worker thread, which a disable joins and releases.
     static bool ownsThreads(const Slot &slot)
     {
         return slot._manager_thread || slot._photo_worker_thread || slot._video_worker_thread;
@@ -236,9 +229,9 @@ std::chrono::microseconds ProcessCpuTime()
            + std::chrono::microseconds(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
 }
 
-// The unmount callbacks of one case: how many, the last one's thread and mount path; and, when a case armed it, a
-// hold inside the next callback until the case releases it, which keeps the caller at a fixed point inside
-// Slot::drop with the Slot's locks taken: the hold a test has on an eject between its lookup and its erase.
+// The unmount callbacks of one case: how many, the last one's thread and mount path; and, when armed, a hold inside
+// the next callback, which keeps an eject inside Slot::drop with the Slot's locks taken, between its lookup and its
+// erase.
 struct UnmountRecorder
 {
     static void callback(const char *, const char *mount_path)
@@ -442,10 +435,8 @@ struct UeventPeer
 
 VG_TEST_CASE(a_removed_slot_is_disabled_and_its_admission_closed_before_the_map_drops_it)
 {
-    // Hot-unplug: the removal branch disables the Slot, which closes its admission and joins its threads, before
-    // the map's reference goes, as eject does. The test's own reference stands for a copy of the map taken by
-    // getStatus on another thread, so the map's reference is not the last one; and the Slot is unregistered when
-    // the branch returns, so a replacement opens the only registration.
+    // The test's own reference stands for a copy of the map taken by getStatus on another thread, so the map's
+    // reference is not the last one.
     Fixture f;
     Storage storage(StorageConfig(std::string(f.dev), std::string()), *f.ctx, /*run_manager_thread*/ false);
     auto slot = f.makeSlot();
@@ -484,11 +475,9 @@ VG_TEST_CASE(a_removed_slot_is_disabled_and_its_admission_closed_before_the_map_
 
 VG_TEST_CASE(a_failed_slot_stays_enabled_and_registered_until_removal)
 {
-    // The consecutive failure limit (docs/PLAN.md section 7.2): the worker marks the Slot failed before it
-    // completes its task, and the Slot's admission stays registered as before (rule info keeps reporting the
-    // Slot) while the manager's next poll takes the state to ERROR. The Slot stays enabled until a person
-    // recovers it, and removal, like disable, closes the admission. Over no device the Slot is never READY, so
-    // what the mark refuses and cancels is pinned by the next case.
+    // The admission stays registered (rule info keeps reporting the Slot) while the manager's next poll takes the
+    // state to ERROR. Over no device the Slot is never READY, so what the mark refuses and cancels is pinned by the
+    // next case.
     Fixture f;
     Storage storage(StorageConfig(std::string(f.dev), std::string()), *f.ctx, /*run_manager_thread*/ false);
     auto slot = f.makeSlot();
@@ -511,12 +500,9 @@ VG_TEST_CASE(a_failed_slot_stays_enabled_and_registered_until_removal)
 
 VG_TEST_CASE(a_failed_slot_refuses_admission_at_once_and_cancels_what_it_admitted)
 {
-    // Both halves of the mark on the Slot's side, on one thread: a Slot that was never enabled, so that no thread
-    // of its own moves its state, is set READY and registered by hand over an existing directory as its mount
-    // path, which is how an enabled Slot admits (docs/PLAN.md sections 7.2 and 8.1). It admits a Photo task; the
-    // mark cancels that task, the Slot and the registry refuse from the mark on, and the Slot stays registered.
-    // Premise: the temporary filesystem has more than 532 MiB free, one Photo's critical mark, as the capture
-    // endpoint tests need, since the admission probes the mount path's free space.
+    // The Slot is never enabled, so no thread of its own moves its state, and is made READY by hand over an existing
+    // directory. Premise: the temporary filesystem has more than 532 MiB free, one Photo's critical mark, since the
+    // admission probes the mount path's free space.
     Fixture f;
     const auto mount = f.root + "/mnt";
     VG_REQUIRE(std::filesystem::create_directory(mount));
@@ -551,13 +537,9 @@ VG_TEST_CASE(a_failed_slot_refuses_admission_at_once_and_cancels_what_it_admitte
 
 VG_TEST_CASE(saturation_without_rotation_cancels_the_pending_task_and_with_rotation_leaves_it_waiting)
 {
-    // The manager's state sync (docs/PLAN.md section 7.2), run by hand with the stats it would have read, over a
-    // Slot set READY and registered by hand as in the previous case. It admits a Photo task. A saturation with
-    // rotation on leaves the task pending, since the rotate step brings READY back; rotation turned off while the
-    // Slot is saturated leaves it too (an edge kept, docs/RETURN.md section 4.2), as does READY returning; a
-    // saturation with rotation off cancels it, as the ERROR states do, the Slot refusing admission while saturated
-    // and staying registered, and READY returning admits again. Premise: as above, the temporary filesystem has
-    // more than 532 MiB free.
+    // The manager's state sync, run by hand over a Slot made READY as in the previous case. Rotation turned off while
+    // the Slot is saturated cancels nothing (a kept edge: the task waits until a person acts), nor does READY
+    // returning. Premise: as above, more than 532 MiB free.
     Fixture f;
     const auto mount = f.root + "/mnt";
     VG_REQUIRE(std::filesystem::create_directory(mount));
@@ -615,12 +597,9 @@ VG_TEST_CASE(saturation_without_rotation_cancels_the_pending_task_and_with_rotat
 
 VG_TEST_CASE(a_selector_that_matches_several_slots_enables_one_and_keeps_the_enabled_one)
 {
-    // Of several Slots a selector matches (a UUID shared by cards cloned from one image), the sync enables one:
-    // the one already enabled stays the target, whatever the map's iteration order, and every other enabled Slot
-    // is disabled first, so at most one admission is registered (docs/PLAN.md section 9). Until 2026-10-21 the
-    // last match in map order was the target and an enabled match was never disabled, so a second match was
-    // enabled next to the first, whose registration the second's open overwrote. The UUIDs are set by hand, since
-    // a Slot over no device has none; the selections below reach the defect in either map order.
+    // A UUID shared by cards cloned from one image, set by hand, since a Slot over no device has none. Each Slot is
+    // enabled by path before a UUID selection, so in one of the two rounds the enabled Slot comes first in map order,
+    // whichever that order is.
     Fixture f;
     const std::string uuid = "1234-ABCD";
     Storage storage(StorageConfig(std::string(), std::string()), *f.ctx, /*run_manager_thread*/ false);
@@ -658,11 +637,7 @@ VG_TEST_CASE(a_selector_that_matches_several_slots_enables_one_and_keeps_the_ena
 
 VG_TEST_CASE(an_eject_or_a_removal_unmounts_the_slot_on_its_own_thread_before_the_map_lets_it_go)
 {
-    // Slot::drop, which an eject and a removal run: the Slot is disabled and unmounted, on_unmount_cb included, on
-    // the dropping thread and before the map's reference goes, so that a holder which lets go later (a storage
-    // status copy, a file operation) unmounts nothing, which by then could be a new Slot's mount of the same device
-    // at the same path; a dropped Slot is never enabled again. Over no device the unmount itself fails, since
-    // nothing is mounted, and the callback is what the case observes.
+    // Over no device the unmount itself fails, since nothing is mounted, so the callback is what the case observes.
     UnmountRecorder::clear();
     LogRecorder::clear();
     Fixture f(FixtureOptions { .log_cb = &LogRecorder::callback, .on_unmount_cb = &UnmountRecorder::callback });
@@ -703,14 +678,10 @@ VG_TEST_CASE(an_eject_or_a_removal_unmounts_the_slot_on_its_own_thread_before_th
 
 VG_TEST_CASE(an_eject_erases_only_the_slot_it_dropped)
 {
-    // Storage::ejectSlot erases its Slot's map entry after the drop, and by then the entry may hold another Slot: a
-    // removal (the device pulled) that won the race on the Slot's mutex dropped and erased this one, and the same
-    // netlink pass built a replacement for the re-added device under the same key, as a device that bounces within
-    // one pass gets a new Slot in that pass. The eject's drop then finds the Slot dropped, and its erase must leave
-    // the replacement alone: erased undropped, the replacement's destructor would unmount the present device under
-    // the map lock, on the request thread, and the device would be unmanaged until its next add event. A test
-    // cannot order two drops on one mutex, so it reaches that state from the other side: the eject's own drop is
-    // held inside the unmount callback, with the Slot's locks taken, while the test replaces the map entry.
+    // By the time an eject erases its entry, a removal may have dropped the Slot and the same pass built a
+    // replacement under the key. A test cannot order two drops on one mutex, so it reaches that state from the other
+    // side: the eject's own drop is held inside the unmount callback, with the Slot's locks taken, while the test
+    // replaces the map entry.
     UnmountRecorder::clear();
     Fixture f(FixtureOptions { .on_unmount_cb = &UnmountRecorder::callback });
     Storage storage(StorageConfig(std::string(f.dev), std::string()), *f.ctx, /*run_manager_thread*/ false);
@@ -750,12 +721,9 @@ VG_TEST_CASE(an_eject_erases_only_the_slot_it_dropped)
 
 VG_TEST_CASE(a_disable_syncs_the_filesystem_at_the_mount_path)
 {
-    // Slot::doFsync runs at a disable (a switch) and before an unmount (an eject, a removal, deinit): it opens the
-    // mount path read-only, as a directory cannot be opened for writing (EISDIR), which had left the sync unrun since
-    // 2026-05-29 and logged a failure at every disable. Over a directory in the temporary root the disable must
-    // report no such failure (the sync is of the temporary filesystem); over the fixture's nonexistent mount path
-    // the open fails as before, which shows the record catches the line, and the disable and the drop's unmount each
-    // write it, checked before the Slot's destructor, whose unmount of an undropped Slot syncs as well.
+    // Over a directory in the temporary root the disable logs no sync failure. Over the fixture's nonexistent mount
+    // path the open fails, which shows the record catches the line: the disable and the drop's unmount each write it,
+    // checked before the Slot's destructor, whose unmount of an undropped Slot syncs as well.
     LogRecorder::clear();
     Fixture f(FixtureOptions { .log_cb = &LogRecorder::callback });
     const auto mount = f.root + "/mnt";
@@ -778,11 +746,8 @@ VG_TEST_CASE(a_disable_syncs_the_filesystem_at_the_mount_path)
 
 VG_TEST_CASE(an_enabled_slot_that_waits_for_a_format_request_leaves_the_processor_idle)
 {
-    // An enabled Slot over a device with no filesystem it supports (an exFAT card; here a zero-filled file, on which
-    // blkid finds nothing) waits in NOT_FORMATTED_OR_FORMAT_UNSUPPORTED for a format request, as it waits while a
-    // format runs, and its manager probes the state once per interval meanwhile. Until 2026-10-22 that wait measured
-    // its sleep from the start of a round it never left, so after the first interval the manager spun on one core.
-    // After that interval, the process's CPU time over a second bounds it: a wait leaves it almost empty (a few
+    // A zero-filled file, on which blkid finds nothing, stands for an unsupported card. Past the wait's first
+    // interval, the case bounds the process's CPU time over a second: a wait leaves it almost empty (a few
     // milliseconds, sanitized or not, and load cannot raise it), and a spin exceeds the bound while it gets a tenth of
     // a core.
     Fixture f;
@@ -803,12 +768,8 @@ VG_TEST_CASE(an_enabled_slot_that_waits_for_a_format_request_leaves_the_processo
 
 VG_TEST_CASE(a_device_that_bounces_within_one_pass_gets_a_new_slot_and_one_added_and_removed_within_it_gets_none)
 {
-    // The netlink pass reads every queued uevent before it acts, and arrival order decides for a device whose
-    // events are both queued: a remove discards an add that came before it and leaves one that came after. A
-    // device that bounces within one pass (a remove, then an add) has its old Slot dropped, disabled first, and a
-    // new one created in the same pass, which the sync that follows the pass enables; one added and removed within
-    // one pass has none. The devices named here do not exist, so the pass's Slots are not removable and never
-    // mount; a whole disk's add names no partition and is ignored, and its remove finds no Slot.
+    // A remove discards an add queued before it and leaves one after it. The devices named here do not exist, so the
+    // pass's Slots are not removable and never mount; a whole disk's add names no partition and is ignored.
     Fixture f;
     UeventPeer uevents;
     const std::string devname = "vigil-test-bounce";
@@ -857,12 +818,7 @@ VG_TEST_CASE(a_device_that_bounces_within_one_pass_gets_a_new_slot_and_one_added
 
 VG_TEST_CASE(the_internal_device_keeps_its_slot_kind_across_a_bounce_of_its_node)
 {
-    // The netlink add branch builds internal_device_path's Slot as the one-time scan does, whatever the node's
-    // type: internal, at the internal mount point, not removable. So a bounce of its node (a remove, then an add,
-    // within one pass or across passes) brings the internal Slot back, rather than an ordinary one at /mnt, which
-    // an eject could drop and which would lose the internal format guards, the preserved space, and the internal
-    // root policy (docs/PLAN.md section 9). Over a nonexistent device, with the scan marked done, the first add
-    // stands for the scan's Slot.
+    // Over a nonexistent device, with the scan marked done, the first add stands for the scan's Slot.
     const std::string devname = "vigil-test-internal";
     const std::string dev_path = "/dev/" + devname;
     VG_REQUIRE(!std::filesystem::exists(dev_path)); // a fixed path

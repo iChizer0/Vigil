@@ -1,11 +1,4 @@
-// Characterization tests for the file channel worker over a fake Slot adapter and fake media (docs/PLAN.md
-// section 7.2; matrix W1): claim, write, publish outside the media operation and before the hold, complete; the
-// failure cooldown and the consecutive failure limit with injected constants; Canceled and Interrupted do not
-// hold; a stale task never touches a newer one through the loop; the thread body with its stop; two workers over
-// one Slot, each on its own channel with its own budget and failure count, serving both channels at once; the
-// admission at dispatch that binds a task to the registered Slot with its budget (section 8.1); and the
-// continuous clip (section 8.2): no owner, no hold, the backlog dropped at entry and kept from the boundary
-// key frame between adjacent clips, the rule flag ignored, the schedule and a mode switch finishing it.
+// The file channel worker over a fake Slot adapter and fake media, with injected failure constants.
 
 #include <atomic>
 #include <cerrno>
@@ -57,8 +50,7 @@ struct Publication
     FileSize in_flight;       // the budget still reserved: the task's own bytes, released after publication
 };
 
-// The worker's view of a Slot, over FakeMedia writers, with the registered admission of FakeSlotAdmission (the
-// ready flag, the free space, the registration). The flags are atomics because the thread cases flip them while
+// The worker's view of a Slot over FakeMedia writers; the flags are atomics because the thread cases flip them while
 // the workers run.
 struct FakeSlot: FakeSlotAdmission
 {
@@ -96,7 +88,7 @@ struct FakeSlot: FakeSlotAdmission
         return writer;
     }
 
-    // What the Slot does to its media buffer before a continuous clip (docs/PLAN.md section 8.2).
+    // What the Slot does to its media buffer before a continuous clip.
     void prepareContinuousClip(std::optional<Clock::time_point> boundary) noexcept
     {
         {
@@ -117,9 +109,8 @@ struct FakeSlot: FakeSlotAdmission
         ++published;
     }
 
-    // The mark is counted here only; the real Slot also refuses admission and cancels its pending tasks from the
-    // mark on (tests/test_storage.cpp), so a Video task claimed after the Photo limit, as a case below does, is
-    // the fake's leniency.
+    // Counted only: the real Slot also refuses admission and cancels its pending tasks from the mark on, so a Video
+    // task claimed after the Photo limit, as a case below does, is the fake's leniency.
     void markFailed() noexcept
     {
         marked_while_held = ctx.file_channels.holdsTask();
@@ -194,8 +185,7 @@ struct Fixture
         publish(settingsOf(CaptureType::Image, photo_interval), settingsOf(CaptureType::Video, video_interval));
     }
 
-    // Publishes a snapshot with continuous recording configured and no other action (docs/PLAN.md section 8.2),
-    // built directly as every snapshot here is.
+    // Publishes a snapshot with continuous recording configured and no other action.
     void enableContinuous()
     {
         auto &shared = ctx.action_settings;
@@ -432,8 +422,7 @@ VG_TEST_CASE(a_stop_request_ends_the_hold_after_completing_the_task_and_closing_
 
 VG_TEST_CASE(a_stale_task_never_touches_a_newer_one_through_the_loop)
 {
-    // While task A is being written it is completed from elsewhere (as a stop would) and B is accepted: the
-    // worker's completion of A leaves B untouched (docs/PLAN.md section 7.2).
+    // While task A is being written it is completed from elsewhere (as a stop would) and B is accepted.
     Fixture f;
     f.enable(CaptureType::Image, std::chrono::milliseconds(20));
     auto &photo = f.channel(CaptureType::Image);
@@ -491,9 +480,7 @@ VG_TEST_CASE(admission_refuses_without_headroom_and_the_probe_claims_nothing_wit
 
 VG_TEST_CASE(the_budget_is_reserved_at_acceptance_and_released_on_every_terminal_path)
 {
-    // The task's own bytes are in flight from its acceptance until its file is published (docs/PLAN.md section
-    // 9), whatever the outcome: success, failure, cancellation, interruption, and retirement before a claim all
-    // release them.
+    // Success, failure, cancellation, interruption, and retirement before a claim all release the task's bytes.
     {
         Fixture f; // success: still reserved at publication, released before the hold
         f.enable(CaptureType::Image, std::chrono::milliseconds(20));
@@ -587,9 +574,8 @@ VG_TEST_CASE(the_budget_is_reserved_at_acceptance_and_released_on_every_terminal
 
 VG_TEST_CASE(a_watermark_change_does_not_stop_a_running_clip_but_a_recording_change_does)
 {
-    // A running task is bound to its channel's recording settings, not to the watermarks (docs/PLAN.md section
-    // 9): republishing the same recording with a raised admission mark moves no channel revision, so the clip
-    // completes; republishing another interval does, so the clip is interrupted at its next check.
+    // Republishing the same recording with a raised admission mark moves no channel revision, so the clip completes;
+    // republishing another interval does, so the clip is interrupted at its next check.
     Fixture f;
     f.enable(CaptureType::Video, std::chrono::milliseconds(20));
     auto &shared = f.ctx.action_settings;
@@ -644,10 +630,8 @@ VG_TEST_CASE(a_watermark_change_does_not_stop_a_running_clip_but_a_recording_cha
 
 VG_TEST_CASE(each_worker_serves_only_its_own_channel_with_its_own_budget_and_failure_count)
 {
-    // Two workers over one Slot, one per channel (docs/PLAN.md section 7.2): neither claims from the other's
-    // channel, each task reserves its own bytes against the aggregate mark (section 9), and a channel's failures
-    // count for that channel alone. The Video worker steps inside the Photo capture callback, so the two
-    // reservations overlap deterministically.
+    // Each task reserves its own bytes against the aggregate mark. The Video worker steps inside the Photo capture
+    // callback, so the two reservations overlap deterministically.
     Fixture f;
     f.enableBoth(std::chrono::milliseconds(20), std::chrono::milliseconds(20));
     auto &photo = f.channel(CaptureType::Image);
@@ -700,7 +684,7 @@ VG_TEST_CASE(each_worker_serves_only_its_own_channel_with_its_own_budget_and_fai
     VG_CHECK_EQ(f.slot.publications[2].in_flight, photo_bytes);
     VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
     VG_CHECK_EQ(f.slot.failure_marks.load(), 0);
-    // Two FILE publications for one RULE owner, each carrying its UID (docs/PLAN.md section 6.2).
+    // Two FILE publications for one RULE owner, each carrying its UID.
     VG_CHECK(photo_task->owner == video_task->owner);
     VG_CHECK_EQ(f.slot.publications[1].event->owner_uid, video_task->owner->uid);
     VG_CHECK_EQ(f.slot.publications[2].event->owner_uid, video_task->owner->uid);
@@ -726,10 +710,8 @@ VG_TEST_CASE(each_worker_serves_only_its_own_channel_with_its_own_budget_and_fai
 
 VG_TEST_CASE(closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_serve_both_channels_at_once)
 {
-    // Closing the Slot's admission retires the tasks of both channels that no worker claimed (docs/PLAN.md
-    // section 9), while a worker's start retires nothing; then the Photo worker completes a capture while the
-    // Video worker is still waiting for the key frame that closes its clip (matrix A1: Video busy while Photo
-    // triggers), and the stop ends both holds.
+    // A worker's start retires nothing. Then the Photo worker completes a capture while the Video worker still waits
+    // for the key frame that closes its clip, and the stop ends both holds.
     Fixture f;
     f.enableBoth(kLong, kLong);
     auto &photo = f.channel(CaptureType::Image);
@@ -784,11 +766,8 @@ VG_TEST_CASE(closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_ser
 
 VG_TEST_CASE(a_continuous_clip_runs_without_an_owner_or_a_hold_and_an_entry_drops_the_backlog)
 {
-    // docs/PLAN.md section 8.2 (Phase 5A-2): a continuous clip is a Video task without an owner, admitted by
-    // dispatchContinuous with rules disabled, run through the same loop, published with UID 0, and completed
-    // at once (no interval). Its entry drops the backlog, so the clip starts at a key frame enqueued after the
-    // claim; an adjacent clip keeps the boundary key frame the previous clip left; after a clip that ended
-    // without one the next clip is an entry again. A triggered clip keeps its pre-roll.
+    // An adjacent clip keeps the boundary key frame the previous clip left; after a clip that ended without one, the
+    // next clip is an entry again. A triggered clip keeps its pre-roll.
     Fixture f;
     f.slot.wait_bounds
         = VideoWriter<FakeAdapter>::WaitBounds { std::chrono::milliseconds(100), std::chrono::seconds(10) };
@@ -880,9 +859,7 @@ VG_TEST_CASE(a_continuous_clip_runs_without_an_owner_or_a_hold_and_an_entry_drop
 
 VG_TEST_CASE(a_continuous_clip_ignores_the_rule_flag_and_is_finished_by_the_schedule_or_a_mode_switch)
 {
-    // docs/PLAN.md section 8.2: bRuleEnabled is not a continuous clip's continuation condition; the schedule
-    // closing finishes it (Interrupted, its file published with UID 0), and so does a mode switch, which moves
-    // the Video revision. A failed clip holds through the cooldown and counts toward the limit like any task.
+    // A failed clip holds through the cooldown and counts toward the limit like any task.
     Fixture f;
     f.slot.wait_bounds
         = VideoWriter<FakeAdapter>::WaitBounds { std::chrono::milliseconds(100), std::chrono::seconds(10) };

@@ -1,9 +1,4 @@
-// Characterization tests for the GPIO, TTY, and SED rules over fake peripherals (docs/PLAN.md sections 5.2 and
-// 6.1; matrix R2): the sync callback the selected GPIO signal mode needs, level and edge evaluation, the TTY
-// command matcher (overlapping prefixes, commands split across reads, several commands in one read, reads
-// larger than the buffer), the SED rule as observed (its filters, the consecutive window, the latched
-// activation, ignored and malformed frames, the reconnect backoff, and a prompt stop), and the owner
-// attribution the rules carry. The TTY and SED peers are Unix sockets in a temporary directory.
+// The GPIO, TTY, and SED rules over fake peripherals; the TTY and SED peers are Unix sockets in a temporary directory.
 
 #include <cerrno>
 #include <chrono>
@@ -413,8 +408,8 @@ VG_TEST_CASE(gpio_rule_observes_levels_and_edges_and_names_the_signal_and_the_pi
         const auto owner = rule(ctx);
         VG_REQUIRE(owner != nullptr);
         VG_CHECK_EQ(owner->type, VG_RULE_TYPE_GPIO);
-        VG_CHECK_EQ(owner->id, "HIGH");           // empty before 2026-10-19
-        VG_CHECK_EQ(owner->source_id, "GPIO_07"); // empty before 2026-10-19
+        VG_CHECK_EQ(owner->id, "HIGH");
+        VG_CHECK_EQ(owner->source_id, "GPIO_07");
         VG_CHECK_EQ(owner->source_delivery, EventOwner::SourceDelivery::Event);
         VG_CHECK(rule(ctx) != nullptr); // a sustained level retriggers on every evaluation
     }
@@ -433,9 +428,7 @@ VG_TEST_CASE(gpio_rule_observes_levels_and_edges_and_names_the_signal_and_the_pi
 
 VG_TEST_CASE(gpio_pin_lookup_frees_the_host_list_once_however_parsing_ends)
 {
-    // The host's pin list is released through its free_cb exactly once per query, also when the rule's JSON
-    // fails to parse after the query (leaked before 2026-10-20); a query that fails without writing the list
-    // frees nothing and refuses the rule.
+    // A query that fails without writing the list frees nothing and refuses the rule.
     FakeGPIO::reset();
     const Context ctx(GPIOConfig(true, true));
     const GPIORuleConfig ok(GPIOJson("RISING"), ctx);
@@ -453,9 +446,7 @@ VG_TEST_CASE(gpio_pin_lookup_frees_the_host_list_once_however_parsing_ends)
 
 VG_TEST_CASE(tty_rule_config_needs_a_listed_tty_with_a_socket_path)
 {
-    // The host's TTY list is borrowed and read on every parse: an entry without a socket path cannot be
-    // selected (its null pointer was dereferenced before 2026-10-20), and a length without an array lists
-    // nothing.
+    // A length without an array lists nothing.
     vg_config_tty_t no_path { .name = "tty0", .socket_path = nullptr, .buffer_size = 16 };
     {
         const Context ctx(TTYFixture::Config(no_path));
@@ -475,12 +466,12 @@ VG_TEST_CASE(tty_rule_finds_overlapping_prefixes_and_commands_split_across_reads
 {
     TTYFixture f;
     const auto rule = f.rule("AAB");
-    f.peer.send("AAAB"); // the command after a longer run of its own prefix: missed before 2026-10-19
+    f.peer.send("AAAB"); // the command after a longer run of its own prefix
     auto owner = (*rule)(f.ctx);
     VG_REQUIRE(owner != nullptr);
     VG_CHECK_EQ(owner->type, VG_RULE_TYPE_TTY);
-    VG_CHECK_EQ(owner->id, "AAB");         // empty before 2026-10-19
-    VG_CHECK_EQ(owner->source_id, "tty0"); // empty before 2026-10-19
+    VG_CHECK_EQ(owner->id, "AAB");
+    VG_CHECK_EQ(owner->source_id, "tty0");
     VG_CHECK_EQ(owner->source_delivery, EventOwner::SourceDelivery::Event);
     VG_CHECK((*rule)(f.ctx) == nullptr);
 
@@ -530,10 +521,8 @@ VG_TEST_CASE(sound_event_rule_config_rejects_a_negative_window_and_malformed_fil
 
 VG_TEST_CASE(sound_event_rule_filters_frames_and_an_empty_class_filter_matches_no_label)
 {
-    // The frame filter as implemented (docs/PLAN.md section 5.2): an envelope without an inference payload is
-    // ignored, the head id must match when the rule names one, a top-k entry activates when its label is in the
-    // class filter and its probability within the confidence range, and an empty class filter matches no label
-    // at all (documented as "any label" before 2026-10-20; kept as implemented, decided 2026-10-19).
+    // An envelope without an inference payload is ignored, the head id must match when the rule names one, and a
+    // top-k entry activates when its label is in the class filter and its probability within the confidence range.
     SEDFixture f;
     const auto rule = f.unconnectedRule(SEDJson("head-1", 0, { "doorbell" }, 0.5f, 0.8f));
     const auto &access = *rule;
@@ -570,10 +559,8 @@ VG_TEST_CASE(sound_event_rule_filters_frames_and_an_empty_class_filter_matches_n
 
 VG_TEST_CASE(sound_event_rule_activates_once_a_run_of_active_frames_spans_the_window)
 {
-    // The consecutive window as implemented: a run of active frames activates on the first frame at least the
-    // window after the run began, and on every active frame after that; an inactive frame ends the run, and
-    // nothing happens without frames (the window is measured on the frames, not by a timer). With a window of
-    // zero every active frame activates.
+    // A run activates on its first frame at least the window after it began, and on every active frame after; an
+    // inactive frame ends the run, and the window is measured on frames, not by a timer.
     SEDFixture f;
     const auto rule = f.unconnectedRule(SEDJson("", 1000, { "doorbell" }));
     std::optional<Clock::time_point> since;
@@ -600,14 +587,9 @@ VG_TEST_CASE(sound_event_rule_activates_once_a_run_of_active_frames_spans_the_wi
 
 VG_TEST_CASE(sound_event_rule_latches_one_activation_until_evaluated_and_reconnects_with_backoff)
 {
-    // The poll loop over a fake result socket, as implemented: an activation is latched until an evaluation
-    // consumes it, whenever that is (the rule loop evaluates the rule only while rules are enabled and the
-    // schedule is open, so an activation during a closure is reported once after reopening), and several
-    // activations before an evaluation yield one owner; ignored and inactive frames leave the latch alone; a
-    // zero or oversized frame length and a malformed payload close the connection; the rule reconnects after a
-    // backoff that doubles from 100 ms to 5 s across connections that delivered no valid frame and resets once
-    // one did. The lower bounds on the gaps are the backoffs the rule sleeps; the one upper bound (the reset)
-    // leaves a 700 ms margin to the next doubling.
+    // The reconnect backoff doubles from 100 ms to 5 s across connections that delivered no valid frame. The lower
+    // bounds on the gaps are the backoffs the rule sleeps; the one upper bound (the reset) leaves a 700 ms margin to
+    // the next doubling.
     SEDFixture f;
     const auto rule = f.rule(SEDJson("", 0, { "doorbell" }));
     const auto active = InferenceEnvelope("head-1", "doorbell", 0.9f);

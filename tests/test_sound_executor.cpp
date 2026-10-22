@@ -1,8 +1,5 @@
-// Characterization tests for the Sound action executor (docs/PLAN.md section 7.3; matrix S1 and A5): one
-// state, no queue, no retry; a pending trigger is canceled by rule disable, Sound disable, pause, and stop; a
-// playing callback holds a media operation and finishes before a waiting pause or the stop returns. Most cases
-// drive the executor without its worker thread; two run the real worker with a callback that blocks until the
-// test releases it.
+// The Sound action executor. Most cases drive it without its worker thread; two run the real worker with a callback
+// that blocks until the test releases it.
 
 #include <atomic>
 #include <cerrno>
@@ -287,8 +284,7 @@ VG_TEST_CASE(a_pending_trigger_is_canceled_by_rule_disable_sound_disable_and_sto
 
 VG_TEST_CASE(a_trigger_is_refused_while_rules_are_disabled_or_the_schedule_is_closed)
 {
-    // The executor reads the gates file admission reads, in its own critical section (docs/PLAN.md section
-    // 8.1): a gate closed between the rule loop's evaluation and the dispatch refuses the trigger.
+    // A gate closed between the rule loop's evaluation and the dispatch refuses the trigger.
     Fixture f;
     f.publishSound(true);
     VG_CHECK(!f.executor().tryTrigger()); // rules disabled
@@ -422,9 +418,8 @@ VG_TEST_CASE(dispatch_triggers_sound_only_when_the_snapshot_enables_it_and_repor
 
 VG_TEST_CASE(a_parsed_multi_action_configuration_dispatches_photo_video_and_sound_for_one_owner)
 {
-    // Phase 4D: a configuration that enables every action, applied through RecordConfig::sync as the endpoint
-    // does, dispatches one owner into both file channels and the Sound executor; both tasks carry the owner's
-    // UID, which their FILE callbacks report, and the RULE report is file acceptance only.
+    // Both tasks carry the owner's UID, which their FILE callbacks report, and the RULE report is file acceptance
+    // only.
     Fixture f;
     const RecordConfig cfg(Fixture::Document(true, true), f.ctx);
     VG_CHECK_EQ(cfg.sync(f.ctx, cfg.prepare(f.ctx)), 0);

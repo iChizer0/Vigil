@@ -1,7 +1,5 @@
-// Characterization tests for RuleEndpoint: startup from configuration files, the rule-loop iteration
-// (gates, direct EVENT bypass, dispatch), the three configuration endpoints, HTTP activation, and the
-// rule-info projection (docs/PLAN.md sections 4.3, 5.1, 5.2, 6.2; matrix R1, R3, C2, C3, W1). The rule
-// thread is not started; each test drives one iteration at a time through RuleEndpointTestAccess.
+// RuleEndpoint: startup from configuration files, the rule loop, the configuration endpoints, HTTP activation, and
+// rule info. The rule thread is not started; each test drives one iteration at a time.
 
 #include <cerrno>
 #include <chrono>
@@ -137,7 +135,7 @@ struct Fixture
     std::string dir;  // configuration directory; outlives ctx, which borrows its buffer
     FakeMedia media;  // the video sink the continuous-recording cases run a writer against
     std::shared_ptr<Context> ctx;
-    std::unique_ptr<FakeSlotAdmission> slot; // registered and ready, as an enabled Slot is (docs/PLAN.md section 8.1)
+    std::unique_ptr<FakeSlotAdmission> slot; // registered and ready, as an enabled Slot is
     std::unique_ptr<RuleEndpoint> endpoint;
 
     // With `unwritable_store` the configuration "directory" is a regular file, so nothing can be stored. With
@@ -301,7 +299,7 @@ nlohmann::json RecordJson(bool enabled, const char *format, long interval_ms)
     return j;
 }
 
-// `j` with the three actions switched as given: a multi-action document (Phase 4D).
+// `j` with the three actions switched as given.
 nlohmann::json WithActions(nlohmann::json j, bool photo, bool video, bool sound)
 {
     j["dActions"]["dPhoto"]["bEnabled"] = photo;
@@ -310,7 +308,7 @@ nlohmann::json WithActions(nlohmann::json j, bool photo, bool video, bool sound)
     return j;
 }
 
-// `j` with continuous recording configured (Phase 5A-3).
+// `j` with continuous recording configured.
 nlohmann::json WithContinuous(nlohmann::json j)
 {
     j["bContinuousRecordEnabled"] = true;
@@ -470,9 +468,8 @@ VG_TEST_CASE(startup_leaves_unusable_files_untouched_and_keeps_rules_disabled)
         VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
     }
 
-    // A valid record configuration next to a rule or schedule file that cannot be applied: the file is left
-    // untouched and rules stay disabled, so that neither the default ALWAYS_ON rule nor the default open
-    // schedule runs in its place. Valid POSTs, ending with the record configuration, recover.
+    // A valid record configuration next to an unusable rule or schedule file: the file is left untouched and rules
+    // stay disabled until valid POSTs, ending with the record configuration, recover.
     struct Case
     {
         const char *name;
@@ -512,7 +509,7 @@ VG_TEST_CASE(startup_leaves_unusable_files_untouched_and_keeps_rules_disabled)
         f.evaluate();
         VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 1 });
 
-        // A restart over the repaired files no longer fails closed: rules are enabled, and the first evaluation
+        // A restart over the repaired files does not fail closed: rules are enabled, and the first evaluation
         // dispatches an accepted event.
         f.endpoint.reset();
         f.ctx->file_channels.cancelPending(); // the event's task, as the runtime's teardown retires it
@@ -613,9 +610,8 @@ VG_TEST_CASE(schedule_closure_blocks_dispatch_and_reopening_restores_it)
 
 VG_TEST_CASE(the_schedule_gate_is_published_with_the_configuration_and_on_every_tick_before_the_enable_check)
 {
-    // docs/PLAN.md section 8.1: the schedule state lives in the context, published when the schedule
-    // configuration changes and on every tick before the enable check, so it is current while rules are
-    // disabled, and admission reads the same state as the rule loop and the HTTP precheck.
+    // The gate lives in the context, so admission reads the same state as the rule loop and the HTTP precheck;
+    // publishing it on every tick keeps it current while rules are disabled.
     Fixture f;
     f.start();
     VG_CHECK(!f.ctx->record_rule_enabled.load());
@@ -634,9 +630,7 @@ VG_TEST_CASE(the_schedule_gate_is_published_with_the_configuration_and_on_every_
 
 VG_TEST_CASE(a_dispatch_without_a_usable_slot_reports_the_owner_and_the_next_owner_proceeds)
 {
-    // The deliberate change of docs/PLAN.md section 8.1: with no usable Slot the file action is rejected at
-    // dispatch, the owner is still reported, nothing is pending, and the next tick's owner is dispatched in
-    // turn instead of waiting behind a pending event.
+    // Nothing is pending, so the next tick's owner is dispatched in turn instead of waiting behind a pending event.
     Fixture f;
     f.start();
     VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0); // fires on every evaluated tick
@@ -733,9 +727,8 @@ VG_TEST_CASE(rule_info_reports_the_event_time_and_the_dispatch_time)
 
 VG_TEST_CASE(rule_info_reports_the_channel_busy_through_the_hold)
 {
-    // A channel holds its task from acceptance until the worker completes it, which follows the interval hold
-    // (docs/PLAN.md section 6.2): bReadyForNewEvent stays false and nothing is accepted meanwhile, even once the
-    // write has finished and the task's status is terminal.
+    // bReadyForNewEvent stays false and nothing is accepted until the worker completes the task after its hold, even
+    // once the write has finished and the task's status is terminal.
     Fixture f;
     f.start();
     VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0);
@@ -775,10 +768,8 @@ VG_TEST_CASE(rule_info_reports_the_channel_busy_through_the_hold)
 
 VG_TEST_CASE(rule_info_reports_the_last_dispatched_owner_and_the_state_of_each_action)
 {
-    // docs/PLAN.md section 6.2 (Phase 4D-2): the last dispatched owner is independent of file tasks, and each
-    // action reports its own state: a file channel is IDLE, or PENDING, WRITING, and HOLDING through the task
-    // it holds; Sound is UNAVAILABLE without the host's callback, else its executor state. The existing fields
-    // keep their meaning.
+    // A file channel is IDLE, or PENDING, WRITING, and HOLDING through the task it holds; Sound is UNAVAILABLE
+    // without the host's callback, else its executor state.
     Fixture f(/* unwritable_store = */ false, /* with_sound = */ true);
     f.start();
     auto info = f.endpoint->getRuleInfo();
@@ -890,8 +881,6 @@ VG_TEST_CASE(rule_info_reports_the_last_dispatched_owner_and_the_state_of_each_a
 
 VG_TEST_CASE(rule_info_reports_a_continuous_clip_as_the_video_state_and_not_as_a_rule_event)
 {
-    // docs/PLAN.md sections 6.2 and 8.2: a continuous clip shows in dActionStates.dVideo, with bContinuous,
-    // the configured switch unchanged, no readiness for a rule event, and the held event with UID 0;
     // bReadyForNewEvent, dLastRuleEvent, and dLastRuleEventOwner see triggered tasks only.
     Fixture f;
     f.start();
@@ -940,12 +929,8 @@ VG_TEST_CASE(rule_info_reports_a_continuous_clip_as_the_video_state_and_not_as_a
 
 VG_TEST_CASE(continuous_recording_is_admitted_by_the_rule_loop_whatever_the_rule_flag_and_obeys_the_schedule)
 {
-    // docs/PLAN.md sections 4.1, 8.1, and 8.2 (Phase 5A-3): the switch is accepted and stored canonically; the
-    // rule loop admits a clip on every tick before the enable check, so bRuleEnabled=false records; a held
-    // clip refuses the next until completed; the Slot, the pause, and the schedule gate admission; a clip
-    // admitted while the schedule was open does not start once it closed; and a stored configuration records
-    // from startup, unless the selected rule is ALWAYS_ON, which cannot be combined with it (section 4.4): a
-    // POST is refused, and a stored pair fails closed with continuous recording off as well.
+    // A stored configuration records from startup, unless the selected rule is ALWAYS_ON, which cannot be combined
+    // with it: a POST is refused, and a stored pair fails closed with continuous recording off as well.
     Fixture f;
     f.start();
     const auto doc = WithContinuous(RecordJson(false, nullptr, 0));    // rules disabled, nothing but the switch
@@ -1031,9 +1016,7 @@ VG_TEST_CASE(continuous_recording_is_admitted_by_the_rule_loop_whatever_the_rule
 
 VG_TEST_CASE(schedule_closure_finishes_a_running_continuous_clip_and_reopening_admits_a_new_one)
 {
-    // docs/PLAN.md section 8.2 (GATE-5): the schedule closing through the endpoint finishes a running clip at
-    // its next check, as Interrupted with UID 0 and its sink finished; while closed nothing is admitted, and
-    // reopening admits a new clip once the channel is free.
+    // The clip ends at its next check, Interrupted with UID 0 and its sink finished.
     Fixture f;
     f.start();
     VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0); // any rule but ALWAYS_ON
@@ -1066,10 +1049,8 @@ VG_TEST_CASE(schedule_closure_finishes_a_running_continuous_clip_and_reopening_a
 
 VG_TEST_CASE(a_mode_switch_finishes_the_running_clip_with_its_uid_before_the_other_mode_starts)
 {
-    // docs/PLAN.md section 8.2 (GATE-4): switching to continuous cancels the pending triggered Video task and
-    // interrupts a running one through the Video revision, its event keeping the owner's UID, and the first
-    // continuous clip is admitted only once the channel is free; switching back does the same with the
-    // UID-zero clip, and the next Timer event is admitted as a triggered task again.
+    // Switching to continuous cancels the pending triggered task; either switch interrupts a running task through the
+    // Video revision, and the new mode's first task is admitted only once the channel is free.
     Fixture f;
     f.start();
     VG_CHECK_EQ(f.postRecordRuleConfig(TimerRuleJson(0)), 0);
@@ -1140,9 +1121,8 @@ VG_TEST_CASE(a_mode_switch_finishes_the_running_clip_with_its_uid_before_the_oth
 
 VG_TEST_CASE(http_activation_needs_no_storage_while_continuous_recording_suppresses_the_video_action)
 {
-    // docs/PLAN.md sections 5.2 and 8.2: with continuous recording configured, a Video-only configuration has
-    // no file action for a rule event, so the activation is dispatched without storage and reported without
-    // acceptance; a Photo action makes storage a precondition again and is admitted beside the clip.
+    // With continuous recording configured, a Video-only configuration has no file action for a rule event; a Photo
+    // action makes storage a precondition again and is admitted beside the clip.
     Fixture f;
     f.start();
     VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0);
@@ -1222,11 +1202,8 @@ VG_TEST_CASE(record_rule_config_switches_rules_persists_and_rolls_back_failures)
 
 VG_TEST_CASE(a_failed_rule_switch_releases_the_new_rule_before_the_committed_one_is_rebuilt)
 {
-    // A record rule POST whose store fails after the new rule was built rolls back to the committed rule. The
-    // failed rule is destroyed first, so a resource both need, here the same GPIO pin, is free again when the
-    // committed rule is rebuilt. Before 2026-10-20 the committed rule was rebuilt first: a host that refused
-    // the second acquisition made the rollback drop the rule, and one that granted it left the rule on a pin
-    // the failed rule then released.
+    // A record rule POST whose store fails after the new rule was built rolls back to the committed rule, which needs
+    // the same GPIO pin.
     Fixture f(false, false, /* with_gpio = */ true);
     f.start();
     nlohmann::json rising = SelectedRuleJson("GPIO");
@@ -1274,7 +1251,7 @@ VG_TEST_CASE(record_config_post_persists_only_valid_payloads_in_canonical_form)
     const auto revision = f.ctx->action_settings.getRevision();
 
     // Rejected payloads change neither the runtime nor the file: an invalid interval, and two actions that
-    // ALWAYS_ON, the default rule, cannot pace (docs/PLAN.md section 4.4; the invariant has its own cases).
+    // ALWAYS_ON, the default rule, cannot pace.
     const auto res = f.endpoint->updateRecordConfig(RecordJson(true, "MP4", 0));
     VG_CHECK_EQ(res.at("code").get<int>(), kEndpointErrorBase + EINVAL);
     VG_CHECK(res.contains("message"));
@@ -1324,9 +1301,8 @@ VG_TEST_CASE(record_config_post_fails_closed_when_the_store_is_unwritable)
 
 VG_TEST_CASE(schedule_post_fails_closed_when_the_store_is_unwritable)
 {
-    // Every valid schedule POST is stored (docs/PLAN.md section 4.3 item 5): one that repeats the schedule in
-    // memory answers the store's error too (since 2026-10-21; it answered 0 without storing before), and a changed
-    // one that cannot be stored applies nothing, as the record configuration's does.
+    // A POST that repeats the schedule in memory answers the store's error too, and a changed one that cannot be
+    // stored applies nothing.
     Fixture f(/* unwritable_store = */ true);
     f.start();
     const auto unchanged = f.endpoint->getScheduleRuleConfig();
@@ -1340,9 +1316,8 @@ VG_TEST_CASE(schedule_post_fails_closed_when_the_store_is_unwritable)
 
 VG_TEST_CASE(the_always_on_invariant_is_enforced_by_both_posts_in_either_order)
 {
-    // docs/PLAN.md section 4.4: with ALWAYS_ON selected, a record configuration it cannot pace is rejected,
-    // and ALWAYS_ON cannot be selected over one; to run several actions, select another rule first, and to
-    // return to ALWAYS_ON, simplify the actions first. A rejected POST changes neither the runtime nor a file.
+    // To run several actions, select another rule first; to return to ALWAYS_ON, simplify the actions first. A
+    // rejected POST changes neither the runtime nor a file.
     Fixture f;
     f.start();
     VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON")); // the default selection
@@ -1415,9 +1390,8 @@ VG_TEST_CASE(the_always_on_invariant_is_enforced_by_both_posts_in_either_order)
 
 VG_TEST_CASE(startup_fails_closed_when_the_stored_pair_violates_the_always_on_invariant)
 {
-    // docs/PLAN.md section 4.4: the pair is validated once both files are loaded. A violation keeps rules
-    // disabled like an unusable file, with both files left in place and both documents reported; a supporting
-    // rule, then the record configuration, recovers.
+    // A violation keeps rules disabled like an unusable file, with both files left in place and both documents
+    // reported; a supporting rule, then the record configuration, recovers.
     const auto everything = WithActions(RecordJson(true, "MP4", 5000), true, true, true);
     {
         Fixture f; // no rule file: the default ALWAYS_ON is selected
@@ -1468,12 +1442,9 @@ VG_TEST_CASE(startup_fails_closed_when_the_stored_pair_violates_the_always_on_in
 
 VG_TEST_CASE(always_on_runs_each_single_file_action_with_its_format_and_paces_on_its_interval)
 {
-    // The single-action regression of docs/PLAN.md section 12 (C3): under ALWAYS_ON, the default rule, one file
-    // action of each format runs as it did before the refactor. The format and the interval reach the task
-    // unchanged and nothing is converted to continuous recording; the channel holds the task until the worker
-    // completes it after the hold, during which the rule waits without consuming its interval; the rule then
-    // re-arms no earlier than the interval after the previous start; and rule disable and schedule closure still
-    // stop it. The hold itself is the worker's (tests/test_channel_worker.cpp).
+    // Under ALWAYS_ON, the default rule: the format and the interval reach the task unchanged, nothing is converted
+    // to continuous recording, the rule waits through the hold without consuming its interval, and rule disable and
+    // schedule closure stop it.
     struct Single
     {
         const char *format;
@@ -1591,9 +1562,7 @@ VG_TEST_CASE(always_on_runs_each_single_file_action_with_its_format_and_paces_on
 
 VG_TEST_CASE(activation_without_a_file_action_needs_no_storage_and_reports_the_owner)
 {
-    // Rule-only and Sound-only configurations (docs/PLAN.md section 5.2): the storage precheck applies only
-    // while a file action is enabled, the dispatch reports the owner without file acceptance, and nothing is
-    // left pending. Sound has no callback in this fixture, so its trigger is unavailable.
+    // Rule-only and Sound-only configurations. Sound has no callback in this fixture, so its trigger is unavailable.
     Fixture f;
     f.start();
     f.slot->close(); // no Slot at all
@@ -1712,8 +1681,7 @@ VG_TEST_CASE(rule_info_carries_exact_uids_above_2_to_53)
 
 VG_TEST_CASE(http_activation_runs_the_rule_callback_outside_the_rule_lock)
 {
-    // A RULE callback may call back into the configuration endpoints. Until the review fix of 2026-10-19 the
-    // HTTP activation dispatched under the record-rule lock, so a callback that replaced the rule deadlocked.
+    // A RULE callback may call back into the configuration endpoints, here replacing the rule.
     Fixture f;
     f.start();
     VG_CHECK_EQ(f.postRecordConfig(RecordJson(true, "MP4", 5000)), 0);
@@ -1728,16 +1696,13 @@ VG_TEST_CASE(http_activation_runs_the_rule_callback_outside_the_rule_lock)
     VG_REQUIRE(events.size() == size_t { 1 });
     VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_HTTP);
     VG_CHECK(events[0].writer_created);
-    VG_CHECK_EQ(f.activateHTTP(), kEndpointErrorBase + EPERM); // the selected rule is no longer HTTP
+    VG_CHECK_EQ(f.activateHTTP(), kEndpointErrorBase + EPERM); // the selected rule is not HTTP
 }
 
 VG_TEST_CASE(timer_rule_paces_on_the_context_clock_and_does_not_catch_up_after_a_closure)
 {
-    // TIMER fires on the first tick after its selection and then no earlier than its interval after the tick it
-    // last fired on, read from the context's steady time, which moves on the tick (docs/PLAN.md section 5.1). A
-    // held channel does not pace it: the owner is reported with nothing accepted. While rules are disabled the
-    // rule is not evaluated at all, so a closure longer than the interval yields one owner after reopening, not
-    // one per missed interval. Real time passes here, as the clock has no fake; every wait is bounded.
+    // A held channel does not pace the rule: the owner is reported with nothing accepted. Real time passes here, as
+    // the clock has no fake; every wait is bounded.
     const auto interval = std::chrono::seconds(1);
     Fixture f;
     f.start();

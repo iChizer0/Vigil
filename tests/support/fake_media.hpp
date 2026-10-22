@@ -2,10 +2,8 @@
 #ifndef VIGIL_TESTS_FAKE_MEDIA_HPP
 #define VIGIL_TESTS_FAKE_MEDIA_HPP
 
-// The fake media sink and the writer adapter that the writer and channel worker tests run on: no Slot, no
-// filesystem, no device. FakeMedia records every callback with a knob for each outcome; FakeAdapter is an
-// AdaptableWriter with the same hooks as SlotAdaptedWriter, including the publication hand-over the channel
-// worker relies on.
+// The fake media sink and writer adapter the writer and channel worker tests run on, with no Slot, filesystem, or
+// device. FakeMedia records every callback, with a knob for each outcome.
 
 #include <cstddef>
 #include <cstdint>
@@ -31,9 +29,8 @@ struct FakeMedia
 {
     std::mutex mutex; // of the queue, as the writers expect
     std::deque<MediaFrame> queue;
-    // The records below are written from the callbacks, which the Photo and Video workers of one Slot may run at
-    // once: `records` covers them. The hooks run outside it, so a hook may step a worker or dispatch; the knobs
-    // are set before the workers run.
+    // Covers the records below, which both workers of one Slot may write at once; the hooks run outside it, so a hook
+    // may step a worker or dispatch, and the knobs are set before the workers run.
     std::mutex records;
 
     vg_sta_e create_result = 0;
@@ -139,9 +136,8 @@ struct FakeMedia
     }
 };
 
-// A writer adapter over FakeMedia with the same hooks as SlotAdaptedWriter. With a settings revision it also
-// watches its channel's gate for its task's kind, as SlotAdaptedWriter does; without one (the writer tests)
-// only the knobs decide.
+// A writer adapter over FakeMedia with SlotAdaptedWriter's hooks. With a settings revision it watches its channel's
+// gate as SlotAdaptedWriter does; without one only the knobs decide.
 class FakeAdapter: public AdaptableWriter<FakeAdapter>
 {
 public:
@@ -159,8 +155,7 @@ public:
         _media.active_at_destruction = this->ctxRef().media_barrier.activeOperations();
     }
 
-    // What SlotAdaptedWriter hands the channel worker after the task ran: the recorded file when the task is
-    // publishable (Completed or Interrupted), nothing otherwise.
+    // As SlotAdaptedWriter: the recorded file of a Completed or Interrupted task.
     std::optional<CacheFileInfo> takePublication() noexcept
     {
         if (const auto sta = this->event()->status.load(std::memory_order_acquire);

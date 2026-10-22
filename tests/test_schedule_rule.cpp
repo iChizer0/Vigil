@@ -1,6 +1,5 @@
-// Characterization tests for ScheduleRuleConfig and ScheduleRule (docs/PLAN.md section 4.2 and 8.1).
-// The schedule is a gate: a disabled schedule is open, an enabled one is open inside any configured
-// weekly window, and windows may wrap around the end of the week.
+// ScheduleRuleConfig and ScheduleRule: a disabled schedule is open, an enabled one inside any configured weekly
+// window, and windows may wrap around the end of the week.
 
 #include <cstddef>
 

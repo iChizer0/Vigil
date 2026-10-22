@@ -2,9 +2,9 @@
 #ifndef VIGIL_TESTS_FAKE_SLOT_HPP
 #define VIGIL_TESTS_FAKE_SLOT_HPP
 
-// The Slot admission that tests register in place of a storage Slot (docs/PLAN.md section 8.1): ready unless
-// told otherwise, with a fake filesystem's free space for the budget. Admission opens on construction and
-// closes on destruction, as a Slot's does on enable and disable; `close` and `open` do the same in between.
+// The Slot admission that tests register in place of a storage Slot: ready unless told otherwise, with a fake
+// filesystem's free space for the budget. Admission opens on construction and closes on destruction, as a Slot's
+// enable and disable do.
 
 #include <atomic>
 #include <cstdint>
@@ -38,20 +38,18 @@ struct FakeSlotAdmission: Context::SlotAdmission
         close();
     }
 
-    // Opens admission: the tasks accepted from here on bind to a new registration.
     void open()
     {
         _registration.store(ctx.slot_admission.open(*this));
     }
 
-    // Closes admission: the pending tasks bound to the registration are canceled.
     void close()
     {
         if (const auto registration = _registration.exchange(0))
             ctx.slot_admission.close(registration);
     }
 
-    // The open registration, 0 while closed: what a worker claims by.
+    // 0 while closed
     uint64_t registration() const noexcept
     {
         return _registration.load();

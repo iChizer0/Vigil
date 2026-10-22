@@ -2,9 +2,8 @@
 #ifndef VIGIL_TESTS_FAKE_CONFIG_HPP
 #define VIGIL_TESTS_FAKE_CONFIG_HPP
 
-// Deterministic C configuration for tests: no peripherals, no storage device, no media sinks.
-// Rule events are recorded in process-wide storage because vg_config_basic_t callbacks carry no
-// user_data pointer. Logging goes to stderr so that `ctest --output-on-failure` shows it.
+// Deterministic C configuration for tests: no peripherals, no storage device, no media sinks. Rule events are recorded
+// process-wide, since vg_config_basic_t callbacks carry no user_data; logging goes to stderr.
 
 #include <cstddef>
 #include <cstdint>
@@ -126,8 +125,8 @@ inline vg_sta_e TestLogCallback(vg_log_level_e level, const char *msg, size_t by
     return 0;
 }
 
-// A configuration whose only live callbacks are logging and rule event recording. Every other
-// callback is null, so nothing in a test can reach a device, a socket, or a filesystem by accident.
+// Only logging and rule event recording are live, so nothing in a test can reach a device, a socket, or a
+// filesystem by accident.
 inline vg_config_t MakeFakeConfig(const char *config_directory = nullptr)
 {
     vg_config_t config {};
