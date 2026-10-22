@@ -8,7 +8,7 @@
 // /dev/vigil-test-internal, which they require absent. A Slot over no device admits no task, so what closing its
 // admission does to the pending tasks bound to it is pinned by
 // `closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_serve_both_channels_at_once`
-// (`tests/test_channel_worker.cpp`), and a Slot made READY by hand pins what the failure mark does.
+// (`tests/test_channel_worker.cpp`), and a Slot made READY by hand pins what the failure mark and a saturation do.
 
 #include <atomic>
 #include <chrono>
@@ -124,6 +124,20 @@ struct SlotTestAccess
     {
         const std::unique_lock lock(slot._info_mutex);
         slot._uuid = std::move(uuid);
+    }
+
+    // The rotation flag the Slot would have read from its `.quota_no_rotate` marker when it was configured.
+    static void setQuotaRotation(Slot &slot, bool rotate)
+    {
+        slot._quota_rotate.store(rotate, std::memory_order_release);
+    }
+
+    // The manager's state sync of a READY or SATURATED Slot, with the stats its round would have read and no index
+    // (no quota limit is set, so the free space alone decides).
+    static void syncReadyOrSaturated(Slot &slot, const SlotStats &stats)
+    {
+        const auto s = slot._ctx.action_settings.get().settings;
+        slot.doSyncStateReadyOrSaturated(s->watermarks, nullptr, stats, slot._state.load(std::memory_order_acquire));
     }
 };
 
@@ -512,6 +526,70 @@ VG_TEST_CASE(a_failed_slot_refuses_admission_at_once_and_cancels_what_it_admitte
     VG_CHECK(!f.ctx->dispatchRuleEvent(owner));
     VG_CHECK(f.registered(slot.get()));
     VG_CHECK_EQ(slot->registration(), registration);
+}
+
+VG_TEST_CASE(saturation_without_rotation_cancels_the_pending_task_and_with_rotation_leaves_it_waiting)
+{
+    // The manager's state sync (docs/PLAN.md section 7.2), run by hand with the stats it would have read, over a
+    // Slot set READY and registered by hand as in the previous case. It admits a Photo task. A saturation with
+    // rotation on leaves the task pending, since the rotate step brings READY back; rotation turned off while the
+    // Slot is saturated leaves it too (an edge kept, docs/RETURN.md section 4.2), as does READY returning; a
+    // saturation with rotation off cancels it, as the ERROR states do, the Slot refusing admission while saturated
+    // and staying registered, and READY returning admits again. Premise: as above, the temporary filesystem has
+    // more than 532 MiB free.
+    Fixture f;
+    const auto mount = f.root + "/mnt";
+    VG_REQUIRE(std::filesystem::create_directory(mount));
+    const RecordConfig cfg(nlohmann::json::parse(R"({"iSchemaVersion":2,"bRuleEnabled":true,
+        "bContinuousRecordEnabled":false,"dActions":{"dPhoto":{"bEnabled":true,"sFormat":"JPG","iIntervalMs":5000},
+        "dVideo":{"bEnabled":false,"iIntervalMs":5000},"dSound":{"bEnabled":false}}})"),
+        *f.ctx);
+    VG_REQUIRE(cfg.sync(*f.ctx, cfg.prepare(*f.ctx)) == 0);
+    auto slot = std::make_shared<Slot>(*f.ctx, f.dev, mount, /*removable*/ true, /*internal*/ false, "DCIM");
+    SlotTestAccess::openReady(*slot);
+    const auto registration = slot->registration();
+    VG_CHECK(registration != 0);
+
+    auto &photo = f.ctx->file_channels.photo;
+    const auto owner = std::make_shared<EventOwner>(VG_RULE_TYPE_TIMER, "", "", EventOwner::SourceDelivery::Event);
+    VG_REQUIRE(f.ctx->dispatchRuleEvent(owner)); // refused only when the premise above does not hold
+    const auto task = photo.current();
+    VG_REQUIRE(task != nullptr);
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Pending);
+
+    const SlotStats full(FileSize { 1 } << 40, 0), roomy(FileSize { 1 } << 40, FileSize { 1 } << 40);
+    SlotTestAccess::setQuotaRotation(*slot, true);
+    SlotTestAccess::syncReadyOrSaturated(*slot, full);
+    VG_CHECK(slot->isSaturated());
+    VG_CHECK(!slot->isReadyToWrite());
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Pending);
+    SlotTestAccess::setQuotaRotation(*slot, false);
+    SlotTestAccess::syncReadyOrSaturated(*slot, full); // rotation turned off while saturated: nothing is canceled
+    VG_CHECK(slot->isSaturated());
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Pending);
+    SlotTestAccess::syncReadyOrSaturated(*slot, roomy);
+    VG_CHECK(slot->isReadyToWrite());
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Pending);
+    VG_CHECK(photo.current() == task);
+
+    SlotTestAccess::syncReadyOrSaturated(*slot, roomy); // READY stays READY: nothing is canceled
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Pending);
+    SlotTestAccess::syncReadyOrSaturated(*slot, full);
+    VG_CHECK(slot->isSaturated());
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Canceled);
+    VG_CHECK(photo.current() == nullptr);
+    VG_CHECK(!slot->isReadyToWrite());
+    VG_CHECK(!f.ctx->slot_admission.isReadyToWrite());
+    VG_CHECK(!f.ctx->dispatchRuleEvent(owner));
+    VG_CHECK(f.registered(slot.get()));
+    VG_CHECK_EQ(slot->registration(), registration);
+
+    SlotTestAccess::syncReadyOrSaturated(*slot, roomy);
+    VG_CHECK(slot->isReadyToWrite());
+    VG_CHECK(f.ctx->dispatchRuleEvent(owner));
+    const auto next = photo.current();
+    VG_CHECK(next != nullptr && next != task);
+    VG_CHECK(next->event->status.load() == WriteEvent::Status::Pending);
 }
 
 VG_TEST_CASE(a_selector_that_matches_several_slots_enables_one_and_keeps_the_enabled_one)

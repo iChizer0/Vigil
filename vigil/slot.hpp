@@ -877,11 +877,25 @@ private:
         return probeDeviceOnline() && probeCorrectlyMounted() && probeCorrectlyConfigured();
     }
 
+    // The state from READY or SATURATED to what the index and the stats say, each manager round. With rotation
+    // off, nothing brings READY back from SATURATED until a person frees space or raises the quota, so a task
+    // admitted within one worker probe before the state left READY, which no worker claims afterwards, is
+    // canceled as the ERROR states cancel theirs (markFailed, the give-up): the cancel takes the channel lock
+    // after a dispatcher's admission section, so a task admitted before the state changed is canceled and none
+    // is admitted after it. With rotation on, the rotate step of the same round frees space and READY returns
+    // within about a second, so the task waits. Retained (docs/RETURN.md section 4.2): it waits the same way
+    // when that step has nothing to give, and after a health reset that re-initializes into SATURATED; on the
+    // internal Slot, whose filesystem the system shares, free space can return without a person, and the cancel
+    // then cost one event.
     void doSyncStateReadyOrSaturated(const WaterMarks &watermarks, const IndexManager::IndexResult *index_result,
         const SlotStats &stats, SlotState current) noexcept
     {
-        _state.compare_exchange_strong(current, probeStateReadyOrSaturated(watermarks, index_result, stats),
-            std::memory_order_acq_rel, std::memory_order_acquire);
+        const auto next = probeStateReadyOrSaturated(watermarks, index_result, stats);
+        if (!_state.compare_exchange_strong(current, next, std::memory_order_acq_rel, std::memory_order_acquire))
+            return;
+        if (current == SlotState::Ready && next == SlotState::Saturated
+            && !_quota_rotate.load(std::memory_order_acquire))
+            _ctx.file_channels.cancelPendingBoundTo(_registration.load(std::memory_order_acquire));
     }
 
     void doRotateStaledFilesAndSync(const WaterMarks &watermarks, const IndexManager::IndexResult *index_result,
