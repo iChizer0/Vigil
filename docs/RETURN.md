@@ -53,7 +53,8 @@ The phases are those of `docs/PLAN.md` section 11; the identifiers are the rows 
 | `ad6d7e7` | review | The tick's cancel of a pending triggered task rereads the rule flag under the channel lock. | GATE-1 |
 | `d2ce3cc` | review | The manager's give-up cancels the pending tasks bound to the Slot. | ACT-1 |
 | `74d7213` | review | An add of the internal device's node rebuilds the internal Slot. | SAFE-8 |
-| this commit | review | The relay directory premise on the header; the example off `/tmp`; this package, the plan's build record, and TEST-8 brought up to the series. | API-3, TEST-8 |
+| `3c4c420` | review | The relay directory premise on the header; the example off `/tmp`; this package, the plan's build record, and TEST-8 brought up to the series. | API-3, TEST-8 |
+| this commit | review | A saturation with rotation off cancels the pending tasks bound to the Slot, as the `ERROR` states do; with rotation on they wait for the rotation. | ACT-1 |
 
 ## 2. Interfaces, documents, versions, fixtures, examples
 
@@ -102,14 +103,14 @@ done
 
 The twelve executables and their cases at `bb8ff42`: inference rules 12, schedule rule 7, context 21, record configuration 16, rule endpoint 31, writers 6, C API 9, index manager helpers 3, peripheral rules 11, sound executor 10, channel worker 12, capture endpoint 5. Every earlier unit ran the same four configurations incrementally (the `/root/build/<unit>-matrix.sh` scripts; the counts per unit are in `docs/PLAN.md` section 12.1 and the commit messages).
 
-Since the code review fixes of 2026-10-21 (the twelve commits after `bb8ff42`, section 1) there are thirteen executables with 154 cases: record configuration 18, storage 9 (`vigil_test_storage`, over no device, with the storage manager thread not started and a socket pair in place of the uevent socket), the rest as above. Each fix commit ran Debug, ASan/UBSan, and TSan incrementally (`/root/build/review/{debug,asan,tsan}`; the counts per commit are in the commit messages), and the final branch ran all four, jemalloc on from an empty directory (`/root/build/review/jemalloc`, the recipe above) and the demo from a Debug tree with examples on (`/root/build/review/debug-ex`):
+Since the code review fixes of 2026-10-21 (the thirteen commits after `bb8ff42`, section 1) there are thirteen executables with 155 cases: record configuration 18, storage 10 (`vigil_test_storage`, over no device, with the storage manager thread not started and a socket pair in place of the uevent socket), the rest as above. Each fix commit ran Debug, ASan/UBSan, and TSan incrementally (`/root/build/review/{debug,asan,tsan}`; the counts per commit are in the commit messages), and the final branch ran all four, jemalloc on from an empty directory (`/root/build/review/jemalloc`, the recipe above) and the demo from a Debug tree with examples on (`/root/build/review/debug-ex`):
 
 | Configuration | Configure and build (7 jobs) | Warnings | Discovered | Cases | Sanitizer reports | Demo |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| Debug, allocator off (incremental) | exit 0, 10 s | 0 | 13 | 154 passed, 0 failed | none expected | exit 0 (`debug-ex`) |
-| ASan/UBSan, allocator off (incremental) | exit 0, 17 s | 0 | 13 | 154 passed, 0 failed | 0 | not run |
-| TSan, allocator off (incremental) | exit 0, 10 s | 0 | 13 | 154 passed, 0 failed | 0 | not run |
-| jemalloc on (fresh) | exit 0, 54 s | 0 | 13 | 154 passed, 0 failed | none expected | exit 0 |
+| Debug, allocator off (incremental) | exit 0, 6 s | 0 | 13 | 155 passed, 0 failed | none expected | exit 0 (`debug-ex`) |
+| ASan/UBSan, allocator off (incremental) | exit 0, 14 s | 0 | 13 | 155 passed, 0 failed | 0 | not run |
+| TSan, allocator off (incremental) | exit 0, 7 s | 0 | 13 | 155 passed, 0 failed | 0 | not run |
+| jemalloc on (fresh) | exit 0, 53 s | 0 | 13 | 155 passed, 0 failed | none expected | exit 0 |
 
 `/mnt` was empty and nothing was mounted after each run.
 
@@ -173,7 +174,7 @@ Each is pinned with a test and dated in `docs/PLAN.md`; the default of the plan 
 - **The manual capture output check is lexical**: the path must start with `/mnt` or the configured internal mount point as strings.
 - **`doMount` detaches and clears an existing mount path**, the internal mount point included.
 - **A Slot in `ERROR` does not recover on its own** (the manager thread exits), see above.
-- **A task admitted just before its Slot turns `SATURATED` waits for `READY`** (by reading, `Slot::isReadyToWrite` and `FileChannelWorker::step`): the worker claims only while the Slot is `READY`, so a task admitted within the manager's 500 ms poll before the state flips stays pending with its reservation and the channel reports `PENDING`. With rotation on the state returns within about a second and the task runs; with rotation off, or nothing left to rotate, it waits until a person frees space or changes the quota, and then runs for its old event. Found by the review pass of 2026-10-21 and kept: the series cancels the pending tasks of the `ERROR` states, which never return on their own, while this one returns with space.
+- **A task admitted just before its Slot turns `SATURATED` with rotation on waits for the rotation** (`Slot::doSyncStateReadyOrSaturated`, `FileChannelWorker::step`): the worker claims only while the Slot is `READY`, so a task admitted within one worker probe before the state flips stays pending with its reservation and the channel reports `PENDING` until the rotate step brings `READY` back, within about a second. With rotation off nothing brings `READY` back until a person frees space or raises the quota, so since the review pass of 2026-10-21 (R6, the owner's decision) the sync that moves the state to `SATURATED` cancels the pending tasks bound to the Slot, as the `ERROR` states do (`saturation_without_rotation_cancels_the_pending_task_and_with_rotation_leaves_it_waiting`, `tests/test_storage.cpp`). Kept: with rotation on and nothing the rotation can give (free space taken by files outside the record root, a limit below the critical mark, or every entry invalid), the task waits until a person acts and then runs for its old event; so does one pending when rotation is turned off while the Slot is `SATURATED` (pinned by the same case), and one admitted just before a health reset that re-initializes the Slot into `SATURATED`. On the internal Slot, whose filesystem the system shares, free space can return without a person, and the cancel then cost one event.
 - **No fake steady clock**: the ALWAYS_ON and Timer pacing cases wait for the context's time in real time (a fraction of a second and about three seconds) with bounded loops.
 - **`vigil_test_capture_endpoint` needs more than 532 MiB free** on the temporary directory's filesystem, the critical watermark of one image.
 - **The C ABI changed** with the two appended fields: rebuild the library and every caller together; version strings do not make old binaries compatible.
