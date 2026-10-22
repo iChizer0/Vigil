@@ -2,13 +2,15 @@
 // devices, and every case must keep both: a Storage is built with `run_manager_thread` false, and the netlink pass
 // runs only after `attachUeventSocket` gave it a socket pair. Without either, as root, the pass would open the real
 // uevent socket and scan /sys/class/block, and its Slots would check and mount the host's partitions under /mnt.
-// The device and mount paths are in a temporary directory and do not exist, so nothing is mounted, formatted, or
-// removed, and a Slot's own threads probe a device that is not there, which is enough for the lifecycle under
-// test; the bounce cases name three fixed paths, /dev/vigil-test-bounce, /mnt/rc_vigil-test-bounce, and
-// /dev/vigil-test-internal, which they require absent. A Slot over no device admits no task, so what closing its
-// admission does to the pending tasks bound to it is pinned by
+// The device and mount paths are in a temporary directory and do not exist, but for one case's device, a zero-filled
+// file on which blkid finds no filesystem (it must stay so: a Slot checks and mounts a device it recognizes); so
+// nothing is mounted, formatted, or removed, and a Slot's own threads probe a device that is not there or holds
+// nothing to mount, which is enough for the lifecycle under test; the bounce cases name three fixed paths,
+// /dev/vigil-test-bounce, /mnt/rc_vigil-test-bounce, and /dev/vigil-test-internal, which they require absent. A Slot
+// over no device admits no task, so what closing its admission does to the pending tasks bound to it is pinned by
 // `closing_admission_retires_unclaimed_tasks_and_the_thread_bodies_serve_both_channels_at_once`
 // (`tests/test_channel_worker.cpp`), and a Slot made READY by hand pins what the failure mark and a saturation do.
+// One case times a wait, since what it pins is the absence of work over time: the manager's wait for a format.
 
 #include <atomic>
 #include <chrono>
@@ -16,6 +18,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -27,6 +30,7 @@
 #include <utility>
 #include <vector>
 
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -214,6 +218,15 @@ bool WaitFor(const Pred &pred)
         std::this_thread::yield();
     }
     return true;
+}
+
+// The CPU time the process has used so far, every thread's: what a case bounds when it pins a thread that waits.
+std::chrono::microseconds ProcessCpuTime()
+{
+    rusage usage {};
+    ::getrusage(RUSAGE_SELF, &usage);
+    return std::chrono::seconds(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec)
+           + std::chrono::microseconds(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
 }
 
 // The unmount callbacks of one case: how many, the last one's thread and mount path; and, when a case armed it, a
@@ -745,6 +758,31 @@ VG_TEST_CASE(a_disable_syncs_the_filesystem_at_the_mount_path)
         VG_CHECK_EQ(slot.disable(), 0);
     }
     VG_CHECK(LogRecorder::contains("for syncing: 2")); // ENOENT
+}
+
+VG_TEST_CASE(an_enabled_slot_that_waits_for_a_format_request_leaves_the_processor_idle)
+{
+    // An enabled Slot over a device with no filesystem it supports (an exFAT card; here a zero-filled file, on which
+    // blkid finds nothing) waits in NOT_FORMATTED_OR_FORMAT_UNSUPPORTED for a format request, as it waits while a
+    // format runs, and its manager probes the state once per interval meanwhile. Until 2026-10-22 that wait measured
+    // its sleep from the start of a round it never left, so after the first interval the manager spun on one core.
+    // After that interval, the process's CPU time over a second bounds it: a wait leaves it almost empty (a few
+    // milliseconds, sanitized or not, and load cannot raise it), and a spin exceeds the bound while it gets a tenth of
+    // a core.
+    Fixture f;
+    const auto dev = f.root + "/zero-dev";
+    {
+        std::ofstream out(dev, std::ios::binary);
+        out << std::string(std::size_t { 1 } << 20, '\0');
+    }
+    auto slot = std::make_shared<Slot>(*f.ctx, dev, f.mount, /*removable*/ true, /*internal*/ false, "DCIM");
+    VG_REQUIRE(slot->getStatus().state == SlotState::NotFormattedOrFormatUnsupported);
+    VG_REQUIRE(slot->enable() == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(600)); // past the first interval of the manager's wait
+    const auto before = ProcessCpuTime();
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    VG_CHECK(ProcessCpuTime() - before < std::chrono::milliseconds(100));
+    VG_CHECK(slot->getStatus().state == SlotState::NotFormattedOrFormatUnsupported);
 }
 
 VG_TEST_CASE(a_device_that_bounces_within_one_pass_gets_a_new_slot_and_one_added_and_removed_within_it_gets_none)

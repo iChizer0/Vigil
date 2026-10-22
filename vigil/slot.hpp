@@ -968,8 +968,10 @@ private:
             goto l_check_state_loop;
 
         l_check_state_loop_delayed:
-            if (const auto elapsed = std::chrono::steady_clock::now() - start; elapsed < kManagerProbeInterval)
-                std::this_thread::sleep_for(kManagerProbeInterval - elapsed);
+            // A full interval on every visit: NOT_FORMATTED and FORMATTING wait here without returning to the round's
+            // start (FILESYSTEM_CHECKING and INDEXING jump here too, but the manager leaves them before it reads the
+            // state), so a sleep measured from that start ended after the first interval and the loop spun.
+            std::this_thread::sleep_for(kManagerProbeInterval);
 
         l_check_state_loop:
             if (_stop_token.load(std::memory_order_acquire))
