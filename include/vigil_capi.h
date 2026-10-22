@@ -22,11 +22,11 @@ extern "C" {
  * media, GPIO, and HTTP integrations become active for subsequent calls (singleton, thread-safe).
  *
  * @param config The configuration, copied: the callbacks, user_data, strings, and the ttys array it points to are
- * borrowed until vg_service_deinit returns. config_directory is required; every callback is optional unless its
- * field says otherwise, and a rule or an action that needs a missing callback is refused or fails when it runs.
+ * borrowed until vg_service_deinit returns. config_directory is required and every callback optional unless its
+ * field says otherwise; a rule or an action that needs a missing callback is refused or fails when it runs.
  * @return vg_sta_e 0 on success; EINVAL for a null config or config_directory, EALREADY while a runtime exists,
- * EDEADLK from a callback on the thread of another C API call (see vg_service_deinit), EFAULT when the runtime
- * could not be built (the cause is logged).
+ * EDEADLK from a callback on the thread of another C API call, EFAULT when the runtime could not be built (the cause
+ * goes to log_cb).
  * @note May launch child threads for media processing and HTTP serving, and the Unix socket path used for TTY should be
  * created by the caller.
  */
@@ -36,17 +36,13 @@ vg_sta_e vg_service_init(vg_config_t *config);
  * @brief Shuts down the Vigil runtime and releases any allocated resources (thread-safe).
  *
  * @return vg_sta_e 0 when teardown succeeds; EDEADLK from a callback on the thread of another C API call.
- * @note Blocks until all child threads have exited and resources are cleaned up. The callbacks, user_data, strings,
- * and arrays given to vg_service_init must stay valid until this call returns. Neither this function nor
- * vg_service_init may be called from a callback: on the thread of another C API call they return EDEADLK, and on a
- * Vigil thread this function would have to join the thread it runs on, which terminates the process, while
- * vg_service_init returns EALREADY. Any other C API function may be called from a callback, also on the thread of
- * the C API call that invoked it, unless the callback's own description says otherwise; while the runtime is being
- * built or torn down such a call receives ESRCH. One rule holds for every callback that runs on a storage Slot's
- * own thread (the file and mount callbacks, and the media callbacks of the automatic Photo and Video workers): it
- * must not eject, format, or configure that Slot through the storage API. An eject would join the thread it runs
- * on, and a format or a configuration change would wait on the Slot's mutex while a concurrent disable (an eject,
- * a switch, a removal) holds it to join that thread. Reading the storage status is fine.
+ * @note Blocks until all child threads have exited and resources are cleaned up. Neither this function nor
+ * vg_service_init may be called from a callback: on a Vigil thread, deinit would join the thread it runs on, which
+ * terminates the process. Any other C API function may, also on the thread of the call that invoked it, unless the
+ * callback's own description says otherwise; while the runtime is built or torn down such a call returns ESRCH. A
+ * callback on a storage Slot's own thread (on_file_event_cb, on_mount_cb, and the Photo and Video workers' media
+ * callbacks) must not eject, format, or configure that Slot: an eject would join the thread the callback runs on, and
+ * a format or a configuration would wait on the Slot's mutex while a concurrent disable holds it to join that thread.
  */
 vg_sta_e vg_service_deinit();
 
@@ -56,15 +52,12 @@ vg_sta_e vg_service_deinit();
  * @brief Queues a video frame for processing or archival by Vigil (thread-safe).
  *
  * @param frame Pointer to the frame metadata and payload description; the payload is copied during the call.
- * @return vg_sta_e 0 when accepted, EINVAL for a null frame or one without a payload (null data or zero bytes_len),
- * or an error status on failure.
- * @note Never waits for space: the buffers keep the last 10 seconds, trimmed at a key frame, and drop what is older;
- * the call only takes a buffer lock, which a writer holds while it takes one frame. Vigil records from what the
- * host enqueues, so frames must keep arriving while recording can run: a clip ends at the input-loss wait without
- * them, and a triggered clip starts from the frames buffered before it, however old. While its pipeline is stopped,
- * the host keeps writing suspended (vg_media_scoped_suspend_write, which admits no Photo, Video, or Sound meanwhile)
- * and ends the suspension with vg_media_scoped_resume_write(true), which drops the stale frames; a resume without a
- * suspension drops nothing. A key frame is expected at least every 10 seconds (see vg_video_frame_t).
+ * @return vg_sta_e 0 when accepted, EINVAL for a null frame or one without a payload, or an error status on failure.
+ * @note Never waits for space, only for a buffer lock a writer holds briefly: the buffers keep the last 10 seconds,
+ * trimmed at a key frame. Frames must keep arriving while recording can run: a clip ends at the input-loss wait
+ * without them, and a triggered clip starts from the frames buffered before it, however old. While its pipeline is
+ * stopped, the host keeps writing suspended (vg_media_scoped_suspend_write) and ends the suspension with
+ * vg_media_scoped_resume_write(true).
  */
 vg_sta_e vg_media_enqueue_video_frame(const vg_video_frame_t *frame);
 
@@ -73,8 +66,7 @@ vg_sta_e vg_media_enqueue_video_frame(const vg_video_frame_t *frame);
  *
  * @param frame Pointer to the audio frame metadata and payload description; the payload is copied during the call.
  * @return vg_sta_e 0 when accepted, EINVAL for a null frame or one without a payload, or an error status on failure.
- * @note Never waits for space: the buffers keep the last 10 seconds, trimmed at a video key frame, and drop what is
- * older; the call only takes a buffer lock, which a writer holds while it takes one frame.
+ * @note Buffered as video frames are, trimmed at a video key frame.
  */
 vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
 
@@ -82,9 +74,8 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
  * @brief Suspends media writing operations, optionally waiting for in-flight writes to complete (thread-safe).
  *
  * @param wait When true, blocks until every admitted media operation (video create/write/finish, image capture,
- * thumbnail generation, sound playback) has completed; nothing new is admitted until the matching resume. Not to
- * be called from a media callback, with or without wait: a waiting suspension drains the callbacks while holding
- * the lock this function and vg_media_scoped_resume_write take.
+ * thumbnail generation, sound playback) has completed; nothing new is admitted until the matching resume. Not to be
+ * called from a media callback: a waiting suspension drains the callbacks under the lock this function takes.
  * @return vg_sta_e 0 on success, ESRCH without a runtime.
  * @note While suspended, incoming media frames may be dropped if internal buffers fill up. Generally used when the
  * frame settings are being changed to avoid partial writes.
@@ -98,10 +89,9 @@ vg_sta_e vg_media_scoped_suspend_write(bool wait);
  * @return vg_sta_e 0 on success, ECANCELED when no suspension is in progress (nothing is cleared then), otherwise an
  * error status.
  * @note Use with reset_media_queue=true to discard any stale media frames that may have accumulated while writing was
- * suspended, and to end the suspension that spans a stall of the host's pipeline: the buffer is trimmed only as
- * frames arrive, so a triggered clip would start from the frames buffered before the stall, however old, and a
- * continuous clip's boundary key frame survives a pause when no frame arrives; a resume without the reset records
- * those frames first. Only the resume that ends the outermost suspension clears them.
+ * suspended, also to end a suspension that spans a stall of the host's pipeline: the buffer is trimmed only as frames
+ * arrive, so a resume without the reset records the frames from before the stall first. Only the resume that ends
+ * the outermost suspension clears them.
  */
 vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue);
 
@@ -116,9 +106,8 @@ vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue);
  * @param data Pointer to the protobuf-encoded message buffer.
  * @param data_len Length of the protobuf buffer in bytes.
  * @return vg_sta_e 0 when accepted, otherwise error status.
- * @note The message's timestamp_ms is the event time in Unix milliseconds, set by the host: it is reported as the
- * event time of FRAME and direct EVENT owners (0 included, never replaced by the current time) and must not be
- * negative, which would wrap the event UID counter.
+ * @note The message's timestamp_ms is the event time in Unix milliseconds, reported as such for FRAME and direct
+ * EVENT owners (0 too: Vigil never substitutes the current time); it must not be negative.
  */
 vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len);
 

@@ -46,7 +46,6 @@ void on_rule_event_cb(const vg_rule_evt_t *evt)
 
 void on_file_event_cb(const vg_file_evt_t *evt)
 {
-    // Borrowed for the duration of the call; event_uid is 0 for a continuous recording clip.
     std::cout << "File published: " << evt->path << ", " << evt->size_bytes << " bytes, " << evt->attributes
               << ", rule event " << evt->event_uid << std::endl;
 }
@@ -147,10 +146,8 @@ void on_unmount_cb(const char *dev, const char *mount_path)
     std::cout << "Unmounted " << dev << " at " << mount_path << std::endl;
 }
 
-// Every block device is kept out of storage management: a Slot is built for each partition not hidden, mounts it
-// under /mnt if it can, whether or not it is selected, and sets the mounted root to 1000:1000, mode 0777, so a host
-// answers false only for the devices Vigil may manage (its card slot's partitions), never for the system's own. The
-// internal device's Slot is built whatever the answer.
+// Hides every block device: Vigil mounts each partition it is not told to hide and opens its root to 1000:1000, mode
+// 0777, so a host answers false only for the devices Vigil may manage, never for the system's own.
 bool is_hidden_device_cb(const char *dev)
 {
     (void)dev;
@@ -189,10 +186,9 @@ int main()
     config.media.sound_play_cb = sound_play_cb;
 
     // Storage
-    // The mount point and the relay directory are reserved for Vigil, which empties them: the mount point before
-    // it mounts the device (here derived from the device name, under /mnt), the relay directory at init. The relay
-    // directory's parent is writable by root only, not /tmp: a relay request sets the owner and mode of the directory
-    // the path leads to, through a link if one is there.
+    // The mount point (derived from the device name, under /mnt) and the relay directory are Vigil's own: it empties
+    // the mount point before mounting and the relay directory at init. The relay directory's parent is writable by root
+    // only: a relay request sets the owner and mode of what the path leads to, through a link if one is there.
     config.storage.internal_device_path = "/dev/null";
     config.storage.internal_mount_point = nullptr;
     config.storage.data_directory_path = "data";
