@@ -878,15 +878,16 @@ private:
     }
 
     // The state from READY or SATURATED to what the index and the stats say, each manager round. With rotation
-    // off, nothing brings READY back from SATURATED until a person frees space or raises the quota, so a task
-    // admitted within one worker probe before the state left READY, which no worker claims afterwards, is
-    // canceled as the ERROR states cancel theirs (markFailed, the give-up): the cancel takes the channel lock
-    // after a dispatcher's admission section, so a task admitted before the state changed is canceled and none
-    // is admitted after it. With rotation on, the rotate step of the same round frees space and READY returns
-    // within about a second, so the task waits. Retained (docs/RETURN.md section 4.2): it waits the same way
-    // when that step has nothing to give, and after a health reset that re-initializes into SATURATED; on the
-    // internal Slot, whose filesystem the system shares, free space can return without a person, and the cancel
-    // then cost one event.
+    // off, Vigil frees no space: READY comes back from SATURATED only when a person frees space, raises the quota,
+    // or turns rotation on, or when the admission marks fall (one file action instead of two, a smaller format or
+    // estimate), so a task admitted within one worker probe before the state left READY, which no worker claims
+    // afterwards, is canceled as the ERROR states cancel theirs (markFailed, the give-up): the cancel takes the
+    // channel lock after a dispatcher's admission section, so a task admitted before the state changed is
+    // canceled and none is admitted after it. With rotation on, the rotate step of the same round frees space and
+    // READY returns within about a second, so the task waits. Retained (docs/RETURN.md section 4.2): it waits the
+    // same way when that step has nothing to give, and after a health reset that re-initializes into SATURATED;
+    // on the internal Slot, whose filesystem the system shares, free space can return without a person, and the
+    // cancel then cost one event.
     void doSyncStateReadyOrSaturated(const WaterMarks &watermarks, const IndexManager::IndexResult *index_result,
         const SlotStats &stats, SlotState current) noexcept
     {

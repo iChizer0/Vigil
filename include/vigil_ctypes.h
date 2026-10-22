@@ -4,7 +4,7 @@
 #ifdef VG_CTYPES_VERSION
 #error "Duplicate definition of VG_CTYPES_VERSION"
 #else
-#define VG_CTYPES_VERSION "2026.10.21"
+#define VG_CTYPES_VERSION "2026.10.22"
 #endif
 
 #include <stdbool.h>
@@ -310,7 +310,9 @@ typedef struct vg_config_storage_t
     void (*on_unmount_cb)(const char *dev, const char *mount_path); /**< Optional. Called before a Slot other than
                          the internal one is unmounted, with Vigil's Slot locks held: on the storage thread when the
                          device was removed, on the thread of the EJECT request (the async task worker's for an async
-                         one), or on the thread of vg_service_deinit. Return promptly and do not call the C API from
+                         one), or on the thread of vg_service_deinit, or of a vg_service_init that fails after the
+                         storage started. It runs for every such Slot that is removed, ejected, or torn down, mounted
+                         or not, so it does not pair with on_mount_cb. Return promptly and do not call the C API from
                          it. */
     bool (*is_hidden_device_cb)(const char *dev); /**< Optional (nothing is hidden without it). Whether the block
                                                     device of that bare name (e.g. mmcblk0p1) is kept out of storage
@@ -319,8 +321,15 @@ typedef struct vg_config_storage_t
                                                     are ignored afterwards, that device's included, so a hidden
                                                     internal device's Slot is never dropped or rebuilt by them. */
     const char *internal_device_path; /**< Device path to the internal storage device, e.g. /dev/mmcblk0p1: the
-                                         node's own path, /dev/ plus its kernel name, which the device events name
-                                         (a symlink would match none of them); null for no internal device. */
+                                         node's own path, /dev/ plus its kernel name, which the device events name;
+                                         null for no internal device. Another spelling (a symlink, /dev/block/...)
+                                         matches none of the events, and unless the node is a whole disk or
+                                         is_hidden_device_cb hides its kernel name, the scan also builds an
+                                         ordinary Slot for the node: a second Slot over the same device, mounted
+                                         again under /mnt (at the same path when internal_mount_point is null and
+                                         the spelling ends in the kernel name, which detaches the internal one),
+                                         with the external root policy (1000:1000, mode 0777), and accepting
+                                         EJECT. */
     const char *internal_mount_point; /**< Filesystem path to the internal storage mount point; derived from the
                                          device name when null. The mount paths, this one included, are directories
                                          reserved for Vigil: before it mounts a device there, it detaches whatever

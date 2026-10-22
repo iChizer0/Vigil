@@ -1,7 +1,7 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2026-10-21
+Revised: 2026-10-22
 Version: 2.0.0
 
 ## Rule API
@@ -463,7 +463,7 @@ Notes:
 - Modifying the large a mount of files directly under the record data directory of an enabled storage slot may interfere with the normal operation of the storage system, it is recommended to use the Storage Control API for file removal.
 - The storage system may take some time to transition between states, clients should monitor the `eState` field to determine when the storage slot is ready for use.
 - The `bDirty` flag indicates that the filesystem is marked dirty and may require a check (fsck) before it can be used again. This can happen if the storage device was removed without proper unmounting, or if there were write errors. A dirty filesystem may not be automatically mounted until it is repaired (if not enabled).
-- The saturation state indicates that the available free space is critically low, and the system is stopping new recordings to prevent running out of space. With quota rotation off the state holds until files are removed (the `REMOVE_FILES_OR_DIRECTORIES` or `FREE_UP` action), the quota limit is raised, or rotation is turned on, and a recording accepted just before the state changed is canceled rather than left `PENDING` until then; with rotation on it waits for the rotation, which brings the slot back to `READY`.
+- The saturation state indicates that the available free space is critically low, and the system is stopping new recordings to prevent running out of space. With quota rotation off the state holds until files are removed (the `REMOVE_FILES_OR_DIRECTORIES` or `FREE_UP` action), the quota limit is raised, rotation is turned on, or the configured file actions' critical watermark falls (one file action instead of two, or a smaller format), and a recording accepted just before the state changed is canceled rather than left `PENDING` until then; with rotation on it waits for the rotation, which brings the slot back to `READY`.
 
 ### Storage Control
 
@@ -679,7 +679,7 @@ Start a new capture session.
 Notes:
 
 - Returns error `EBUSY` if a capture is already in progress: one capture runs at a time.
-- The output path must be an absolute path under the configured storage mount point. The output directory is created when it does not exist (and stays when the capture then fails); the file is written under its name prefixed with a dot in that directory and renamed to `sFileName` when the capture ends, and a stale file of the dot-prefixed name is removed first.
+- The output path must be an absolute path that starts with `/mnt` or the configured internal mount point: the check compares strings, normalizes nothing, and does not look for a mounted slot, so a path through `..`, or one that only shares the prefix, passes, and the capture is written there, replacing a file of that name. The output directory is created when it does not exist (and stays when the capture then fails); the file is written under its name prefixed with a dot in that directory and renamed to `sFileName` when the capture ends, and a stale file of the dot-prefixed name is removed first.
 - A capture is admitted against the same per-filesystem in-flight budget as automatic recording: when the output filesystem's free space, minus what admitted tasks may still write there, is at or below the capture's critical watermark, the capture fails before any callback (`FAILED`, no file); while it runs, its own estimate is in flight on that filesystem and counts against automatic admission there.
 - Nothing runs while media is paused: the capture waits as `PENDING` and runs once media resumes.
 
