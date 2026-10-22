@@ -484,6 +484,42 @@ VG_TEST_CASE(admission_needs_a_usable_slot_with_headroom_and_a_rejected_owner_le
     VG_CHECK(video.claim(f.slot.registration()) != nullptr);
 }
 
+VG_TEST_CASE(closing_a_registration_cancels_its_tasks_after_another_one_opened)
+{
+    // The storage module keeps one registration open at a time (docs/PLAN.md section 9) but for one window: an
+    // eject that returns clears the single ejection flag while another eject's drop has yet to close its admission,
+    // so its manager can enable another Slot, whose open replaces the registration. The dropped Slot's close still
+    // cancels the tasks bound to it, or a task admitted just before the drop would stay pending with no worker to
+    // claim it, its channel refusing every task until rules were disabled or the channel's recording changed; and
+    // the other Slot's task stays, since a registration is never reused, and so does its registration.
+    Fixture f;
+    auto &video = f.ctx.file_channels.video;
+    auto &photo = f.ctx.file_channels.photo;
+    VG_REQUIRE(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER)));
+    const auto task = video.current();
+    VG_REQUIRE(task != nullptr);
+    VG_CHECK_EQ(task->slot_registration, f.slot.registration());
+
+    // The other Slot, on another filesystem, opens over the first and admits a Photo task while Video holds the
+    // first Slot's.
+    FakeSlotAdmission other(f.ctx, FakeSlotAdmission::kFilesystem + 1);
+    Publish(f.ctx, ChannelSettings(f.ctx, CaptureType::Image), ChannelSettings(f.ctx, CaptureType::Video));
+    VG_REQUIRE(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER)));
+    const auto kept = photo.current();
+    VG_REQUIRE(kept != nullptr && kept->slot_registration == other.registration());
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Pending);
+
+    f.slot.close(); // the first Slot's drop closes its admission
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Canceled);
+    VG_CHECK(video.current() == nullptr);
+    VG_CHECK_EQ(f.ctx.in_flight_budgets.inFlight(FakeSlotAdmission::kFilesystem), FileSize { 0 });
+    VG_CHECK(kept->event->status.load() == WriteEvent::Status::Pending);
+    VG_CHECK(photo.current() == kept);
+    VG_CHECK(f.ctx.dispatchRuleEvent(Owner(VG_RULE_TYPE_TIMER))); // the other Slot stays registered and admits
+    VG_REQUIRE(video.current() != nullptr);
+    VG_CHECK_EQ(video.current()->slot_registration, other.registration());
+}
+
 VG_TEST_CASE(admission_rejects_when_a_gate_closed_between_evaluation_and_dispatch)
 {
     // The gates are read inside the admission section (docs/PLAN.md section 8.1): rules disabled, the schedule

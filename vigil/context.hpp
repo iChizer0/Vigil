@@ -764,8 +764,10 @@ struct Context
         // keeps: its manager thread disables a Slot before it enables the one the configuration selects (of
         // several the selector matches, the one already enabled), and eject and removal disable a Slot before
         // they drop it (Storage::ejectSlot and Storage::removeSlot), each disable closing the registration it
-        // opened. So nothing is overwritten here; were it, the previous Slot's close would be a no-op and its
-        // pending tasks would stay bound to it.
+        // opened. It keeps it but for one window: an eject that returns clears the single ejection flag while
+        // another eject's drop has yet to close its admission, so the manager can enable another Slot, whose open
+        // replaces the registration here; the previous Slot's close then still cancels its pending tasks and
+        // leaves the newer registration open.
         uint64_t open(SlotAdmission &slot) noexcept
         {
             const std::unique_lock lock(_mutex);
@@ -774,16 +776,18 @@ struct Context
             return _registration;
         }
 
-        // Closes admission for `registration` if it is the open one, then cancels the pending tasks bound to
-        // it: nothing is accepted for the Slot afterwards, and a claimed task is finished by its worker.
+        // Closes admission for `registration` if it is the open one, and cancels the pending tasks bound to it
+        // either way, since no other Slot's task carries it: nothing is accepted for the Slot afterwards, and a
+        // claimed task is finished by its worker.
         void close(uint64_t registration) noexcept
         {
             {
                 const std::unique_lock lock(_mutex);
-                if (_registration != registration)
-                    return;
-                _slot = nullptr;
-                _registration = 0;
+                if (_registration == registration)
+                {
+                    _slot = nullptr;
+                    _registration = 0;
+                }
             }
             _ctx.file_channels.cancelPendingBoundTo(registration);
         }
