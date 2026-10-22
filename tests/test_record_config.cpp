@@ -1,6 +1,4 @@
-// Characterization tests for the version-2 record action configuration (docs/PLAN.md section 4.1; matrix
-// C1) and for the action settings snapshot, its revisions, and the watermarks it is mapped onto (section 7.1;
-// matrix A4 and C2).
+// The version-2 record action configuration, and the action settings snapshot, its revisions, and its watermarks.
 
 #include <atomic>
 #include <chrono>
@@ -35,7 +33,7 @@ namespace {
 struct Fixture
 {
     Context ctx;
-    FakeSlotAdmission slot; // registered and ready: a dispatch needs a usable Slot (docs/PLAN.md section 8.1)
+    FakeSlotAdmission slot; // registered and ready: a dispatch needs a usable Slot
 
     Fixture() : ctx(MakeFakeConfig()), slot(ctx) { }
 };
@@ -170,7 +168,7 @@ VG_TEST_CASE(rejects_other_schemas_incomplete_documents_and_wrong_types)
              { "/dActions/dPhoto/sFormat", "MP4" },
              { "/dActions/dPhoto/sFormat", "jpg" },
              { "/dActions/dPhoto/sFormat", 1 },
-             { "/dActions/dPhoto/iIntervalMs", 0 }, // pinned 2026-10-19 (docs/PLAN.md section 2): not "no gap"
+             { "/dActions/dPhoto/iIntervalMs", 0 }, // not "no gap"
              { "/dActions/dVideo/iIntervalMs", -1 },
              { "/dActions/dVideo/iIntervalMs", 1.5 },
              { "/dActions/dVideo/iIntervalMs", "5000" },
@@ -197,9 +195,7 @@ VG_TEST_CASE(rejects_other_schemas_incomplete_documents_and_wrong_types)
 
 VG_TEST_CASE(accepts_every_action_combination_and_continuous_recording)
 {
-    // The multi-action configuration (docs/PLAN.md section 4.1, Phases 4D and 5A-3): any combination of actions,
-    // with or without rules enabled, round-trips canonically and maps onto the snapshot, and so does continuous
-    // recording, with or without a Video action, which it suppresses for rule events (section 8.2).
+    // Continuous recording, with or without a Video action, suppresses triggered Video for rule events.
     Fixture f;
     for (const auto &doc: { Document({ { "/bContinuousRecordEnabled", true } }),
              Document({ { "/bContinuousRecordEnabled", true }, { "/bRuleEnabled", true },
@@ -248,8 +244,8 @@ VG_TEST_CASE(accepts_every_action_combination_and_continuous_recording)
 
 VG_TEST_CASE(the_always_on_invariant_admits_one_channel_and_exactly_one_while_rules_are_enabled)
 {
-    // docs/PLAN.md section 4.4: with ALWAYS_ON selected, at most one file channel, Sound disabled, continuous
-    // disabled, and exactly one channel while rules are enabled; the first-start state satisfies it.
+    // With ALWAYS_ON selected: at most one file channel, no Sound, no continuous recording, and exactly one channel
+    // while rules are enabled; the first-start state satisfies it.
     Fixture f;
     const auto satisfies
         = [&](Overrides overrides) { return RecordConfig(Document(overrides), f.ctx).satisfiesAlwaysOnInvariant(); };
@@ -306,8 +302,7 @@ VG_TEST_CASE(action_settings_carry_the_enabled_file_channel_and_the_effective_wa
     VG_CHECK(
         none->watermarks == WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), nullptr));
 
-    // Both channels: the effective watermarks are the aggregate of one Photo plus one Video task (docs/PLAN.md
-    // section 9).
+    // Both channels: the effective watermarks are the aggregate of one Photo plus one Video task.
     const auto both = ActionSettings::create(false, false, photo->photo, video->video, &f.ctx.c_api.media);
     VG_REQUIRE(both != nullptr);
     const auto &pw = photo->photo->watermarks, &vw = video->video->watermarks;
@@ -328,10 +323,7 @@ VG_TEST_CASE(action_settings_carry_the_enabled_file_channel_and_the_effective_wa
 
 VG_TEST_CASE(action_settings_carry_the_continuous_video_settings_as_the_video_recording)
 {
-    // docs/PLAN.md sections 7.1, 8.2, and 9 (Phase 5A-2): a snapshot with continuous recording configured
-    // carries the continuous Video settings (MP4, no interval, the default clip length, one clip's
-    // watermarks), suppresses triggered Video for rule events without rewriting it, and budgets one Video
-    // task for either mode. Built directly here; the parsed document is pinned above.
+    // One Video task is budgeted for either mode. Built directly here; the parsed document is pinned above.
     Fixture f;
     const auto photo = Snapshot(f.ctx, { { "/dActions/dPhoto/bEnabled", true } })->photo;
     const auto video = Snapshot(f.ctx, { { "/dActions/dVideo/bEnabled", true } })->video;
@@ -384,10 +376,7 @@ VG_TEST_CASE(action_settings_carry_the_continuous_video_settings_as_the_video_re
 
 VG_TEST_CASE(the_video_revision_follows_the_video_recording_of_either_mode)
 {
-    // docs/PLAN.md sections 7.1 and 8.2: the Video revision moves when the recording the Video channel runs
-    // changes: a mode switch moves it, a change to the suppressed triggered Video settings does not, and the
-    // Photo revision is unaffected either way. Through RecordConfig::sync, a switch cancels the pending task
-    // of the old mode, and the clip of the new mode is admitted afterwards.
+    // A mode switch moves the Video revision; a change to the suppressed triggered Video settings does not.
     Fixture f;
     auto &shared = f.ctx.action_settings;
     auto &video = f.ctx.file_channels.video;
@@ -470,9 +459,8 @@ VG_TEST_CASE(sync_publishes_the_snapshot_and_the_rule_flag)
 
 VG_TEST_CASE(sync_cancels_the_pending_task_of_a_channel_whose_settings_changed)
 {
-    // A pending task is bound to the channel settings of the snapshot it was accepted under (docs/PLAN.md
-    // section 7.1): publishing different settings for that channel cancels it, the same settings keep it, and a
-    // claimed task is left to its worker, which stops on the revision change.
+    // The same settings keep the pending task, and a claimed task is left to its worker, which stops on the revision
+    // change.
     Fixture f;
     auto &video = f.ctx.file_channels.video;
     const auto owner
@@ -508,10 +496,9 @@ VG_TEST_CASE(sync_cancels_the_pending_task_of_a_channel_whose_settings_changed)
 
 VG_TEST_CASE(cancel_pending_keeps_a_task_bound_to_the_kept_revision)
 {
-    // The cancel predicate: RecordConfig::sync cancels the pending task after the publish and outside the settings
-    // mutex, so a dispatcher can accept a task under the new settings in between, and the cancel keeps the task
-    // bound to the revision the commit published while it retires one bound to another. Without a revision, as at
-    // teardown, it cancels whatever is pending. The commit itself is pinned by the next case.
+    // The commit cancels after its publish, outside the settings mutex, so a dispatcher can accept a task under the
+    // new settings first: the cancel keeps a task bound to the published revision. Without a revision, as at
+    // teardown, it cancels whatever is pending.
     Fixture f;
     auto &video = f.ctx.file_channels.video;
     const auto owner
@@ -542,12 +529,10 @@ VG_TEST_CASE(cancel_pending_keeps_a_task_bound_to_the_kept_revision)
 
 VG_TEST_CASE(a_commit_keeps_a_task_accepted_under_the_settings_it_published)
 {
-    // The commit, deterministically: RecordConfig::sync publishes, then cancels on the Photo channel before the
-    // Video channel, each cancel taking its channel's lock. A Photo admission that blocks inside the Slot's probe
-    // holds the Photo channel lock, so the commit waits there after its publish; a continuous clip accepted on
-    // the Video channel meanwhile is bound to the Video revision the commit published, and the commit's Video
-    // cancel, once the admission lets go, must keep it. The case relies on the Photo cancel preceding the Video
-    // one in sync: swapped, the commit would pass before the clip is accepted and the case would pin nothing.
+    // RecordConfig::sync publishes, then cancels on Photo before Video. A Photo admission blocked inside the Slot's
+    // probe holds the Photo channel lock, so the commit waits there after its publish while a continuous clip is
+    // accepted under the published Video revision, which the Video cancel must keep. Were the cancels swapped, the
+    // commit would pass first and the case would pin nothing.
     struct BlockingAdmission: FakeSlotAdmission
     {
         using FakeSlotAdmission::FakeSlotAdmission;
@@ -586,8 +571,8 @@ VG_TEST_CASE(a_commit_keeps_a_task_accepted_under_the_settings_it_published)
         ctx);
     VG_REQUIRE(before.sync(ctx, before.prepare(ctx)) == 0);
 
-    // What the two threads share with this one, declared before the guard that joins them, so that a required check
-    // that throws frees none of it under a running thread. The commit is prepared against the published revision.
+    // Declared before the guard that joins the threads, so a failed required check frees nothing they use while they
+    // run. The commit is prepared against the published revision.
     const auto owner = std::make_shared<EventOwner>(VG_RULE_TYPE_TIMER, "", "", EventOwner::SourceDelivery::Event);
     std::shared_ptr<FileTask> photo_task;
     const auto prepared = after.prepare(ctx);
@@ -697,8 +682,7 @@ VG_TEST_CASE(publishing_bumps_only_the_revisions_of_the_channels_that_changed)
     VG_CHECK_EQ(after.photo_revision, before.photo_revision);
 
     // A change of a channel's watermarks alone (what a media refresh does) moves the global revision and the
-    // snapshot, which admission reads, but not the channel revision a running task is bound to (docs/PLAN.md
-    // section 9, decided 2026-10-19).
+    // snapshot, which admission reads, but not the channel revision a running task is bound to.
     before = after;
     {
         const auto &v = *before.settings->video;
@@ -768,10 +752,8 @@ VG_TEST_CASE(a_stale_revision_is_refused_and_applies_nothing)
 
 VG_TEST_CASE(a_commit_prepared_before_a_media_refresh_is_refused)
 {
-    // The snapshot is prepared outside the commit lock with the host's estimate of that moment; a refresh that
-    // lands before the publish changed the base it was built on, so the publish is refused and the client
-    // prepares again. Until the review fix of 2026-10-19 the revision was read at publish time, and the stale
-    // snapshot silently replaced the refreshed one.
+    // A refresh that lands between prepare and publish changed the base the snapshot was built on: the publish is
+    // refused and the client prepares again.
     auto cfg = MakeFakeConfig();
     cfg.media.max_bytes_estimate_cb = &EstimateFromGlobal;
     g_estimate = 0;
@@ -814,9 +796,8 @@ VG_TEST_CASE(a_media_refresh_re_estimates_every_channel_coherently)
     VG_REQUIRE(before.settings != nullptr && before.settings->video != nullptr);
     VG_CHECK(before.settings->video->watermarks == WaterMarks::from("MP4", kVideoClipLengthDefault.count(), nullptr));
 
-    // The host now estimates one clip at 1 MiB: the channel's and the effective watermarks change together in
-    // one snapshot. No channel revision moves (since Phase 4C-3 a running task keeps its own watermark; before,
-    // a refresh interrupted it), and the disabled Photo channel is untouched.
+    // The host now estimates one clip at 1 MiB: the channel's and the effective watermarks change together in one
+    // snapshot; no channel revision moves, and the disabled Photo channel is untouched.
     g_estimate = 1024 * 1024;
     shared.sync(*media);
     const auto after = shared.get();
@@ -867,8 +848,7 @@ VG_TEST_CASE(watermarks_follow_the_format_table_unless_the_host_estimates)
     VG_CHECK_EQ(mp4.critical_remain_bytes, 2 * 180 * kMiB + kMinFree);
     VG_CHECK_EQ(mp4.high_remain_bytes, 5 * 180 * kMiB + kMinFree);
 
-    // An unknown format uses the fallback entry (it read past the table before 2026-10-19; latent, since
-    // every caller validates the format first).
+    // An unknown format uses the fallback entry.
     const auto unknown = WaterMarks::from("AVI", 1, nullptr);
     VG_CHECK(unknown == WaterMarks::from("", 1, nullptr));
     VG_CHECK_EQ(unknown.critical_remain_bytes, 3 * kMinFree);

@@ -1,7 +1,5 @@
-// Characterization tests for the writers over a fake adapter and fake media callbacks: no Slot, no
-// filesystem, no device (docs/PLAN.md section 7.2). They pin the sink call sequence (create, write, finish
-// once), the terminal status of every callback failure, interruption, and the media operation every writer holds
-// from construction to destruction.
+// The writers over a fake adapter and fake media callbacks: the sink call sequence (create, write, finish once), the
+// terminal status of each failure, and the media operation each writer holds for its lifetime.
 
 #include <cerrno>
 #include <chrono>
@@ -128,9 +126,8 @@ VG_TEST_CASE(video_writer_writes_from_the_first_key_frame_and_finishes_on_the_ne
 
 VG_TEST_CASE(video_writer_interruption_finishes_the_sink_exactly_once)
 {
-    // The gate closes while the writer waits for the first key frame (rules disabled, settings changed, or the
-    // Slot stopping): nothing was recorded, so no sink was created and the task is Canceled, not an empty file
-    // (Interrupted with an empty sink until 2026-10-20, Phase 5A-1).
+    // The gate closes while the writer waits for the first key frame: nothing was recorded, so no sink was created
+    // and the task is Canceled.
     {
         Fixture f;
         f.push(false);
@@ -192,9 +189,8 @@ VG_TEST_CASE(video_writer_interruption_finishes_the_sink_exactly_once)
 
 VG_TEST_CASE(video_writer_bounds_its_waits_for_key_frames_and_input)
 {
-    // docs/PLAN.md section 8.2 (Phase 5A-1): the waits for the first key frame, for the closing key frame, and
-    // for any frame once the clip started are bounded (section 13: kVideoKeyFrameWait, kVideoInputLossWait;
-    // injected here), and each outcome is defined.
+    // The waits for the first key frame, for the closing key frame, and for any frame once the clip started are
+    // bounded; shorter bounds are injected here.
     const VideoWriter<FakeAdapter>::WaitBounds bounds { std::chrono::milliseconds(60), std::chrono::milliseconds(60) };
     // No key frame within the wait: nothing is recorded, the task is Canceled, and no file exists.
     {
@@ -210,8 +206,7 @@ VG_TEST_CASE(video_writer_bounds_its_waits_for_key_frames_and_input)
         VG_CHECK_EQ(f.media.finishes, 0);
         VG_CHECK(f.media.queue.empty());
     }
-    // The clip ends (here the adapter asks) before any key frame: Canceled, no empty file (Completed with an
-    // empty file until 2026-10-20).
+    // The clip ends (here the adapter asks) before any key frame: Canceled, no empty file.
     {
         Fixture f;
         f.push(false);
@@ -296,7 +291,7 @@ VG_TEST_CASE(video_writer_failures_keep_the_activity_count_balanced)
             VG_CHECK_EQ(f.media.finishes, 0);
         }
         VG_CHECK_EQ(f.media.finishes, 0);
-        VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 }); // leaked before 2026-10-19
+        VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
     }
     // Missing callbacks fail the same way.
     {
@@ -332,7 +327,7 @@ VG_TEST_CASE(video_writer_failures_keep_the_activity_count_balanced)
             VG_CHECK_EQ(f.media.finishes, 1);
             VG_CHECK_EQ(f.media.thumbnails, 0);
         }
-        VG_CHECK_EQ(f.media.finishes, 1); // twice before 2026-10-19
+        VG_CHECK_EQ(f.media.finishes, 1);
     }
 }
 
@@ -370,9 +365,7 @@ VG_TEST_CASE(image_writer_captures_once_and_reports_every_failure)
 
 VG_TEST_CASE(writers_hold_one_media_operation_from_construction_to_destruction)
 {
-    // Image capture is covered (it was not before 2026-10-19), and so is the adapter's destructor: the operation
-    // leaves only after it. Since Phase 4C-2 the Slot generates the thumbnail in takePublication, still under
-    // the operation, and publishes once the writer is released (tests/test_channel_worker.cpp).
+    // Image capture included; the operation leaves only after the adapter's destructor.
     {
         Fixture f;
         {

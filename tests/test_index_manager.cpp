@@ -1,6 +1,5 @@
-// Characterization tests for the filesystem helpers of vigil/index_manager.hpp: path containment, idempotent
-// non-destructive directory creation, and the no-overwrite publication name (docs/PLAN.md section 9). The
-// IndexManager class itself is not tested here: it needs fanotify, which needs elevated privileges.
+// The filesystem helpers of vigil/index_manager.hpp; IndexManager itself is not tested, since it needs fanotify, which
+// needs elevated privileges.
 
 #include <cstdlib>
 #include <filesystem>
@@ -82,7 +81,7 @@ VG_TEST_CASE(ensure_directory_exists_is_idempotent_and_never_removes_what_is_in_
     VG_CHECK(EnsureDirectoryExists(dir, true, true, &ctx));   // with or without re-applying permissions
     VG_CHECK(std::filesystem::is_directory(dir));
 
-    // A regular file in the way is an error and is left alone (it was removed before 2026-10-19).
+    // A regular file in the way is an error and is left alone.
     const auto file = t.path / "2026-10-20";
     Touch(file, "keep");
     VG_CHECK(!EnsureDirectoryExists(file, false, false, &ctx));

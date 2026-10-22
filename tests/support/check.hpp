@@ -2,10 +2,9 @@
 #ifndef VIGIL_TESTS_CHECK_HPP
 #define VIGIL_TESTS_CHECK_HPP
 
-// Minimal test support for the module-owned tests. There is no external test framework: a test
-// executable registers cases with VG_TEST_CASE, asserts with VG_CHECK / VG_CHECK_EQ / VG_REQUIRE /
-// VG_CHECK_THROWS, and ends with VG_TEST_MAIN. Every failed check prints "file:line: ..." and makes
-// the process exit non-zero, which is what CTest reports.
+// Minimal test support, no external framework: a test file registers cases with VG_TEST_CASE, asserts with VG_CHECK,
+// VG_CHECK_EQ, VG_REQUIRE, and VG_CHECK_THROWS, and ends with VG_TEST_MAIN; a failed check prints "file:line: ..." and
+// fails the process, which is what CTest reports.
 
 #include <cstddef>
 #include <cstdio>

@@ -1,7 +1,5 @@
-// Characterization tests for InferenceRule and InferenceRuleSet (docs/PLAN.md section 5.2, matrix R1).
-// They pin today's behavior: the saturating debounce counter, the source/confidence/class/ROI filters,
-// debounce zero, and first-match selection. Only input that reaches the rule moves the counter; the
-// rule never sees direct EVENT input because the rule loop handles that tick itself.
+// InferenceRule and InferenceRuleSet. Only input that reaches a rule moves its counter; direct EVENT input never
+// does, since the rule loop handles that tick itself.
 
 #include <cstdint>
 #include <string>
@@ -182,8 +180,8 @@ VG_TEST_CASE(without_a_source_filter_any_source_counts)
 
 VG_TEST_CASE(debounce_zero_activates_on_every_frame_including_negatives)
 {
-    // Pinned as implemented on 2026-10-19 (docs/PLAN.md section 2): with iDebounceTimes = 0 every frame
-    // from an admitted source activates, whether or not it contains a matching detection.
+    // With iDebounceTimes = 0 every frame from an admitted source activates, whether or not it contains a matching
+    // detection.
     Fixture f;
     const InferenceRule rule(InferenceRuleConfig(RuleJson("person", 0, { "person" }, { "cam0" }), f.ctx), f.ctx);
 
@@ -278,8 +276,8 @@ VG_TEST_CASE(rule_config_rejects_malformed_filters)
     auto missing_id = RuleJson("r", 1, { "person" });
     missing_id.erase("sID");
     VG_CHECK_THROWS(InferenceRuleConfig(missing_id, f.ctx));
-    // iDebounceTimes feeds an int counter: a negative or an oversized value is rejected since 2026-10-20 (it was
-    // narrowed silently before), while zero and the largest int are accepted as they are (docs/PLAN.md section 2).
+    // iDebounceTimes feeds an int counter: a negative or an oversized value is rejected, while zero and the largest
+    // int are accepted.
     VG_CHECK_THROWS(InferenceRuleConfig(RuleJson("r", -1, { "person" }), f.ctx));
     auto oversized = RuleJson("r", 1, { "person" });
     oversized["iDebounceTimes"] = int64_t { 2147483648 };

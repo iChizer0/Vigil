@@ -1,8 +1,8 @@
-// Characterization tests for CaptureEndpoint, the manual capture path (docs/PLAN.md sections 8.3 and 9; the
-// manual capture concurrency row of TEST-4): a capture runs through the real endpoint, writer, and adapter into
-// a temporary directory, with the fake media callbacks standing in for the host; no Slot, no device. The capture
-// thread is not started; each test drives one probe at a time through CaptureEndpointTestAccess, on a thread of
-// its own where a video capture has to be fed and stopped meanwhile.
+// Manual captures through the real CaptureEndpoint, writer, and adapter into a temporary directory, with fake media
+// callbacks; no Slot, no device. Premise: the temporary filesystem has more than 872 MiB free, a video capture's
+// critical mark, since every capture reserves against its own mark at its start. The capture thread is not started:
+// each test drives one probe at a time, on a thread of its own where a video capture has to be fed and stopped
+// meanwhile.
 
 #include <cerrno>
 #include <chrono>
@@ -207,10 +207,8 @@ struct Fixture
 
 VG_TEST_CASE(a_manual_capture_runs_through_its_cache_name_and_reports_its_lifecycle)
 {
-    // An image capture: the host writes the file under the dot-prefixed cache name in the output directory, and
-    // the endpoint renames it to the reported file name once the callback returned (docs/PLAN.md section 9).
-    // The output directory does not exist yet: the capture creates it (until 2026-10-20 the free-space probe of
-    // the missing directory failed the capture before the directory was created).
+    // The host writes the image under the dot-prefixed cache name, and the endpoint renames it once the callback
+    // returned. The output directory does not exist yet: the capture creates it.
     Fixture f;
     const auto out = f.root + "/out";
     VG_CHECK(!std::filesystem::exists(out));
@@ -384,9 +382,8 @@ VG_TEST_CASE(a_paused_barrier_keeps_a_capture_pending_and_manual_and_automatic_t
     VG_CHECK(!f.status().at("bReadyToStartNew").get<bool>());
     f.ctx->media_barrier.resume();
 
-    // The capture's bytes are in flight on the output filesystem while it runs, and a Slot on that filesystem
-    // admits an automatic task against the free space minus them (docs/PLAN.md section 9): with headroom for
-    // exactly one Photo, the automatic admission is refused inside the capture callback and granted afterwards.
+    // The capture's bytes are in flight on the output filesystem while it runs: with headroom for exactly one Photo,
+    // an automatic admission there is refused inside the capture callback and granted afterwards.
     const auto filesystem = *FilesystemIdOf(f.root);
     FakeSlotAdmission slot(*f.ctx, filesystem);
     const auto marks = WaterMarks::from("JPG", 1, nullptr); // the estimate of one Photo, the capture's as well
@@ -432,8 +429,8 @@ VG_TEST_CASE(a_failed_capture_leaves_no_file_and_a_missing_callback_fails_it_at_
         const auto out = f.root + "/out";
         const auto filesystem = *FilesystemIdOf(f.root);
 
-        // The image callback fails after writing part of the file: Failed, and the partial file is removed
-        // rather than published under the final name (before 2026-10-20 it was renamed like a completed one).
+        // The image callback fails after writing part of the file: Failed, and the partial file is removed rather
+        // than published under the final name.
         f.media.capture_result = EIO;
         f.media.on_capture = [&] { Fixture::WriteHostFile(f.media.last_path, "partial"); };
         VG_REQUIRE(f.start(out + "/broken.jpg", "JPG").at("code").get<int>() == 0);
@@ -460,10 +457,9 @@ VG_TEST_CASE(a_failed_capture_leaves_no_file_and_a_missing_callback_fails_it_at_
         VG_CHECK_EQ(f.ctx->in_flight_budgets.inFlight(filesystem), FileSize { 0 });
     }
     {
-        // Without the host's callbacks the writer cannot be built: the capture fails at once, with the endpoint
-        // ready for the next one. The adapter completes the event while the writer's constructor unwinds and
-        // the loop's catch completes it again: a capture started between the two (here from the log callback
-        // of the catch) stays the active one (until 2026-10-20 the second completion dropped it).
+        // Without the host's callbacks the writer cannot be built, and the event is completed twice: by the adapter
+        // while the writer's constructor unwinds, then by the loop's catch. A capture started between the two (from
+        // the catch's log callback) stays the active one.
         Fixture f(false);
         const auto out = f.root + "/out";
         VG_REQUIRE(f.start(out, "JPG").at("code").get<int>() == 0);
