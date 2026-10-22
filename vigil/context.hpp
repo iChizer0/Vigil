@@ -74,9 +74,7 @@ struct Context
 #endif
     }
 
-    // Tick function to update context state. The clocks advance whether or not rules are enabled, and an
-    // input's timestamp is its owner's event time only: it never replaces the current time (docs/PLAN.md
-    // section 5.1).
+    // Tick function to update context state; the clocks advance whether or not rules are enabled
     void tick() noexcept
     {
         shared_time.tick();
@@ -84,11 +82,8 @@ struct Context
         {
             resetInference();
             shared_inference_result.reset();
-            file_channels.cancelPendingTriggered(); // rechecks the flag under the channel lock; a claimed task is
-                                                    // completed by its worker; a continuous clip is no rule event
-                                                    // (docs/PLAN.md section 8.2)
-            sound_executor.cancelPending();         // a playing callback finishes on its own; a trigger accepted
-                                                    // after a commit enabled rules since the read above is dropped
+            file_channels.cancelPendingTriggered();
+            sound_executor.cancelPending(); // also drops a trigger accepted after the read above
             return;
         }
 
@@ -165,18 +160,8 @@ struct Context
         capture_media_buffer.clear();
     }
 
-    // Dispatches one owner after attribution (docs/PLAN.md sections 5.1, 6.2, 7.1, and 8.1): records it as the
-    // last dispatched owner, attempts a task in every file channel the snapshot enables for rule events
-    // (triggered Video is suppressed while continuous recording is configured, section 8.2) and a Sound trigger
-    // when it enables Sound, then reports the owner through the RULE callback, whose `writer_created` is file
-    // acceptance only: at least one channel accepted a task. A channel accepts nothing while it holds a task,
-    // when its settings changed since the snapshot was loaded, when a gate closed since the caller evaluated
-    // it, or without a usable Slot with headroom; a rejected file action leaves nothing pending, so the next
-    // owner proceeds. Sound is admitted by its executor against the same gates, and a rejected or failed
-    // trigger changes nothing else. Returns whether the owner's file work was admitted: true when a channel
-    // accepted a task or the snapshot enables no file action (a rule-only or Sound-only configuration), which
-    // is what the HTTP activation answers 0 for (section 5.2); false when every enabled channel refused. Runs
-    // on the rule thread and on the HTTP request thread.
+    // Runs on the rule thread and on HTTP requests. `writer_created` reports file acceptance only, and the result
+    // is true when a channel accepted a task or no file action is enabled.
     bool dispatchRuleEvent(std::shared_ptr<EventOwner> owner) const noexcept
     {
         if (!owner)
@@ -223,12 +208,8 @@ struct Context
         return accepted || !file_action_enabled;
     }
 
-    // Admits one continuous clip on the Video channel when the snapshot configures continuous recording
-    // (docs/PLAN.md section 8.2): no owner, no RULE callback, and no change to the last dispatched owner, since
-    // a continuous clip is no rule event; its gates are the schedule and the media pause, not `bRuleEnabled`,
-    // and it needs the same usable Slot with headroom. Returns whether a clip was accepted, which the channel
-    // refuses while it holds a task of either kind. The rule loop calls it on every tick, before the enable
-    // check (RuleEndpoint::ruleTaskLoop).
+    // A continuous clip is no rule event: no owner and no RULE callback, and its gates are the schedule and the media
+    // pause, not the rule flag.
     bool dispatchContinuous() const noexcept
     {
         const auto loaded = action_settings.get();
@@ -252,15 +233,12 @@ struct Context
     // Sync inference results queue, updated in enqueueInferenceResult()
     std::mutex inference_mutex;
     std::deque<InferenceResult> inference_queue;
-    // Media-operation barrier (docs/PLAN.md section 8.3). Every writer holds one admitted operation from its
-    // construction to its destruction, which spans every media callback it makes (create, write, finish, image
-    // capture) and the thumbnail generated when its file is published. Admission and pause share one mutex, so
-    // nothing is admitted after a pause, and a waiting pause returns only once every operation admitted before
-    // it has left.
+    // A writer holds one operation for its lifetime, its thumbnail included, and the Sound worker one while it plays.
+    // Admission and pause share one mutex, so nothing is admitted after a pause.
     struct MediaBarrier
     {
     public:
-        // One admitted operation, which leaves the barrier when destroyed. Empty when admission was refused.
+        // Leaves the barrier when destroyed; false when admission was refused.
         class Operation final
         {
         public:
@@ -333,19 +311,11 @@ struct Context
         alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _paused = false;
         alignas(kHardwareDestructiveInterferenceSize) std::atomic<size_t> _active = 0;
     } media_barrier;
-    // The schedule gate (docs/PLAN.md section 8.1): published by the rule loop on every tick before the enable
-    // check, and by the endpoint when the schedule configuration changes, so dispatch from the rule thread and
-    // the HTTP thread reads one state inside the admission section. Open until the first publication, as a
-    // runtime without a schedule is.
+    // The schedule gate, published by the rule loop and by a schedule change; open until the first publication.
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> schedule_open = true;
 
-    // The published action settings snapshot and its revisions (docs/PLAN.md section 7.1). The global revision
-    // detects configuration-commit conflicts: `update` publishes only for a caller that saw the current one, so
-    // a commit and a media refresh cannot interleave. Each file channel has its own revision, bumped only when
-    // that channel's recording settings change, which is what its writer watches: a change to the other
-    // channel, to Sound, or to the watermarks (admission state, section 9) does not stop it. The Video channel's
-    // recording is the continuous clip while continuous recording is configured (section 8.2), so a mode switch
-    // moves the Video revision and a change to the suppressed triggered Video settings does not.
+    // `update` publishes only for a caller that saw the current revision, so a commit and a media refresh cannot
+    // interleave. A file channel's revision moves only when its own recording changes, which its running task watches.
     struct SharedActionSettings
     {
     public:
@@ -356,15 +326,14 @@ struct Context
             size_t video_revision;
             std::shared_ptr<const ActionSettings> settings; // null only if the first allocation failed
 
-            // The loaded revision of the file channel that writes `type`.
             size_t channelRevision(CaptureType type) const noexcept
             {
                 return type == CaptureType::Image ? photo_revision : video_revision;
             }
         };
 
-        // Publishes `next` if `rev` is still the current revision; an equal snapshot publishes nothing. Returns
-        // false, with nothing applied, on a conflict.
+        // Publishes `next` only if `rev` is still the current revision, false on a conflict; an equal snapshot
+        // publishes nothing and succeeds.
         bool update(size_t rev, std::shared_ptr<const ActionSettings> next) noexcept
         {
             if (!next) [[unlikely]]
@@ -384,8 +353,7 @@ struct Context
             return true;
         }
 
-        // A media refresh: the current configuration with its watermarks estimated again, as one snapshot.
-        // Publishes the defaults (no file channel) when nothing was published yet.
+        // A media refresh: the configuration with its watermarks estimated again, or the defaults at first.
         void sync(const vg_config_media_t &media_capi) noexcept
         {
             for (;;)
@@ -412,7 +380,6 @@ struct Context
             return revision.load(std::memory_order_acquire);
         }
 
-        // The revision of the file channel that writes `type`: Image is the Photo channel, Video the Video one.
         size_t channelRevision(CaptureType type) const noexcept
         {
             return (type == CaptureType::Image ? photo_revision : video_revision).load(std::memory_order_acquire);
@@ -426,15 +393,9 @@ struct Context
         std::shared_ptr<const ActionSettings> settings;
     } action_settings;
 
-    // One automatic file channel, Photo or Video (docs/PLAN.md section 7.2): at most one accepted task, pending
-    // or running, and the last retired one. The channel holds its task from acceptance until the worker
-    // completes it, which follows the interval hold and the failure cooldown (section 6.2), and accepts nothing
-    // meanwhile. Acceptance is admission (section 8.1): the gates, the channel, and the registered Slot are
-    // checked in one critical section, and a task carries the Slot it is bound to and its budget reservation.
-    // Every operation is identity-aware: completing or canceling task A never touches a newer task B, and a
-    // worker claims only a task bound to its Slot. The Video channel runs a task of either kind (section 8.2):
-    // a triggered one for a rule event, or a continuous clip without an owner; a running task of either kind
-    // is stopped through its gate (`isOpenFor`), never by a request.
+    // One automatic file channel, Photo or Video. It holds at most one task, from acceptance until it is retired, and
+    // keeps the last retired one. Retiring a task never touches a newer one, and a running task is never canceled: its
+    // writer watches its gate (`isOpenFor`).
     struct FileChannel
     {
     public:
@@ -451,14 +412,8 @@ struct Context
             return _type;
         }
 
-        // Accepts a task for `owner` on this channel, from the snapshot the dispatcher loaded, in one critical
-        // section (docs/PLAN.md section 8.1): the snapshot enables the channel for rule events (triggered Video
-        // is suppressed while continuous recording is configured), the channel is idle (its last task
-        // completed, after its hold), its settings revision is still the loaded one, the gates are open (rules
-        // enabled, the schedule open, media not paused), and the registered Slot is usable and has headroom,
-        // whose reservation the task carries with the Slot's registration. Null otherwise: nothing is left
-        // pending, and the next owner is tried afresh. A task bound to old settings, an old Slot, or a closed
-        // gate is never created.
+        // Checks the gates, the channel's revision, and the Slot's admission in one critical section, so no task is
+        // created for old settings, an old Slot, or a closed gate. Null when refused.
         std::shared_ptr<FileTask> tryAccept(const std::shared_ptr<EventOwner> &owner,
             const SharedActionSettings::Loaded &loaded)
         {
@@ -466,19 +421,14 @@ struct Context
                 loaded);
         }
 
-        // Accepts a continuous clip on the Video channel (docs/PLAN.md section 8.2) under the same conditions
-        // but for the rule flag, which is not a continuous clip's gate: the schedule open, media not paused, the
-        // channel idle, the revision current, and the Slot usable with headroom. The clip has no owner; its
-        // event carries UID 0 and the current time. Null on the Photo channel and without continuous recording.
+        // The same without the rule flag, which does not gate a continuous clip. Null on the Photo channel.
         std::shared_ptr<FileTask> tryAcceptContinuous(const SharedActionSettings::Loaded &loaded)
         {
             return accept(FileTask::Kind::Continuous, nullptr,
                 loaded.settings && _type == CaptureType::Video ? loaded.settings->continuous : nullptr, loaded);
         }
 
-        // Claims the pending task for the worker of the Slot registered as `registration`: Pending becomes
-        // Writing. Null when nothing is pending, or when the pending task is bound to another registration,
-        // which is not this worker's to run (docs/PLAN.md section 7.2; closing that Slot's admission cancels it).
+        // Claims the pending task for the worker of `registration`; a task bound to another Slot is not its to run.
         std::shared_ptr<FileTask> claim(uint64_t registration) noexcept
         {
             const std::unique_lock lock(_mutex);
@@ -489,12 +439,8 @@ struct Context
             return _current;
         }
 
-        // Cancels the pending task unless a worker has claimed it, or it is bound to `kept_revision`: a commit
-        // passes the channel revision it published, since a dispatcher may accept a task under the new settings
-        // between the publish and this cancel, and that task is the new settings' own (docs/PLAN.md section
-        // 7.1); teardown passes nothing and cancels whatever is pending, as no task is bound to revision 0 (the
-        // first publish bumps both channel revisions, and a task is accepted from a published snapshot only). A
-        // claimed task belongs to its worker, which interrupts itself when a gate closes and completes the task.
+        // Cancels the pending task unless it is claimed or bound to `kept_revision`: a commit passes the revision it
+        // published, keeping a task accepted under the new settings. No task is bound to revision 0.
         void cancelPending(size_t kept_revision = 0) noexcept
         {
             const std::unique_lock lock(_mutex);
@@ -503,11 +449,8 @@ struct Context
                 retireUnsafe(WriteEvent::Status::Canceled);
         }
 
-        // Cancels the pending task if it is triggered and rules are disabled: what disabling rules does
-        // (docs/PLAN.md section 8.1). The flag is read again here, under the channel lock where admission reads
-        // it: the tick reads it before this cancel, and a commit can enable rules and an activation be accepted
-        // in between, which a cancel on the tick's stale read would retire after its RULE event reported it
-        // accepted. A pending continuous clip is left for its worker, since the rule flag is not its gate.
+        // Cancels the pending triggered task while rules are disabled. The flag is read again under the channel lock,
+        // where admission reads it, so a task accepted after the tick's read, with rules enabled again, stays.
         void cancelPendingTriggered() noexcept
         {
             const std::unique_lock lock(_mutex);
@@ -517,8 +460,7 @@ struct Context
                 retireUnsafe(WriteEvent::Status::Canceled);
         }
 
-        // Cancels the pending task if it is bound to the Slot registered as `registration`, whose admission is
-        // closing (docs/PLAN.md section 9). A claimed task is finished by its worker.
+        // Cancels the pending task bound to `registration`; a claimed task is finished by its worker.
         void cancelPendingBoundTo(uint64_t registration) noexcept
         {
             const std::unique_lock lock(_mutex);
@@ -527,8 +469,6 @@ struct Context
                 retireUnsafe(WriteEvent::Status::Canceled);
         }
 
-        // Completes `expected` with its terminal status if it is still the held task. A stale task never
-        // touches a newer one.
         void complete(const std::shared_ptr<FileTask> &expected, WriteEvent::Status status) noexcept
         {
             const std::unique_lock lock(_mutex);
@@ -536,12 +476,8 @@ struct Context
                 retireUnsafe(status);
         }
 
-        // The gate of a running task of this channel, by its kind (docs/PLAN.md sections 8.1 and 8.2): a
-        // triggered task runs while rules are enabled, a continuous clip while the schedule is open (the rule
-        // flag is not its condition, and a schedule closure finishes it), and either while the settings
-        // revision the task was bound to is still the current one, which a mode switch moves, so the running
-        // clip of the old mode finishes before the new mode's first clip starts. The writer checks the media
-        // pause and its Slot's own continuation condition besides.
+        // A triggered task runs while rules are enabled, a continuous clip while the schedule is open, and either
+        // while its channel revision is unchanged, which a mode switch moves.
         bool isOpenFor(FileTask::Kind kind, size_t settings_revision) const noexcept
         {
             const bool gate = kind == FileTask::Kind::Continuous
@@ -550,7 +486,6 @@ struct Context
             return gate && _ctx.action_settings.channelRevision(_type) == settings_revision;
         }
 
-        // Whether the channel holds a task: from acceptance until completion, through the hold.
         bool holdsTask() const noexcept
         {
             const std::shared_lock lock(_mutex);
@@ -576,8 +511,6 @@ struct Context
         }
 
     private:
-        // The admission section of both kinds (docs/PLAN.md sections 8.1 and 8.2). A continuous clip's gates
-        // are the schedule and the pause; a triggered task's also the rule flag.
         std::shared_ptr<FileTask> accept(FileTask::Kind kind, const std::shared_ptr<EventOwner> &owner,
             const std::shared_ptr<FileWriterSettings> &settings, const SharedActionSettings::Loaded &loaded)
         {
@@ -594,8 +527,7 @@ struct Context
             auto admitted = _ctx.slot_admission.tryAdmit(loaded.settings->watermarks, settings->watermarks.task_bytes);
             if (!admitted.registration)
                 return nullptr;
-            // The task carries its owner's event time (the input's timestamp for FRAME and direct EVENT owners),
-            // not the current time; a continuous clip, which has no owner, the current time and UID 0.
+            // The owner's event time, not the current time; a continuous clip has the current time and UID 0
             auto event = continuous
                              ? std::make_shared<WriteEvent>(steady_time, _ctx.shared_time.unixTime(), uint64_t { 0 })
                              : std::make_shared<WriteEvent>(steady_time, owner->timestamp, owner->uid);
@@ -605,8 +537,7 @@ struct Context
             return _current;
         }
 
-        // Retires the held task with its terminal status; the reservation of a task retired unrun goes with it
-        // (a claimed task's reservation is its worker's). Call with the lock held.
+        // Call with the lock held. Releases the reservation of a task retired unrun; a claimed task's is its worker's.
         void retireUnsafe(WriteEvent::Status status) noexcept
         {
             _current->reservation.release();
@@ -622,13 +553,10 @@ struct Context
         std::shared_ptr<FileTask> _last;
     };
 
-    // In-flight budgets (docs/PLAN.md section 9): `types::InFlightBudgets`, shared by automatic Photo and Video
-    // and manual capture on the same filesystem. Declared before the file channels, whose tasks hold
-    // reservations in it, so that it outlives them.
+    // Declared before the file channels, whose tasks hold reservations in it, so that it outlives them.
     using InFlightBudgets = types::InFlightBudgets;
     InFlightBudgets in_flight_budgets;
 
-    // The two automatic file channels and what is reported across them (docs/PLAN.md section 6.2).
     struct FileChannels
     {
     public:
@@ -643,7 +571,6 @@ struct Context
         {
         }
 
-        // The channel that writes `type`: Image is the Photo channel, Video the Video one.
         FileChannel &of(CaptureType type) noexcept
         {
             return type == CaptureType::Image ? photo : video;
@@ -654,37 +581,33 @@ struct Context
             return type == CaptureType::Image ? photo : video;
         }
 
-        // Whether any channel holds a task: ALWAYS_ON waits for it (docs/PLAN.md section 4.4).
+        // ALWAYS_ON waits while any channel holds a task.
         bool holdsTask() const noexcept
         {
             return photo.holdsTask() || video.holdsTask();
         }
 
-        // Cancels the pending task of each channel (shutdown).
         void cancelPending() noexcept
         {
             photo.cancelPending();
             video.cancelPending();
         }
 
-        // Cancels the pending triggered task of each channel (rule disable); a pending continuous clip stays.
         void cancelPendingTriggered() noexcept
         {
             photo.cancelPendingTriggered();
             video.cancelPendingTriggered();
         }
 
-        // Cancels the pending task of each channel that is bound to the Slot registered as `registration`.
         void cancelPendingBoundTo(uint64_t registration) noexcept
         {
             photo.cancelPendingBoundTo(registration);
             video.cancelPendingBoundTo(registration);
         }
 
-        // What rule info reports: the most recently accepted triggered task across both channels, that is the
-        // held task accepted last if any channel holds one, else the retired task accepted last. A continuous
-        // clip is no rule event (docs/PLAN.md section 8.2): it is reported as its channel's state only, and it
-        // replaces the Video channel's retired triggered task, which the report then no longer falls back to.
+        // What rule info reports: the held triggered task accepted last if any channel holds one, else the retired one
+        // accepted last. A continuous clip is not reported here, but it replaces the Video channel's retired triggered
+        // task.
         Latest latest() const noexcept
         {
             const auto triggered = [](const std::shared_ptr<FileTask> &t) -> std::shared_ptr<FileTask> {
@@ -704,11 +627,10 @@ struct Context
         FileChannel video;
     } mutable file_channels;
 
-    // The acceptance sequence across both channels, which orders their tasks for rule info.
+    // Orders the tasks of both channels for rule info.
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<uint64_t> file_task_sequence = 0;
 
-    // The owner of the last dispatch, whatever the channels did with it (docs/PLAN.md section 6.2), which rule
-    // info reports as `dLastDispatchedOwner`.
+    // The owner of the last dispatch, whatever the channels did with it.
     struct LastDispatchedOwner
     {
     public:
@@ -729,25 +651,22 @@ struct Context
         std::shared_ptr<EventOwner> _owner;
     } mutable last_dispatched_owner;
 
-    // The admission interface of the enabled Slot (docs/PLAN.md sections 7.1, 8.1, and 9), which the Slot
-    // registers while it is enabled and a file channel reads inside its admission section.
+    // What an enabled Slot registers; a file channel calls it inside its admission section.
     struct SlotAdmission
     {
         virtual ~SlotAdmission() = default;
 
-        // Whether the Slot can take a task now: enabled, not failed, and in its ready state (admission, not
-        // continuation).
+        // Enabled, not failed, and in its ready state: admission, not continuation.
         virtual bool isReadyToWrite() const noexcept = 0;
 
-        // The quota and free-space probes of one task against the aggregate admission mark, with the task's own
-        // bytes reserved in the same critical section (section 9). Empty when refused.
+        // Probes quota and free space against the aggregate admission mark and reserves the task's bytes in the
+        // same critical section. Empty when refused.
         virtual InFlightBudgets::Reservation tryAdmit(const WaterMarks &admission, FileSize task_bytes) noexcept = 0;
     };
 
-    // The registered Slot admission, which replaces the slot check callback: at most one Slot, the enabled one,
-    // with a registration that the tasks it admits are bound to, so a worker runs only its own Slot's tasks and
-    // closing admission retires what the Slot accepted but no worker claimed. Lock order: a channel lock, then
-    // this registry, then the Slot's own locks; `close` takes the channel locks after releasing the registry.
+    // At most one registered Slot, the enabled one. Its tasks are bound to its registration, so a worker runs only its
+    // own Slot's tasks and closing admission cancels the unclaimed ones. Lock order: a channel lock, this registry,
+    // the Slot's locks; `close` takes the channel locks after releasing the registry.
     struct SlotAdmissionRegistry
     {
     public:
@@ -759,15 +678,9 @@ struct Context
 
         explicit SlotAdmissionRegistry(Context &ctx) noexcept : _ctx(ctx) { }
 
-        // Opens admission for `slot`: the tasks accepted from here on bind to the returned registration, which
-        // is never 0 and never reused. At most one registration is open at a time, which the storage module
-        // keeps: its manager thread disables a Slot before it enables the one the configuration selects (of
-        // several the selector matches, the one already enabled), and eject and removal disable a Slot before
-        // they drop it (Storage::ejectSlot and Storage::removeSlot), each disable closing the registration it
-        // opened. It keeps it but for one window: an eject that returns clears the single ejection flag while
-        // another eject's drop has yet to close its admission, so the manager can enable another Slot, whose open
-        // replaces the registration here; the previous Slot's close then still cancels its pending tasks and
-        // leaves the newer registration open.
+        // Tasks accepted from here on bind to the returned registration, never 0 and never reused. The storage module
+        // keeps at most one registration open, except when overlapping ejects let another Slot open before the dropped
+        // one closes; that close still cancels the dropped Slot's tasks.
         uint64_t open(SlotAdmission &slot) noexcept
         {
             const std::unique_lock lock(_mutex);
@@ -776,9 +689,7 @@ struct Context
             return _registration;
         }
 
-        // Closes admission for `registration` if it is the open one, and cancels the pending tasks bound to it
-        // either way, since no other Slot's task carries it: nothing is accepted for the Slot afterwards, and a
-        // claimed task is finished by its worker.
+        // Closes admission if `registration` is the open one, and cancels its pending tasks either way.
         void close(uint64_t registration) noexcept
         {
             {
@@ -792,15 +703,13 @@ struct Context
             _ctx.file_channels.cancelPendingBoundTo(registration);
         }
 
-        // Whether a usable Slot is registered: the HTTP precheck of a file action (docs/PLAN.md section 5.2).
+        // The HTTP precheck of a file action.
         bool isReadyToWrite() const noexcept
         {
             const std::shared_lock lock(_mutex);
             return _slot && _slot->isReadyToWrite();
         }
 
-        // Admits one task on the registered Slot: its registration with the reservation, or registration 0
-        // when no usable Slot is registered or it has no headroom.
         Admitted tryAdmit(const WaterMarks &admission, FileSize task_bytes) const noexcept
         {
             const std::shared_lock lock(_mutex);
@@ -812,7 +721,7 @@ struct Context
             return { _registration, std::move(reservation) };
         }
 
-        // Runs `fn` on the registered Slot, null when none, under the registry lock (rule info reads its status).
+        // Runs `fn` on the registered Slot, null when none, under the registry lock.
         template<typename F>
         auto with(F &&fn) const
         {
@@ -858,8 +767,6 @@ struct Context
             queue.erase(queue.begin(), s.base());
         }
 
-        // Prepares the backlog for a continuous clip (docs/PLAN.md section 8.2): kept from the boundary key frame
-        // the previous clip left, when it is still buffered, dropped otherwise (MediaFrame::KeepFrom).
         void keepFrom(std::optional<std::chrono::steady_clock::time_point> boundary) noexcept
         {
             const std::unique_lock lock(mutex);
@@ -974,15 +881,9 @@ struct Context
     // Shared inference results (not thread-safe)
     std::optional<InferenceResult> shared_inference_result;
 
-    // The Sound action executor (docs/PLAN.md section 7.3): one worker, one state, no queue. A trigger is
-    // accepted from Idle only, and only while the host provides `sound_play_cb`, media is not paused, and the
-    // executor is not stopping; a Pending or Playing retrigger is rejected, not queued. The worker claims a
-    // Pending trigger, rechecks that Sound and rules are still enabled and media is not paused (a commit that
-    // closed a gate since the trigger cancels it), holds a media operation (section 8.3) while it calls the
-    // callback outside every lock, and returns to Idle whatever the callback returned: a failure is logged, never
-    // replayed. Disabling Sound or rules and stopping cancel a Pending trigger; a Playing callback finishes under
-    // its bounded-completion contract and `stopAndJoin` waits for it. Without a callback there is no worker and
-    // Sound is unavailable.
+    // The Sound action executor: one worker, one state, no queue; a trigger is accepted from Idle only. The worker
+    // calls `sound_play_cb` under a media operation, outside every lock, and logs a failure, never replaying it.
+    // Without the callback there is no worker.
     struct SoundActionExecutor
     {
     public:
@@ -1004,8 +905,7 @@ struct Context
             return "UNKNOWN";
         }
 
-        // `run_worker == false` is a test seam: no thread is started and the test plays pending triggers
-        // through SoundActionExecutorTestAccess. Production code always runs the worker.
+        // `run_worker == false` is a test seam: no thread; tests play triggers through SoundActionExecutorTestAccess.
         explicit SoundActionExecutor(Context &ctx, bool run_worker = true)
             : _ctx(ctx), _available(ctx.c_api.media.sound_play_cb != nullptr)
         {
@@ -1022,16 +922,12 @@ struct Context
         SoundActionExecutor(const SoundActionExecutor &) = delete;
         SoundActionExecutor &operator=(const SoundActionExecutor &) = delete;
 
-        // Whether the host provides the callback. A configured Sound action without it is never accepted.
         bool available() const noexcept
         {
             return _available;
         }
 
-        // Accepts a trigger from Idle, in one critical section with the gates file admission reads (docs/PLAN.md
-        // section 8.1): rules enabled, the schedule open, media not paused. False when Sound is unavailable or
-        // stopping, a gate is closed, or a trigger is pending or playing; the caller checks that the
-        // configuration enables Sound.
+        // Checks the same gates as file admission, in one critical section; the caller checks that Sound is enabled.
         bool tryTrigger() noexcept
         {
             {
@@ -1060,8 +956,7 @@ struct Context
             return _state;
         }
 
-        // Refuses further triggers, cancels a Pending one, lets a Playing callback return, and joins the worker.
-        // Idempotent; the executor stays stopped.
+        // Cancels a Pending trigger, lets a Playing callback return, and joins the worker; idempotent and final.
         void stopAndJoin() noexcept
         {
             {
@@ -1092,8 +987,8 @@ struct Context
             }
         }
 
-        // Claims the Pending trigger and plays it; false when nothing is pending. Admission to the media barrier
-        // happens here, so a trigger accepted before a pause is canceled instead of played.
+        // Claims and plays the Pending trigger; false when none. It enters the media barrier here, so a trigger
+        // accepted before a pause is canceled rather than played.
         bool playPending() noexcept
         {
             {
@@ -1105,8 +1000,7 @@ struct Context
             bool played = false;
             vg_sta_e ret = 0;
             {
-                // The gates are rechecked after the claim, as the file writer does before creating anything: a
-                // commit that disabled Sound or rules since the trigger cancels it instead of playing.
+                // Rechecked after the claim: a commit that disabled Sound or rules since the trigger cancels it
                 const MediaBarrier::Operation operation(_ctx.media_barrier);
                 const auto settings = _ctx.action_settings.get().settings;
                 if (operation && settings && settings->sound_enabled

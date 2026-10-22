@@ -67,9 +67,7 @@ public:
 
     virtual ~AdaptableWriter() noexcept = default;
 
-    // Runs the task to its terminal status: Canceled when nothing was recorded (the gate was already closed, or
-    // no key frame arrived before the clip's wait, gate, or end), Completed, Failed, or Interrupted (a gate,
-    // pause, stop, settings change, or input loss stopped a task that had started; its file is kept).
+    // Canceled when nothing was recorded; Interrupted when a started task was stopped early, its file kept.
     const std::shared_ptr<WriteEvent> &operator()() noexcept
     {
         setEventStatus(waitUntilWriteFinish());
@@ -86,8 +84,7 @@ public:
         return _start_time + _settings->interval;
     }
 
-    // The closing key frame a completed video clip left in the queue for the next clip (docs/PLAN.md section
-    // 8.2), by its time stamp; empty when the clip ended without one, or for an image.
+    // The key frame a completed clip ended on, left in the queue for the next clip; empty without one.
     inline std::optional<std::chrono::steady_clock::time_point> boundaryKeyFrame() const noexcept
     {
         return _boundary_key_frame;
@@ -109,8 +106,7 @@ protected:
         return static_cast<const T *>(this)->shouldFinishWritingImpl();
     }
 
-    // False when media was paused at construction (the operation was refused) or since, or when the adapter's
-    // own gate is closed. Writers check it before creating anything and between frames.
+    // Writers check it before creating anything and between frames.
     inline bool shouldContinueWriting() const noexcept
     {
         return static_cast<bool>(_operation) && !_ctx.media_barrier.isPaused()
@@ -160,8 +156,7 @@ private:
     std::shared_ptr<FileWriterSettings> _settings;
     std::shared_ptr<WriteEvent> _event;
     std::optional<std::chrono::steady_clock::time_point> _boundary_key_frame;
-    // Held for the whole writer lifetime, so it still covers the publication (thumbnail generation included)
-    // that the adapter's destructor performs before this base is destroyed.
+    // Held for the writer's lifetime, so it also covers the adapter's destructor
     Context::MediaBarrier::Operation _operation;
 };
 
@@ -189,11 +184,7 @@ public:
         _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
     }
 
-    // After the task ran: the recorded file for the channel worker to publish, with its thumbnail generated into
-    // the cache directory while this writer still holds its media operation (docs/PLAN.md section 8.3). Empty
-    // when nothing is published: a Canceled task recorded nothing, and a Failed task's file is not usable. Called
-    // once; the worker publishes after releasing the writer, so the rename and the FILE callback run outside the
-    // operation.
+    // Called once, under the media operation; empty for a Canceled or Failed task.
     std::optional<CacheFileInfo> takePublication() noexcept
     {
         if (const auto sta = this->event()->status.load(std::memory_order_acquire);
@@ -226,10 +217,6 @@ protected:
         return false;
     }
 
-    // The writer stops when its channel's gate closes for its task's kind (rules disabled for a triggered task,
-    // the schedule closed for a continuous clip, or its own channel's recording settings changed, a mode switch
-    // included: a change to the other channel, to Sound, or to the watermarks does not stop it; docs/PLAN.md
-    // sections 7.1, 8.2, and 9) or when the Slot can no longer carry its task.
     inline bool shouldContinueWritingImpl() const noexcept
     {
         return this->ctxRef().file_channels.of(this->settings().type).isOpenFor(_kind, _settings_revision)
@@ -276,8 +263,8 @@ private:
 
 private:
     T &_slot;
-    size_t _settings_revision; // of the writer's own file channel, loaded together with its settings
-    FileTask::Kind _kind;      // which gate the task runs under (docs/PLAN.md section 8.2)
+    size_t _settings_revision; // of its own file channel, bound with its settings
+    FileTask::Kind _kind;      // which gate the task runs under
     CacheFileInfo _cache_file_info;
 };
 
@@ -302,8 +289,7 @@ public:
             throw Exception("CaptureAdaptedWriter initialized with empty output file name");
         }
 
-        // The output directory first: the budget below probes its filesystem, and until 2026-10-20 a capture
-        // into a directory that did not exist yet failed that probe before the directory was created.
+        // The output directory first: the budget below probes its filesystem
         if (!EnsureDirectoryExists(_event->output_directory, true, false, &this->ctxRef()))
         {
             this->setEventStatus(WriteEvent::Status::Failed);
@@ -311,8 +297,7 @@ public:
                 "CaptureAdaptedWriter failed to ensure output directory exists: " + _event->output_directory.string());
         }
 
-        // Admission against the shared in-flight budget of the output filesystem (docs/PLAN.md section 9); the
-        // reservation is held until this writer is destroyed, after the rename.
+        // Held until this writer is destroyed, after the rename
         if (!(_reservation = reserveBudget()))
         {
             this->setEventStatus(WriteEvent::Status::Failed);
@@ -329,10 +314,8 @@ public:
         }
     }
 
-    // Publishes the file by renaming it from its cache name when the task recorded something: Completed, or
-    // Interrupted with what was written. A Failed task's partial file is removed instead, as the automatic
-    // channel never publishes one (docs/PLAN.md section 7.2), so FAILED leaves no file at the output path;
-    // before 2026-10-20 it was renamed to the final name like a completed one.
+    // Publishes a Completed or Interrupted capture by renaming it from its cache name; a Failed capture's partial
+    // file is removed, as the automatic channels never publish one.
     virtual ~CaptureAdaptedWriter() noexcept
     {
         const auto status = this->event()->status.load(std::memory_order_acquire);
@@ -402,8 +385,6 @@ protected:
     inline void onThumbnailFrameImpl(const MediaFrame::FrameType &) noexcept { }
 
 private:
-    // The output filesystem's free space, minus what admitted tasks may still write there, must exceed this
-    // capture's critical watermark; its own bytes are reserved in the same critical section.
     Context::InFlightBudgets::Reservation reserveBudget() const noexcept
     {
         struct statvfs stat;
@@ -434,7 +415,7 @@ private:
         return reservation;
     }
 
-    // The running capture's own continuation check against its own critical watermark, once per batch period.
+    // A running capture keeps to its own critical watermark, checked once per batch period.
     bool isRemainSpaceEnough() const noexcept
     {
         if (auto now = std::chrono::steady_clock::now();
@@ -515,9 +496,7 @@ template<typename T>
 class VideoWriter final: public T
 {
 public:
-    // The bounds of the waits on the media stream (docs/PLAN.md section 8.2): for a key frame, at the start of
-    // a clip and at its end, and for any frame once the clip has started. Production uses the constants of
-    // section 13; the tests inject shorter ones through setWaitBounds.
+    // The waits for a key frame, at a clip's start and end, and for any frame once a clip has started.
     struct WaitBounds
     {
         std::chrono::steady_clock::duration key_frame = kVideoKeyFrameWait;
@@ -549,7 +528,7 @@ public:
         endWrite(); // fallback: the normal paths finish the sink before returning
     }
 
-    // Test seam: shorter bounds than the production constants. Call before the task runs.
+    // Test seam: call before the task runs.
     void setWaitBounds(WaitBounds bounds) noexcept
     {
         _waits = bounds;
@@ -561,8 +540,7 @@ private:
     static inline constexpr const std::chrono::milliseconds kVideoFrameWaitDelay = std::chrono::milliseconds(10);
 
 private:
-    // Creates the sink. Called with the first key frame in hand, so a clip that records nothing never leaves an
-    // empty file behind.
+    // Called with the first key frame in hand, so a clip that records nothing leaves no empty file.
     bool startWrite() noexcept
     {
         int fd = -1;
@@ -578,7 +556,6 @@ private:
         return true;
     }
 
-    // Ends the task with `status` after finishing the sink; a finish failure fails the task instead.
     WriteEvent::Status finishWith(WriteEvent::Status status) noexcept
     {
         return endWrite() == WriteEvent::Status::Failed ? WriteEvent::Status::Failed : status;
@@ -610,7 +587,7 @@ private:
         return finishWith(WriteEvent::Status::Failed);
     }
 
-    // Takes the first key frame out of the queue, dropping the frames before it; false when there is none yet.
+    // Drops the frames before the first key frame; false when there is none yet.
     static bool TakeFirstKeyFrame(std::mutex &mutex, std::deque<MediaFrame> &queue, MediaFrame &frame) noexcept
     {
         const std::lock_guard lock(mutex);
@@ -627,14 +604,9 @@ private:
         return true;
     }
 
-    // Runs the clip (docs/PLAN.md section 8.2). Nothing is created before the first key frame: a clip that sees
-    // none within the key frame wait, or whose gate closes or clip ends before one arrives, records nothing and
-    // is Canceled rather than left as an empty file. From the first key frame the sink is created and frames
-    // are written until the clip is finished (its length elapsed, or the adapter asks), when it ends on the next
-    // key frame, which stays in the queue for the next clip and is reported as the boundary key frame, or at
-    // the key frame wait without one. No frame at all for the input-loss wait ends a started clip as
-    // Interrupted, with what was written. The gate is checked inside every wait and after every frame, so a
-    // mode change, a pause, or a stop breaks a wait and stops the clip at the next frame.
+    // Nothing is created before the first key frame. A finished clip ends on the next key frame, which stays in the
+    // queue for the next clip, or at the key frame wait; a started clip that sees no frame for the input-loss wait
+    // is Interrupted. The gate is checked inside every wait and after every frame.
     WriteEvent::Status waitUntilWriteFinish() noexcept override
     {
         MediaFrame frame;
@@ -668,7 +640,7 @@ private:
 
         VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_DEBUG, "VideoWriter started writing frames, fd: ", _fd);
         std::optional<Clock::time_point> closing_deadline; // the key frame wait, once the clip is finished
-        while (this->shouldContinueWriting())              // the gate, after the first frame as after every other
+        while (this->shouldContinueWriting())
         {
             ctx_media_mutex.lock();
             const auto it = ctx_media_queue.begin();
@@ -684,7 +656,7 @@ private:
                     if (closing)
                         this->setBoundaryKeyFrame(it->time_stamp); // left in the queue for the next clip
                     ctx_media_mutex.unlock();
-                    return finishWith(WriteEvent::Status::Completed); // the clip ends on the next key frame
+                    return finishWith(WriteEvent::Status::Completed);
                 }
             }
             if (empty)

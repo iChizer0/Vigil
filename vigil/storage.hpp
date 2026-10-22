@@ -43,8 +43,7 @@ using namespace vigil::slot;
 class Storage
 {
 public:
-    // `run_manager_thread == false` is a test seam: no manager thread is started, and the test drives the Slot
-    // map through StorageTestAccess. Production code always runs the thread.
+    // `run_manager_thread == false` is a test seam: no thread; tests drive the Slot map through StorageTestAccess.
     Storage(const StorageConfig &cfg, Context &ctx, bool run_manager_thread = true)
         : _ctx(ctx), _data_dir_path(kDataDirDefaultPath), _config_mutex(), _config(cfg), _stop_token(false),
           _manager_thread(nullptr), _ejection_in_progress(false), _slots_mutex(), _slots(), _netlink_fd(-1),
@@ -129,10 +128,7 @@ public:
         }
         if (!slot || slot->isInternal())
             return ENOTSUP;
-        // Disabled and unmounted here, on this thread, before the map lets the Slot go (Slot::drop), so the answer
-        // follows the unmount. A request that still holds the Slot (a free-up, a removal of files) keeps its
-        // filesystem busy, so the unmount can only detach it until that request returns (docs/minimal-http-api.md,
-        // Storage Control).
+        // The answer follows the unmount, which can only detach while a request still uses the filesystem
         if (const auto ret = slot->drop(); ret != 0)
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to disable storage slot with device path ", slot->devPath(),
@@ -140,11 +136,8 @@ public:
             return ret;
         }
         {
-            // Its own entry only: a removal (the device pulled during the eject) may have dropped this Slot before
-            // or after the drop above, erased its entry, and the same pass may have built a replacement for the
-            // re-added device under the same key by now, which is not this eject's to let go: erased undropped, its
-            // destructor would unmount the present device. removeSlot needs no such check: only the storage thread
-            // inserts, and it runs there.
+            // Its own entry only: a removal may have dropped this Slot meanwhile and the same netlink pass built a
+            // replacement under the key, which an erase would destroy undropped, unmounting the present device
             const std::unique_lock slots_lock(_slots_mutex);
             if (const auto it = _slots.find(slot->devPath().string()); it != _slots.end() && it->second == slot)
                 _slots.erase(it);
@@ -380,11 +373,7 @@ private:
         };
         std::unordered_map<std::string, SlotInfo> dev_2_slot_info_vec;
 
-        // The internal device's Slot, at internal_mount_point or at its own mount path, whatever the node's type:
-        // built by the one-time scan, and again by an add of the same node, so that the internal device keeps its
-        // kind across a bounce of its node (a remove, then an add) instead of coming back as an ordinary Slot at
-        // /mnt, which an eject could drop and which would lose the internal format guards, the preserved space,
-        // and the internal root ownership policy.
+        // Built by the one-time scan and again by an add of the same node, so a bounced internal device stays internal
         const char *const internal_dev_path = _ctx.c_api.storage.internal_device_path;
         const auto internal_slot_info = [this, internal_dev_path]() {
             std::string mount_point;
@@ -472,9 +461,7 @@ private:
                     }
                     else if (action == "remove")
                     {
-                        // Arrival order decides for a device whose events are both queued: an add before the remove
-                        // is discarded here, one after it stands, so a device that bounces within one pass (a
-                        // remove, then an add) gets a new Slot once removeSlot has dropped the old one below.
+                        // Arrival order decides: an add queued before the remove is discarded, one after it stands
                         dev_2_slot_info_vec.erase(dev_path);
                         dev_2_remove.emplace_back(dev_path);
                     }
@@ -509,17 +496,10 @@ private:
         }
     }
 
-    // Drops the Slot of a device that was removed: disabled and unmounted first, outside `_slots_mutex`, as
-    // ejectSlot does (Slot::drop). The disable closes the Slot's admission and joins its threads (docs/PLAN.md
-    // section 9) before the map's reference goes, so that no later release destroys a running Slot: a copy of the
-    // map taken by getStatus, on a FILE callback for instance, may hold the last reference, and a Slot destroyed on
-    // its own worker would join itself. It also cancels the pending tasks bound to the Slot before
-    // syncEnabledSlotWithConfig, on this thread, enables a replacement, which keeps one admission registered at a
-    // time (Context::SlotAdmissionRegistry::open). The unmount runs here too, so that a late holder's release
-    // unmounts nothing: the pass below may build a new Slot for the same device, at the same mount path, before
-    // that release. The device is gone, so the Slot is dropped whatever `drop` returns; it refuses only a Slot
-    // being formatted, which holds the Slot's mutex through the format, so the warning below is for symmetry with
-    // ejectSlot.
+    // Drops the Slot before the map lets it go, as ejectSlot does: its threads are joined first, so the last reference
+    // is never released on one of them (a status copy in a FILE callback), and it is unmounted, unless internal, before
+    // the pass below may build a new Slot at the same mount path. The device is gone, so the entry goes either way, and
+    // only this thread inserts, so the erase cannot hit a replacement.
     void removeSlot(const std::string &dev_path) noexcept
     {
         std::shared_ptr<Slot> slot;
@@ -555,14 +535,9 @@ private:
         return dev_path_match && uuid_match;
     }
 
-    // Enables the selected Slot only after every other enabled Slot was disabled, which closed its admission and
-    // joined its two channel workers and its manager thread (docs/PLAN.md section 9): the replacement opens once
-    // the old consumers are drained, and a task never moves to another device (one pending across the switch is
-    // canceled when the old Slot's admission closes). Of several Slots the selector matches (a UUID shared by cards
-    // cloned from one image), the one already enabled stays the target, whatever the map's order, and every other
-    // enabled Slot, selected or not, is disabled first: at most one Slot is enabled, and so at most one admission
-    // is registered (Context::SlotAdmissionRegistry::open, which names the one window, two overlapping ejects, where
-    // the replacement opens before a dropped Slot's consumers are joined; no task moves even then).
+    // Enables the selected Slot only after every other enabled Slot was disabled, which joins its threads and cancels
+    // its pending tasks, so a task never moves to another device. Of several matching Slots (cloned cards sharing a
+    // UUID), the one already enabled stays the target.
     vg_sta_e syncEnabledSlotWithConfig()
     {
         const auto current_cfg = getConfig();

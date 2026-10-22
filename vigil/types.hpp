@@ -124,13 +124,10 @@ struct EventOwner
     const SourceDelivery source_delivery;
     // When Vigil created this owner, in Unix milliseconds.
     const int64_t dispatch_timestamp;
-    // The event time, in Unix milliseconds: the input's own timestamp for FRAME and direct EVENT owners,
-    // the dispatch time for owners that observe their condition themselves.
+    // The event time, in Unix milliseconds: the input's timestamp for an inference owner, else the dispatch time.
     const int64_t timestamp;
     const uint64_t uid;
 
-    // `event_ts` is the input's timestamp for owners that come from an input; owners that observe a
-    // condition themselves leave it unset and carry the dispatch time as their event time.
     EventOwner(vg_rule_type_e tp, const std::string &id, const std::string &src_id, SourceDelivery src_delivery,
         std::optional<int64_t> event_ts = std::nullopt)
         : type(tp), id(id), source_id(src_id), source_delivery(src_delivery), dispatch_timestamp(NowMs()),
@@ -759,8 +756,7 @@ struct BaseFrame: public NonCopyable<BaseFrame>
     void *data;
     size_t bytes_len;
 
-    // Owns a copy of the payload, never the host's buffer: a frame without one (the C API refuses it) stays
-    // empty. Before 2026-10-20 a non-null buffer of zero length was kept and later freed as if it were ours.
+    // Owns a copy of the payload, never the host's buffer; a frame without one stays empty.
     BaseFrame(int64_t pts_, void *data_, size_t bytes_len_) : pts(pts_), data(nullptr), bytes_len(0)
     {
         if (data_ && bytes_len_ > 0)
@@ -919,10 +915,8 @@ struct MediaFrame
         }
     };
 
-    // Keeps `queue` from the key frame stamped `boundary`, when there is one, and empties it otherwise: what a
-    // continuous clip does to the backlog before it starts (docs/PLAN.md section 8.2), so that adjacent clips
-    // stay continuous while an entry or a resume starts at a key frame enqueued afterwards. Call with the
-    // queue's lock held.
+    // The backlog before a continuous clip: kept from the key frame stamped `boundary`, so adjacent clips stay
+    // continuous, and emptied otherwise, so a clip starts at a fresh key frame. Call with the queue's lock held.
     static void KeepFrom(std::deque<MediaFrame> &queue,
         std::optional<std::chrono::steady_clock::time_point> boundary) noexcept
     {
@@ -941,8 +935,7 @@ struct MediaFrame
     }
 };
 
-// A recorded file in a Slot's cache directory on its way to publication: the writer fills it in, and the channel
-// worker hands it to the Slot once the writer is released (docs/PLAN.md section 7.2).
+// A recorded file in a Slot's cache directory on its way to publication.
 struct CacheFileInfo final
 {
     std::filesystem::path path;
@@ -977,8 +970,7 @@ inline CaptureType CaptureTypeFrom(const std::string &fmt) noexcept
         return CaptureType::Unknown;
 }
 
-// The storage headroom of a task (docs/PLAN.md section 9): the bytes one task may write (one image, or one clip
-// of the given length), and the free-space marks derived from it. Estimates, not reservations.
+// The bytes one task may write and the free-space marks derived from them; estimates, not reservations.
 struct WaterMarks
 {
     FileSize task_bytes;
@@ -1007,7 +999,7 @@ struct WaterMarks
         return of(limit);
     }
 
-    // The watermarks of two tasks that may write at once: one Video plus one Photo (docs/PLAN.md section 9).
+    // Two tasks that may write at once, one Photo and one Video.
     static inline constexpr WaterMarks aggregate(const WaterMarks &a, const WaterMarks &b) noexcept
     {
         return of(a.task_bytes + b.task_bytes);
@@ -1064,9 +1056,7 @@ struct FileWriterSettings
         return SameRecording(*this, other) && watermarks == other.watermarks;
     }
 
-    // Whether two settings describe the same recording: everything but the watermarks, which are admission
-    // state (docs/PLAN.md section 9). A running task is bound to the recording, so only a change of it moves
-    // its channel's revision.
+    // Everything but the watermarks, which are admission state; only this moves a channel's revision.
     static bool SameRecording(const FileWriterSettings &a, const FileWriterSettings &b) noexcept
     {
         return a.type == b.type && a.format == b.format && a.interval == b.interval
@@ -1079,8 +1069,7 @@ struct FileWriterSettings
         return std::shared_ptr<FileWriterSettings>(new (std::nothrow) FileWriterSettings(type, fmt, itv, fnp, vcl, wm));
     }
 
-    // With the watermarks of one automatic task of this kind (one image, or one clip of `vcl` seconds), as
-    // estimated by the host when it provides `max_bytes_estimate_cb`.
+    // With the watermarks of one task of this kind: one image, or one clip of `vcl` seconds.
     static std::shared_ptr<FileWriterSettings> create(CaptureType type, const std::string &fmt,
         std::chrono::milliseconds itv, std::string_view fnp, std::chrono::seconds vcl,
         const vg_config_media_t *media_capi) noexcept
@@ -1097,30 +1086,21 @@ private:
     }
 };
 
-// The immutable action settings snapshot (docs/PLAN.md section 7.1): the Sound switch, the settings of each
-// configured file action, the continuous Video settings when continuous recording is configured (section
-// 8.2), and the effective watermarks the Slot admits new tasks against, published as one object by a
-// configuration commit or a media refresh. Readers load it without the commit lock and keep the reference for
-// as long as they need one consistent view. Rule enablement is not part of it: it stays the
-// `record_rule_enabled` gate every thread reads, published after the snapshot.
+// The immutable snapshot a commit or a media refresh publishes; a reader keeps the reference for one consistent view.
+// Rule enablement stays outside it, in `record_rule_enabled`.
 struct ActionSettings
 {
     const bool sound_enabled;
-    const std::shared_ptr<FileWriterSettings> photo; // null when the Photo action is disabled
-    const std::shared_ptr<FileWriterSettings> video; // triggered Video as configured: null when the Video action
-                                                     // is disabled, suppressed while `continuous` is set
-    // Continuous Video (docs/PLAN.md section 8.2): MP4 clips of the default length with no interval, which is
-    // what tells the two Video recordings apart (a triggered interval is positive); null unless continuous
-    // recording is configured. Nothing but the switch configures it.
+    const std::shared_ptr<FileWriterSettings> photo; // null when disabled
+    const std::shared_ptr<FileWriterSettings> video; // null when disabled; suppressed while `continuous` is set
+    // MP4 clips of the default length with no interval, which tells them from triggered Video; null unless configured
     const std::shared_ptr<FileWriterSettings> continuous;
     const WaterMarks watermarks;
 
     ~ActionSettings() = default;
 
-    // The effective watermarks, which admission reads (docs/PLAN.md section 9): the aggregate of one Photo plus
-    // one Video task when both are configured, where the Video task is the continuous clip while continuous
-    // recording is configured (one Video budget slot for either mode), the configured one's when one is, or
-    // one default clip's when none is, which is the headroom the Slot has at first start.
+    // The admission watermarks cover one Photo and one Video task as configured, the continuous clip taking the Video
+    // task's place, or one default clip when no file action is configured.
     static std::shared_ptr<const ActionSettings> create(bool continuous, bool sound,
         std::shared_ptr<FileWriterSettings> photo, std::shared_ptr<FileWriterSettings> video,
         const vg_config_media_t *media_capi) noexcept
@@ -1156,16 +1136,13 @@ struct ActionSettings
             media_capi);
     }
 
-    // The settings of a file action as configured (Image is Photo, Video the triggered Video), suppressed or
-    // not: what rule info reports as enabled.
+    // As configured, suppressed or not: what rule info reports as enabled.
     const std::shared_ptr<FileWriterSettings> &configured(CaptureType type) const noexcept
     {
         return type == CaptureType::Image ? photo : video;
     }
 
-    // The settings a file channel accepts a rule event's task with, null when it accepts none: the Photo
-    // settings, or the triggered Video settings unless continuous recording is configured, which suppresses
-    // triggered Video without rewriting it (docs/PLAN.md section 8.1).
+    // What a file channel accepts a rule event's task with; continuous recording suppresses triggered Video.
     std::shared_ptr<FileWriterSettings> channel(CaptureType type) const noexcept
     {
         if (type == CaptureType::Image)
@@ -1173,17 +1150,14 @@ struct ActionSettings
         return continuous ? std::shared_ptr<FileWriterSettings>() : video;
     }
 
-    // The recording the Video channel runs, whose change moves the Video revision (docs/PLAN.md section 7.1):
-    // the continuous clip while continuous recording is configured, else triggered Video; null when neither.
+    // The recording the Video channel runs, whose change moves the Video revision.
     const std::shared_ptr<FileWriterSettings> &videoRecording() const noexcept
     {
         return continuous ? continuous : video;
     }
 
-    // The enabled triggered file channel, null when none is enabled: the interval ALWAYS_ON paces on, whose
-    // invariant keeps its configuration to one channel (docs/PLAN.md section 4.4), and what the HTTP precheck
-    // tests for an enabled file action. With both enabled, which another rule may pace, this is the Photo
-    // channel; suppressed triggered Video counts as none, since a continuous clip is no rule event.
+    // The triggered file channel that ALWAYS_ON paces on and the HTTP precheck tests: Photo when both are enabled;
+    // a suppressed triggered Video counts as none.
     std::shared_ptr<FileWriterSettings> fileChannel() const noexcept
     {
         return photo ? photo : channel(CaptureType::Video);
@@ -1195,7 +1169,7 @@ struct ActionSettings
         return a == b || (a && b && *a == *b);
     }
 
-    // Whether two channel settings describe the same recording (null is a disabled channel), watermarks aside.
+    // Null is a disabled channel.
     static bool SameRecording(const std::shared_ptr<FileWriterSettings> &a,
         const std::shared_ptr<FileWriterSettings> &b) noexcept
     {
@@ -1224,19 +1198,15 @@ private:
     }
 };
 
-// In-flight budgets (docs/PLAN.md section 9): the bytes that admitted tasks may still write into a
-// filesystem, which the index does not see while the files are in a cache directory. Admission subtracts
-// them from the free space before comparing with the critical watermark, in the same critical section as
-// the reservation, so two admissions cannot both count the same free bytes; automatic Photo and Video and
-// manual capture on the same filesystem share one budget. Watermarks are estimates, not reservations: the
-// actual write errors still decide. A holder keeps its reservation for the life of its task and releases it
-// on every terminal path.
+// The bytes admitted tasks may still write to each filesystem, which the index does not see while they are in a
+// cache directory. Admission subtracts them from the free space in the same critical section as its reservation, so
+// two admissions never count the same free bytes. Shared by automatic Photo and Video and by manual capture.
 struct InFlightBudgets
 {
 public:
     using FilesystemId = std::uintmax_t; // the device number of the filesystem (utils::FilesystemIdOf)
 
-    // One admitted reservation, released when destroyed or released explicitly. Empty when refused.
+    // Released when destroyed or explicitly; false when refused.
     class Reservation final
     {
     public:
@@ -1293,9 +1263,7 @@ public:
         FileSize _bytes = 0;
     };
 
-    // Admits a task that may write `bytes` to `filesystem` when `free_bytes`, minus what admitted tasks may
-    // still write there, exceed `critical_remain_bytes`, and reserves its bytes in the same critical
-    // section. Empty when refused.
+    // Reserves `bytes` when `free_bytes`, less what is in flight on `filesystem`, exceeds `critical_remain_bytes`.
     Reservation tryReserve(FilesystemId filesystem, FileSize bytes, FileSize free_bytes,
         FileSize critical_remain_bytes) noexcept
     {
@@ -1308,7 +1276,6 @@ public:
         return Reservation(*this, filesystem, bytes);
     }
 
-    // What admitted tasks may still write to `filesystem`.
     FileSize inFlight(FilesystemId filesystem) const noexcept
     {
         const std::lock_guard lock(_mutex);
@@ -1328,15 +1295,10 @@ private:
     std::unordered_map<FilesystemId, FileSize> _bytes;
 };
 
-// One automatic file task (docs/PLAN.md section 7.2): its kind, the owner it serves (none for a continuous
-// clip, section 8.2), the channel settings bound at acceptance with the revision they were published under,
-// its place in the acceptance sequence across both channels, and the WriteEvent that carries its status,
-// which manual capture and CacheFileInfo share. Immutable after acceptance; the status lives on the event.
+// One automatic file task, immutable after acceptance but for its reservation; its status lives on the event.
 struct FileTask
 {
-    // Triggered: a rule event's task, which runs while rules are enabled. Continuous: a Video clip admitted by
-    // the rule loop while the schedule is open, with no owner and the event UID 0, which counts as no rule
-    // event (docs/PLAN.md section 8.2).
+    // Continuous: a Video clip without an owner that the rule loop admits while the schedule is open.
     enum class Kind { Triggered, Continuous };
 
     const Kind kind;
@@ -1345,10 +1307,8 @@ struct FileTask
     const std::shared_ptr<FileWriterSettings> settings;
     const size_t settings_revision;
     const uint64_t sequence;
-    const uint64_t slot_registration;         // the Slot admission the task is bound to (docs/PLAN.md section 7.2)
-    InFlightBudgets::Reservation reservation; // its bytes in flight (section 9): held from acceptance, taken by the
-                                              // worker that runs it, released once the file is published or the
-                                              // task is retired unrun
+    const uint64_t slot_registration;         // the Slot admission it is bound to
+    InFlightBudgets::Reservation reservation; // held from acceptance, taken by its worker
     const std::shared_ptr<WriteEvent> event;
 
     FileTask(Kind k, CaptureType tp, std::shared_ptr<EventOwner> o, std::shared_ptr<FileWriterSettings> s, size_t rev,
