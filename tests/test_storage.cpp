@@ -136,6 +136,13 @@ struct SlotTestAccess
         slot._quota_rotate.store(rotate, std::memory_order_release);
     }
 
+    // Whether the Slot still holds one of the threads it started (its manager or a channel worker), which a disable
+    // joins and releases.
+    static bool ownsThreads(const Slot &slot)
+    {
+        return slot._manager_thread || slot._photo_worker_thread || slot._video_worker_thread;
+    }
+
     // The manager's state sync of a READY or SATURATED Slot, with the stats its round would have read and no index
     // (no quota limit is set, so the free space alone decides).
     static void syncReadyOrSaturated(Slot &slot, const SlotStats &stats)
@@ -452,6 +459,7 @@ VG_TEST_CASE(a_removed_slot_is_disabled_and_its_admission_closed_before_the_map_
 
     StorageTestAccess::remove(storage, f.dev);
     VG_CHECK(!StorageTestAccess::holds(storage, f.dev));
+    VG_CHECK(!SlotTestAccess::ownsThreads(*slot)); // joined on the removing thread, before the map let the Slot go
     VG_CHECK_EQ(storage.getStatus().slots_status.size(), size_t { 0 });
     VG_CHECK(!slot->isEnabled());
     VG_CHECK_EQ(slot->registration(), uint64_t { 0 });
@@ -656,7 +664,8 @@ VG_TEST_CASE(an_eject_or_a_removal_unmounts_the_slot_on_its_own_thread_before_th
     // at the same path; a dropped Slot is never enabled again. Over no device the unmount itself fails, since
     // nothing is mounted, and the callback is what the case observes.
     UnmountRecorder::clear();
-    Fixture f(FixtureOptions { .on_unmount_cb = &UnmountRecorder::callback });
+    LogRecorder::clear();
+    Fixture f(FixtureOptions { .log_cb = &LogRecorder::callback, .on_unmount_cb = &UnmountRecorder::callback });
     Storage storage(StorageConfig(std::string(f.dev), std::string()), *f.ctx, /*run_manager_thread*/ false);
 
     // A removal, with the test holding a reference: the callback has run, here, when the branch returns, and the
@@ -683,8 +692,10 @@ VG_TEST_CASE(an_eject_or_a_removal_unmounts_the_slot_on_its_own_thread_before_th
     VG_CHECK(!StorageTestAccess::holds(storage, f.dev));
     VG_CHECK(!next->isEnabled());
     VG_CHECK_EQ(next->enable(), ECANCELED);
-    VG_CHECK_EQ(next->drop(), 0); // a removal that raced the eject: dropped already, nothing runs again
-    VG_CHECK_EQ(next->disable(), 0);
+    LogRecorder::clear();
+    VG_CHECK_EQ(next->drop(), 0);    // a removal that raced the eject: dropped already, nothing runs again
+    VG_CHECK_EQ(next->disable(), 0); // a switch's copy of the map: nothing is synced at a path a replacement may hold
+    VG_CHECK(!LogRecorder::contains("for syncing"));
     VG_CHECK_EQ(UnmountRecorder::count(), 2);
     next.reset();
     VG_CHECK_EQ(UnmountRecorder::count(), 2);
@@ -743,7 +754,8 @@ VG_TEST_CASE(a_disable_syncs_the_filesystem_at_the_mount_path)
     // mount path read-only, as a directory cannot be opened for writing (EISDIR), which had left the sync unrun since
     // 2026-05-29 and logged a failure at every disable. Over a directory in the temporary root the disable must
     // report no such failure (the sync is of the temporary filesystem); over the fixture's nonexistent mount path
-    // the open fails as before, which shows the record catches the line.
+    // the open fails as before, which shows the record catches the line, and the disable and the drop's unmount each
+    // write it, checked before the Slot's destructor, whose unmount of an undropped Slot syncs as well.
     LogRecorder::clear();
     Fixture f(FixtureOptions { .log_cb = &LogRecorder::callback });
     const auto mount = f.root + "/mnt";
@@ -755,9 +767,13 @@ VG_TEST_CASE(a_disable_syncs_the_filesystem_at_the_mount_path)
     VG_CHECK(!LogRecorder::contains("for syncing"));
     {
         Slot slot(*f.ctx, f.dev, f.mount, /*removable*/ true, /*internal*/ false, "DCIM");
+        LogRecorder::clear();
         VG_CHECK_EQ(slot.disable(), 0);
+        VG_CHECK(LogRecorder::contains("for syncing: 2")); // ENOENT, from the disable
+        LogRecorder::clear();
+        VG_CHECK_EQ(slot.drop(), 0);
+        VG_CHECK(LogRecorder::contains("for syncing: 2")); // from the drop's unmount
     }
-    VG_CHECK(LogRecorder::contains("for syncing: 2")); // ENOENT
 }
 
 VG_TEST_CASE(an_enabled_slot_that_waits_for_a_format_request_leaves_the_processor_idle)
