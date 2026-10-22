@@ -113,9 +113,7 @@ public:
         return 0;
     }
 
-    // Writes the document to a temporary file next to the configuration file, fsyncs it, and renames it
-    // into place, so that the configuration file holds either the old or the new document after a crash.
-    // Returns 0 or an errno value; on failure the old file is untouched.
+    // A synced temporary file renamed into place, so a crash leaves the old or the new document; 0 or an errno value.
     vg_sta_e saveToFile(const nlohmann::json &j) noexcept
     {
         try
@@ -195,10 +193,10 @@ public:
     }
 
 private:
-    // Writes `text` to `path` (created or truncated) and fsyncs it. Returns 0 or an errno value.
+    // Returns 0 or an errno value.
     vg_sta_e WriteAndSync(const std::filesystem::path &path, const std::string &text) const noexcept
     {
-        // 0666 masked by the umask: the mode the previous ofstream-based store gave the configuration files
+        // 0666 masked by the umask, as an ofstream creates it
         const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
         if (fd < 0)
         {
@@ -249,20 +247,16 @@ private:
     static inline constexpr const std::chrono::milliseconds kRuleEvaluationInterval = std::chrono::milliseconds(10);
 
 public:
-    // `run_rule_thread == false` is a test seam: no rule thread is started and the test drives
-    // ruleTaskLoop() through RuleEndpointTestAccess. Production code always runs the thread.
+    // `run_rule_thread == false` is a test seam: tests drive ruleTaskLoop() through RuleEndpointTestAccess.
     RuleEndpoint(std::shared_ptr<Context> ctx, bool run_rule_thread = true)
         : _ctx(std::move(ctx)), _rule_stop_token(false)
     {
         if (!_ctx)
             throw Exception("Context pointer cannot be null in RuleEndpoint");
 
-        // Startup (docs/PLAN.md section 4.3): a missing file keeps the defaults. A file that exists but cannot
-        // be loaded or applied is left untouched and keeps rules disabled, and continuous recording off, until
-        // a valid record configuration is posted, so that neither the default ALWAYS_ON rule nor the default
-        // open schedule runs in its place. The loaded pair is validated against the ALWAYS_ON invariant once
-        // both files are in (section 4.4), and a violation fails closed the same way, with both files left in
-        // place and both reported.
+        // A missing file keeps the defaults. A file that cannot be loaded or applied, or a pair that breaks the
+        // ALWAYS_ON invariant, fails closed: the files stay untouched, and rules and continuous recording stay off
+        // until a valid record configuration is posted, so no default runs in its place.
         bool fail_closed = false;
         const auto load = [&fail_closed](ConfigStore &store, const auto &apply) {
             nlohmann::json j;
@@ -302,9 +296,7 @@ public:
                 "off, until a valid record configuration is posted");
             const std::unique_lock lock(_record_config_mutex);
             _record_config.rule_enabled = false;
-            // Continuous recording ignores the rule flag (docs/PLAN.md section 8.2), so a stored switch is
-            // withdrawn from the published snapshot as well; both switches read false until a valid
-            // configuration is posted.
+            // Continuous recording ignores the rule flag, so its stored switch is withdrawn from the snapshot too
             _record_config.continuous_enabled = false;
             if (_record_config.sync(*_ctx, _record_config.prepare(*_ctx)) != 0)
                 VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Failed to withdraw the stored continuous recording switch");
@@ -334,8 +326,7 @@ public:
         }
     }
 
-    // `store == false` is the startup load: the document is applied without being written back, and without
-    // the invariant check, which the constructor runs on the pair once both files are loaded.
+    // `store == false` is the startup load: applied without being written back or checked against the selected rule.
     nlohmann::json updateRecordConfig(const nlohmann::json &j, bool store = true)
     {
         vg_sta_e ret = 0;
@@ -344,18 +335,13 @@ public:
         try
         {
             RecordConfig record_config(j, *_ctx);
-            // Prepared before the lock: the host's size estimate is a media callback, which must not run under
-            // the commit lock, and the revision it was prepared against detects a media refresh or another
-            // commit that lands before the publish (docs/PLAN.md section 4.3).
+            // Before the commit lock: the size estimate is a media callback
             const auto prepared = record_config.prepare(*_ctx);
             if (!prepared.settings)
             {
                 ret = ENOMEM;
                 throw Exception("Failed to create the action settings of the record config");
             }
-            // The commit mutex (docs/PLAN.md section 4.4) serializes the two configuration POSTs from here to
-            // the publish, so the invariant is checked against the committed selection and no ordering of the
-            // two POSTs bypasses it.
             const std::unique_lock commit(_commit_mutex);
             if (store && selectedRuleIsAlwaysOn() && !record_config.satisfiesAlwaysOnInvariant())
                 throw Exception("The selected ALWAYS_ON rule paces one file action: at most one of dActions.dPhoto "
@@ -422,9 +408,8 @@ public:
             auto schedule_rule_config = std::make_unique<ScheduleRuleConfig>(j, *_ctx);
             const std::unique_lock lock(_schedule_rule_mutex);
 
-            // Every valid POST is stored, as the record rule POST does, so that posting the schedule GET shows
-            // repairs a file that could not be loaded at startup (docs/PLAN.md section 4.3, item 5); the rule is
-            // rebuilt only when the schedule changed.
+            // Every valid POST is stored, so posting what GET shows repairs a file that failed to load at startup;
+            // the rule is rebuilt only when the schedule changed
             if (store)
             {
                 if (ret = _schedule_rule_config_store->saveToFile(j); ret != 0)
@@ -483,9 +468,8 @@ public:
         {
             auto new_record_rule_config = j;
             const auto rule_type_str = j.at("sCurrentSelected").get<std::string>();
-            // The commit mutex (docs/PLAN.md section 4.4): ALWAYS_ON is selected only over a committed record
-            // configuration it can pace, and the record configuration POST holds the same mutex while it checks
-            // the selection and commits. Not at startup, where the pair is validated after both loads.
+            // ALWAYS_ON is selected only over a committed record configuration it can pace; at startup the pair is
+            // checked once both files are loaded
             const std::unique_lock commit(_commit_mutex);
             if (store && BaseRule::TypeFromString(rule_type_str) == VG_RULE_TYPE_ALWAYS_ON
                 && !committedRecordConfigSatisfiesAlwaysOnInvariant())
@@ -646,22 +630,15 @@ public:
                     return obj;
                 };
 
-                // The most recently accepted triggered file task across both channels (docs/PLAN.md section
-                // 6.2): the held one if any channel holds a task, else the last retired one. With one enabled
-                // channel this is its current task if any, else its last one. A continuous clip is no rule
-                // event (section 8.2): it shows in the Video channel's state only.
                 const auto [task, held] = _ctx->file_channels.latest();
 
                 res_j["bReadyForNewEvent"] = !held;
                 res_j["dLastRuleEvent"] = fmt_evt(task ? task->event : nullptr);
                 res_j["dLastRuleEventOwner"] = fmt_evt_owner(task ? task->owner : nullptr);
 
-                // The last dispatched owner, whatever the actions did with it, and each action's own state
-                // (docs/PLAN.md section 6.2): the switch as configured, readiness, and for a file channel the
-                // task it holds, of either kind, for Sound the executor state. Continuous recording suppresses
-                // triggered Video without rewriting its switch (section 8.1): the Video channel then reports
-                // bContinuous, is never ready for a rule event, and holds the continuous clip with UID 0.
                 res_j["dLastDispatchedOwner"] = fmt_evt_owner(_ctx->last_dispatched_owner.get());
+                // Continuous recording suppresses triggered Video without rewriting its switch: the Video channel then
+                // reports bContinuous, is never ready for a rule event, and holds the continuous clip
                 const auto settings = _ctx->action_settings.get().settings;
                 const bool continuous = settings && settings->continuous;
                 const auto channel_state = [&](const Context::FileChannel &channel, bool suppressed) {
@@ -693,7 +670,7 @@ public:
                 auto gpios_obj = nlohmann::json::object();
                 if (_ctx->c_api.gpios.available_cb)
                 {
-                    const AvailableGPIOPins available(*_ctx); // freed when this scope ends, also on a throw
+                    const AvailableGPIOPins available(*_ctx);
                     if (available.status == 0 && available.pins.pins && available.pins.len > 0)
                     {
                         for (size_t i = 0; i < available.pins.len; ++i)
@@ -726,8 +703,7 @@ public:
                 res_j["bMediaPaused"] = _ctx->media_barrier.isPaused();
                 res_j["bRecordEnabled"] = _ctx->record_rule_enabled.load(std::memory_order_relaxed);
                 {
-                    // The registered admission is the enabled Slot (docs/PLAN.md section 8.1); anything else
-                    // (a test fake) has no status to report.
+                    // The registered admission is the enabled Slot; a test fake has no status to report
                     auto get_target_slot_status = [this]() -> std::optional<SlotStatus> {
                         return _ctx->slot_admission.with(
                             [](const Context::SlotAdmission *admission) -> std::optional<SlotStatus> {
@@ -776,24 +752,19 @@ public:
                     throw Exception("Cannot activate HTTP rule when rule evaluation is disabled");
                 }
             }
-            // The schedule gate as published into the context (docs/PLAN.md section 8.1): the state the rule
-            // loop and admission read.
+            // The published schedule gate, which the rule loop and admission read
             if (!_ctx->schedule_open.load(std::memory_order_acquire))
             {
                 ret = EPERM;
                 throw Exception("Activating HTTP rule required schedule rule to be ready in current configuration");
             }
-            // The storage precheck applies only when a file action is enabled (docs/PLAN.md section 5.2): a
-            // rule-only or Sound-only activation needs no storage, nor does one whose Video action continuous
-            // recording suppresses (section 8.2).
+            // Only with a file action enabled: a rule-only or Sound-only activation needs no storage
             if (hasEnabledFileAction() && !_ctx->slot_admission.isReadyToWrite())
             {
                 ret = EBUSY;
                 throw Exception("Cannot activate HTTP rule when storage slot is not ready to write");
             }
-            // Try to activate. The rule lock covers the type check only: the dispatch runs the RULE callback,
-            // which must not run under an internal lock (docs/PLAN.md section 6.2), and an HTTP owner needs
-            // nothing from the rule instance.
+            // Try to activate. The rule lock covers the type check only: the dispatch runs the RULE callback
             {
                 const std::shared_lock lock(_record_rule_mutex);
                 if (!_record_rule || _record_rule->type() != VG_RULE_TYPE_HTTP)
@@ -819,17 +790,15 @@ public:
 private:
     friend struct RuleEndpointTestAccess; // defined by the module tests only
 
-    // Whether a rule event has a file action to run (triggered Video is suppressed while continuous recording
-    // is configured). Reads the published snapshot, not the stored configuration, so it takes no lock.
+    // Reads the published snapshot, so it takes no lock.
     bool hasEnabledFileAction() const noexcept
     {
         const auto settings = _ctx->action_settings.get().settings;
         return settings && settings->fileChannel();
     }
 
-    // The two sides of the ALWAYS_ON invariant (docs/PLAN.md section 4.4), each read under its own mutex. The
-    // caller holds the commit mutex (or is the constructor, before any other thread exists), so neither side
-    // changes between the read and the commit.
+    // The two sides of the ALWAYS_ON invariant; the caller holds the commit mutex, or is the constructor, so neither
+    // changes before the commit.
     bool selectedRuleIsAlwaysOn() const noexcept
     {
         const std::shared_lock lock(_record_rule_mutex);
@@ -842,9 +811,7 @@ private:
         return _record_config.satisfiesAlwaysOnInvariant();
     }
 
-    // The state of a file channel for rule info (docs/PLAN.md section 6.2): IDLE holds no task; PENDING,
-    // WRITING, and HOLDING follow the held task from acceptance to the end of its hold, the interval after a
-    // completed task or the cooldown after a failed one.
+    // HOLDING lasts until the interval, plus the cooldown after a failure, has elapsed from the writer's start.
     static std::string ChannelStateString(const std::shared_ptr<FileTask> &current)
     {
         if (!current)
@@ -878,8 +845,7 @@ private:
         }
     }
 
-    // Publishes the schedule gate into the context (docs/PLAN.md section 8.1): open without a schedule rule, or
-    // while the configured one is active at the context's local time. Call with the schedule lock held.
+    // Call with the schedule lock held.
     void publishScheduleGateUnsafe() const noexcept
     {
         const bool open
@@ -891,15 +857,12 @@ private:
     inline void ruleTaskLoop()
     {
         _ctx->tick();
-        // The schedule gate is published on every tick, before the enable check, so admission reads one state
-        // whether or not rules are enabled (docs/PLAN.md section 8.1).
+        // Before the enable check, so admission reads one schedule state whether or not rules are enabled
         {
             const std::shared_lock lock(_schedule_rule_mutex);
             publishScheduleGateUnsafe();
         }
-        // Continuous recording is admitted on every tick, before the enable check: its gates are the schedule
-        // just published, the pause, and the Slot, not bRuleEnabled (docs/PLAN.md section 8.2). Nothing happens
-        // unless the snapshot configures it, and a held clip refuses the next one until it is completed.
+        // Before the enable check too: the rule flag does not gate continuous recording
         _ctx->dispatchContinuous();
         if (!_ctx->record_rule_enabled.load(std::memory_order_relaxed)
             || !_ctx->schedule_open.load(std::memory_order_acquire))
@@ -976,10 +939,7 @@ private:
 
     void rollbackRecordRule()
     {
-        // The rule that failed to commit goes first: it may hold what the committed one needs back, such as a
-        // GPIO pin or a socket (before 2026-10-20 the committed rule was rebuilt first, so a GPIO rule on the
-        // same pin was either refused by the host, which dropped the rule, or left on a pin the failed rule
-        // then released).
+        // The failed rule goes first: it may hold what the committed one needs back, such as a GPIO pin or a socket
         _record_rule.reset();
         _record_rule = std::visit(
             [&](auto &cfg) -> std::unique_ptr<BaseRule> {
@@ -1010,10 +970,9 @@ private:
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _rule_stop_token;
     std::unique_ptr<std::thread> _rule_thread;
 
-    // The commit mutex (docs/PLAN.md section 4.4): both configuration POSTs hold it from after parsing to the
-    // publish, so the ALWAYS_ON invariant is checked against the other configuration's committed state and the
-    // two POSTs cannot interleave around it. Lock order: the commit mutex, then one configuration mutex at a
-    // time; the configuration mutexes are never nested in one another.
+    // The record configuration and record rule POSTs hold it from after parsing to the publish, so the ALWAYS_ON
+    // invariant is checked against the other's committed state. Lock order: this, then one configuration mutex at a
+    // time, never nested.
     mutable std::mutex _commit_mutex;
     mutable std::mutex _record_config_mutex;
     RecordConfig _record_config;
@@ -1316,8 +1275,7 @@ private:
 class CaptureEndpoint final
 {
 public:
-    // `run_capture_thread == false` is a test seam: no capture thread is started and the test drives
-    // captureTaskLoop() through CaptureEndpointTestAccess. Production code always runs the thread.
+    // `run_capture_thread == false` is a test seam: tests drive captureTaskLoop() through CaptureEndpointTestAccess.
     CaptureEndpoint(std::shared_ptr<Context> ctx, bool run_capture_thread = true) : _ctx(std::move(ctx))
     {
         if (!_ctx)
@@ -1556,10 +1514,8 @@ protected:
     friend CaptureAdaptedWriter<CaptureEndpoint>;
     friend struct CaptureEndpointTestAccess; // defined by the module tests only
 
-    // Completes `event` when it is the active capture. The adapter calls this from its destructor once the
-    // writer is done, and the loop's catch calls it for a writer that could not be built, which is a second
-    // call when the writer's constructor threw after the adapter was built: it returns without touching a
-    // capture started in between (until 2026-10-20 it dropped that capture).
+    // Completes `event` only while it is the active capture: a writer whose constructor threw after its adapter was
+    // built reports twice, and the second call must not touch a capture started in between.
     void handleCompletedCaptureEvent(std::shared_ptr<CaptureEvent> event) noexcept
     {
         const std::unique_lock lock(_event_mutex);

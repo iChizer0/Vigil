@@ -111,9 +111,8 @@ inline bool EnsureOwnerAndPermissions(const fs::path &path, uid_t owner_uid, gid
     return true;
 }
 
-// Idempotent and non-destructive (docs/PLAN.md section 9): an existing directory is accepted, and whatever else
-// is in the way makes this fail instead of being removed. Two publishers may create the same date directory at
-// the same time; create_directories tolerates the other one winning.
+// Idempotent and non-destructive: whatever else is in the way makes this fail instead of being removed, and another
+// publisher creating the same directory at the same time is tolerated.
 inline bool EnsureDirectoryExists(const fs::path &path, bool update_permissions = false,
     bool override_permissions = false, Context *ctx = nullptr) noexcept
 {
@@ -147,10 +146,8 @@ inline fs::path ThumbnailPathFrom(const fs::path &path) noexcept
            / (path.filename().string() + std::string(kStorageThumbnailFileExt));
 }
 
-// Where a file is published: `directory / file_name` when nothing exists there, otherwise the first free
-// "<stem> (n)<extension>" with n counting from 1, so a published file never replaces an existing one. Automatic
-// names carry their start time, so a taken name means a repeated clock (a restart before time synchronization);
-// concurrent publishers never share a name, which is why an existence check is enough here.
+// `directory / file_name`, or the first free "<stem> (n)<extension>", so a published file never replaces another. An
+// existence check is enough: concurrent publishers never share a name.
 inline fs::path UniquePublicationPath(const fs::path &directory, const fs::path &file_name) noexcept
 {
     std::error_code ec;

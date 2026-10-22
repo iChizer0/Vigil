@@ -34,16 +34,13 @@ static inline constexpr const size_t kInferenceQueueSize = 60 * 1;
 
 static inline constexpr const size_t kHTTPAPIRequestMaxBytes = 1024 * 1024; // largest request body the C API parses
 
-// The automatic file channel worker (docs/PLAN.md section 7.2): its probe period, and the production defaults of
-// the failure cooldown and the consecutive failure limit, which are its constructor parameters (section 13).
+// The file channel worker's probe period and the defaults of its failure cooldown and limit
 static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);
 static inline constexpr const std::chrono::seconds kWriterFailureCooldown = std::chrono::seconds(3);
 static inline constexpr const size_t kWriterConsecutiveFailureMax = 10;
 
 static inline constexpr const std::chrono::seconds kVideoClipLengthDefault = std::chrono::seconds(60);
-// The bounds of a video clip's waits on the media stream (docs/PLAN.md sections 8.2 and 13), the buffer period:
-// for a key frame at the start of a clip (nothing is recorded without one) and at its end (the clip ends without
-// one), and for any frame once the clip has started (the clip is finished as interrupted).
+// A video clip's waits for a key frame and for any frame, each one buffer period long
 static inline constexpr const std::chrono::seconds kVideoKeyFrameWait = std::chrono::seconds(10);
 static inline constexpr const std::chrono::seconds kVideoInputLossWait = std::chrono::seconds(10);
 static inline constexpr const size_t kSlotMediaMuxerBufferPeriod = 10;

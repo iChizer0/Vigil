@@ -520,8 +520,7 @@ private:
     Type _fs_type;
 };
 
-// The identity of the filesystem that holds `path`, its device number, which the in-flight budgets are keyed
-// by (docs/PLAN.md section 9). Empty when the path cannot be examined.
+// The device number of the filesystem that holds `path`, which keys the in-flight budgets.
 inline std::optional<std::uintmax_t> FilesystemIdOf(const std::filesystem::path &path) noexcept
 {
     struct stat st;

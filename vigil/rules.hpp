@@ -130,8 +130,7 @@ private:
 class SoundEventRule final: public BaseRule
 {
 public:
-    // `socket_path` is the AcousticsLab result socket, the production path by default; the module tests pass a
-    // socket of their own (docs/PLAN.md section 5.2).
+    // `socket_path` is the AcousticsLab result socket; tests pass their own.
     SoundEventRule(const SoundEventRuleConfig &cfg, const Context &ctx,
         std::string socket_path = kRuleSoundEventUDSPath)
         : BaseRule(VG_RULE_TYPE_SED, 0), _id(cfg.id), _consecutive_window(cfg.consecutive_window),
@@ -720,8 +719,7 @@ public:
             throw Exception("No GPIO acquire callback provided in C API while initializing GPIO rule");
         if (!_release_cb)
             throw Exception("No GPIO release callback provided in C API while initializing GPIO rule");
-        // The callback of the selected signal mode must exist; the other mode's callback is not needed
-        // (docs/PLAN.md section 5.2). Before 2026-10-19 either one satisfied this check.
+        // Only the selected signal mode's callback is needed
         if (_event != VG_GPIO_PIN_EVT_NONE ? !ctx.c_api.gpios.sync_event_cb : !ctx.c_api.gpios.sync_level_cb)
             throw Exception(
                 "No GPIO sync callback for signal '" + _signal + "' provided in C API while initializing GPIO rule");
@@ -738,7 +736,6 @@ public:
         _release_cb(_pin_number);
     }
 
-    // The owner names the configured signal and the pin (docs/PLAN.md section 6.1).
     std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
         if (_event != VG_GPIO_PIN_EVT_NONE)
@@ -796,7 +793,6 @@ public:
         closeSocket();
     }
 
-    // The owner names the configured command and the TTY (docs/PLAN.md section 6.1).
     std::shared_ptr<EventOwner> operator()(const Context &ctx) const override
     {
         if (!isSocketOpen())
@@ -824,9 +820,7 @@ public:
 
             for (ssize_t i = 0; i < n; ++i)
             {
-                // Knuth-Morris-Pratt: on a mismatch fall back to the longest command prefix that is also a
-                // suffix of what matched so far, so "AAB" is found in "AAAB" (missed before 2026-10-19).
-                // Occurrences do not overlap, as before.
+                // Knuth-Morris-Pratt, so "AAB" is found in "AAAB"; occurrences do not overlap
                 while (_cmd_pos > 0 && _buffer[i] != _cmd[_cmd_pos])
                     _cmd_pos = _fallback[_cmd_pos];
                 if (_buffer[i] == _cmd[_cmd_pos])
@@ -928,7 +922,7 @@ private:
     const std::string _cmd;
     const std::vector<size_t> _fallback;
     mutable size_t _cmd_pos;
-    mutable std::vector<char> _buffer; // owned; the previous raw buffer was never freed
+    mutable std::vector<char> _buffer;
     mutable int _fd;
     mutable int _found;
 };
@@ -940,9 +934,7 @@ public:
 
     ~HTTPRule() = default;
 
-    // Dispatches one HTTP owner: EBUSY when a file action is enabled and no file channel accepted a task; 0 for
-    // a rule-only or Sound-only configuration once the owner is dispatched (docs/PLAN.md section 5.2). Needs no
-    // rule instance, so the endpoint calls it with no rule lock held (the dispatch runs the RULE callback).
+    // EBUSY when every enabled file channel refused. Static, so the endpoint calls it with no rule lock held.
     static vg_sta_e Activate(const Context &ctx) noexcept
     {
         try
@@ -985,8 +977,7 @@ public:
         const auto now = ctx.shared_time.steadyTime();
         if (const auto interval = currentInterval(ctx); now - _last_trigger_time >= interval)
         {
-            // Waits while a file channel holds a task, through its hold (docs/PLAN.md section 4.4), without
-            // consuming the interval.
+            // Waits while a file channel holds a task, through its hold, without consuming the interval
             if (ctx.file_channels.holdsTask())
                 return nullptr;
 
@@ -997,7 +988,6 @@ public:
     }
 
 private:
-    // The interval of the enabled file channel, which ALWAYS_ON paces (docs/PLAN.md section 4.4).
     static std::chrono::steady_clock::duration currentInterval(const Context &ctx) noexcept
     {
         const auto settings = ctx.action_settings.get().settings;

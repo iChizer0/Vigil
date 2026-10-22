@@ -90,9 +90,8 @@ struct InferenceRuleConfig
     {
         j.at("sID").get_to(id);
         {
-            // The activation threshold of the rule's int counter: zero keeps its meaning (every frame from a
-            // consumed source activates), and only a negative or an oversized value is rejected (docs/PLAN.md
-            // section 2, decided 2026-10-19); before 2026-10-20 both were narrowed silently.
+            // Zero keeps its meaning (every frame of a consumed source activates); a negative or an oversized value is
+            // rejected
             int64_t debounce;
             j.at("iDebounceTimes").get_to(debounce);
             if (debounce < 0 || debounce > std::numeric_limits<int>::max())
@@ -239,11 +238,8 @@ struct TimerRuleConfig
     }
 };
 
-// The host's GPIO pin list for one library call (docs/PLAN.md section 10): queried on construction into a
-// value-initialized structure, so a query that fails without writing it frees nothing, and released through the
-// host's free_cb on destruction, so the list is freed exactly once however the call ends (a throw while parsing
-// the rule leaked it before 2026-10-20). The caller checks that `available_cb` is set; `pins` is declared first,
-// so it is zeroed before the query.
+// The host's GPIO pin list for one call, freed through its free_cb exactly once however the call ends. `pins` is
+// declared first, so a query that fails without writing it frees nothing; the caller checks `available_cb`.
 struct AvailableGPIOPins
 {
     vg_config_gpio_pins_t pins {};
@@ -270,7 +266,7 @@ struct GPIOPinConfig
         if (ctx.c_api.gpios.available_cb == nullptr)
             throw Exception("C API GPIO available callback is null while parsing GPIO pin config");
 
-        const AvailableGPIOPins available(ctx); // freed when this scope ends, also when a throw below skips the rest
+        const AvailableGPIOPins available(ctx);
         if (available.status != 0)
             throw Exception("Failed to get available GPIO pins from C API while parsing GPIO pin config, error code: "
                             + std::to_string(available.status));
@@ -398,8 +394,7 @@ struct TTYRuleConfig
     {
         j.at("sName").get_to(name);
         {
-            // The host's TTY list is borrowed for the service lifetime (docs/PLAN.md section 10); an entry
-            // without a socket path cannot be used (its null pointer was dereferenced before 2026-10-20).
+            // The host's TTY list is borrowed for the service lifetime; an entry without a socket path cannot be used
             for (size_t i = 0; ctx.c_api.ttys.ttys && i < ctx.c_api.ttys.len; ++i)
             {
                 const auto &tty = ctx.c_api.ttys.ttys[i];
@@ -568,9 +563,7 @@ private:
 
 struct RecordConfig
 {
-    // Version-2 record action configuration (docs/PLAN.md section 4.1). Only this schema is read, and it is
-    // read whole: every field is required, in the shape GET returns. An external manager migrates older
-    // files; the library imports nothing from them.
+    // Only this schema is read, whole and in the shape GET returns; an external manager migrates older files.
     static inline constexpr int kSchemaVersion = 2;
 
     struct PhotoAction
@@ -592,8 +585,7 @@ struct RecordConfig
     };
 
     bool rule_enabled = false;
-    bool continuous_enabled = false; // continuous Video (docs/PLAN.md section 8.2): schedule-gated, whatever
-                                     // rule_enabled is, and triggered Video suppressed while it is set
+    bool continuous_enabled = false; // gated by the schedule, not rule_enabled; suppresses triggered Video
     PhotoAction photo;
     VideoAction video;
     SoundAction sound;
@@ -621,10 +613,7 @@ struct RecordConfig
         video.interval = IntervalFrom(video_j.at("iIntervalMs"));
         sound.enabled = actions.at("dSound").at("bEnabled").get<bool>();
 
-        // Any combination of actions is a configuration, including none with rules enabled (every rule event
-        // is reported and nothing else happens) and continuous recording with or without a Video action
-        // (docs/PLAN.md section 8.2); what ALWAYS_ON can pace is the endpoint's check against the selected
-        // rule (satisfiesAlwaysOnInvariant).
+        // Any combination of actions is valid here; what ALWAYS_ON can pace is the endpoint's check
     }
 
     // The canonical document: every field, with no extras.
@@ -639,20 +628,16 @@ struct RecordConfig
         j["dActions"]["dSound"] = { { "bEnabled", sound.enabled } };
     }
 
-    // The ALWAYS_ON invariant (docs/PLAN.md section 4.4): ALWAYS_ON paces one file channel, so with it selected
-    // at most one of Photo and Video is enabled, exactly one while rules are enabled, and Sound and continuous
-    // recording are disabled. The first-start state satisfies it. The endpoint checks it against the selected
-    // rule under its commit mutex, in both configuration POSTs and for the pair loaded at startup.
+    // ALWAYS_ON paces one file channel: with it selected, at most one of Photo and Video is enabled, exactly one while
+    // rules are enabled, and Sound and continuous recording are off.
     bool satisfiesAlwaysOnInvariant() const noexcept
     {
         const int channels = (photo.enabled ? 1 : 0) + (video.enabled ? 1 : 0);
         return !continuous_enabled && !sound.enabled && channels <= 1 && (!rule_enabled || channels == 1);
     }
 
-    // A commit prepared outside the commit lock (docs/PLAN.md section 4.3): the action settings snapshot of this
-    // configuration, built with the host's size estimate (a media callback), and the revision it was built
-    // against, so that a media refresh or another commit landing before the publish is detected. `settings` is
-    // null only on allocation failure.
+    // Built outside the commit lock, since the size estimate is a media callback; the base revision detects a media
+    // refresh or another commit landing before the publish. `settings` is null only on allocation failure.
     struct Prepared
     {
         size_t base_revision;
@@ -676,14 +661,8 @@ struct RecordConfig
                                     std::move(video_settings), media) };
     }
 
-    // Publishes the configuration to the runtime: the prepared snapshot under its base revision, then the rule
-    // flag. Returns EAGAIN, with nothing applied, when the snapshot changed since it was prepared (a media
-    // refresh or another commit); the caller prepares again and retries. A file channel whose settings changed
-    // cancels its pending task, which was bound to the old ones, after the publish and outside the settings
-    // mutex (docs/PLAN.md section 7.1), keeping one accepted under the new ones in between; its running task
-    // finalizes on its own revision check, as today. A Video mode switch is such a change (section 8.2): the
-    // pending task of the old mode, of either kind, is canceled. A disabled Sound cancels a pending trigger; a
-    // playing one finishes (section 7.3).
+    // Publishes the snapshot, then the rule flag; EAGAIN, with nothing applied, when the snapshot changed since it was
+    // prepared. A channel whose recording changed cancels the pending task bound to the old settings.
     vg_sta_e sync(Context &ctx, const Prepared &prepared) const noexcept
     {
         const auto before = ctx.action_settings.get(); // the channel revisions under the base revision
@@ -700,8 +679,7 @@ struct RecordConfig
     }
 
 private:
-    // A positive integer number of milliseconds. There is no upper bound: the manager is trusted to send
-    // intervals that fit the clock arithmetic.
+    // Positive milliseconds, with no upper bound: the manager is trusted to send intervals the clocks can add.
     static std::chrono::milliseconds IntervalFrom(const nlohmann::json &j)
     {
         if (!j.is_number_integer() || j.get<int64_t>() <= 0)

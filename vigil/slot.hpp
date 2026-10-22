@@ -56,8 +56,8 @@ using namespace vigil::utils;
 
 using CancellationCheck = std::function<bool()>;
 
-// The usage of the system's preserved-space probe file, cached for 50 ms. The manager thread and both channel
-// workers of an internal Slot read it (docs/PLAN.md section 9), so the cache is under a mutex.
+// The usage of the system's preserved-space probe file, cached for 50 ms; the dispatchers, the manager, and both
+// workers read it.
 static inline size_t SystemPreservedUsageProbe() noexcept
 {
     static const std::chrono::duration<size_t, std::milli> probe_interval = std::chrono::milliseconds(50);
@@ -117,7 +117,7 @@ public:
         }
         const std::unique_lock lock(_mutex);
         disableInternal();
-        if (!_dropped) // a Slot dropped from the storage map was unmounted there (drop)
+        if (!_dropped) // drop() unmounted it already
             ensureStateForceUnmounted();
     }
 
@@ -156,29 +156,22 @@ public:
         return _fsck.load(std::memory_order_acquire);
     }
 
-    // - MARK: Slot Admission (docs/PLAN.md sections 7.1 and 8.1)
+    // - MARK: Slot Admission
 
-    // The Slot can take a task while it is not stopping, not failed, and in its ready state.
     bool isReadyToWrite() const noexcept override
     {
         return !_stop_token.load(std::memory_order_acquire) && !_failure.load(std::memory_order_acquire)
                && (_state.load(std::memory_order_acquire) == SlotState::Ready);
     }
 
-    // The registration of this Slot's admission while enabled, 0 otherwise: the identity its tasks are bound to.
     uint64_t registration() const noexcept
     {
         return _registration.load(std::memory_order_acquire);
     }
 
-    // Admission of a new task of one channel, read inside the channel's admission section (docs/PLAN.md
-    // sections 8.1 and 9): against `admission`, the aggregate watermarks of the enabled channels that the
-    // manager's Ready state also uses, with `task_bytes`, the task's own, reserved in the same critical section
-    // as the free-space check. Empty while the index or the stats are not usable, and when the Slot is saturated
-    // by its quota or by its free space minus what admitted tasks may still write to this filesystem (logged
-    // when rotation is on, as before). The task carries the reservation to the worker that runs it, which
-    // releases it once the file is published; with both channels enabled, the second task is admitted only when
-    // the free space covers the aggregate mark plus the first task's bytes.
+    // `admission` is the aggregate mark of the enabled channels, which the manager's READY state also uses; the free
+    // space it is checked against excludes what admitted tasks may still write here. Empty while the stats, or with a
+    // quota the index, are not usable.
     Context::InFlightBudgets::Reservation tryAdmit(const WaterMarks &admission, FileSize task_bytes) noexcept override
     {
         Context::InFlightBudgets::Reservation reservation;
@@ -289,12 +282,12 @@ public:
         const std::unique_lock lock(_mutex);
         if (_state.load() == SlotState::Formatting)
             return EBUSY;
-        if (_dropped) // it left the storage map (drop); a copy of the map taken before may still name it
+        if (_dropped) // an older copy of the storage map may still name it
             return ECANCELED;
 
         VG_LOG(_ctx.log, VG_LOG_LEVEL_INFO, "Enabling storage slot for device path ", _dev_path);
 
-        if (_manager_thread) // a partial start is unwound below, so the manager thread implies both workers
+        if (_manager_thread) // a partial start is unwound, so this implies both workers
             return 0;
 
         ensureStateResetToInitial();
@@ -305,9 +298,7 @@ public:
 
         _failure.store(false, std::memory_order_release);
         _stop_token.store(false, std::memory_order_release);
-        // The manager thread and one worker per file channel (docs/PLAN.md section 7.2). A thread that cannot be
-        // started unwinds the ones already running (section 9): the Slot is enabled with all three or not at all,
-        // and the storage manager retries on its next pass.
+        // The manager and one worker per file channel, all three or none; the storage manager retries on its next pass
         try
         {
             _manager_thread = std::make_unique<std::thread>(&Slot::managerThreadTask, this);
@@ -324,8 +315,7 @@ public:
         }
         _enabled.store(true, std::memory_order_release);
 
-        // Admission opens last (docs/PLAN.md section 8.1): the tasks accepted from here on bind to this Slot, and
-        // the workers above serve them (they claim nothing before the registration is set).
+        // Admission opens last; the workers claim nothing before the registration is set
         _registration.store(_ctx.slot_admission.open(*this), std::memory_order_release);
 
         return 0;
@@ -336,21 +326,16 @@ public:
         const std::unique_lock lock(_mutex);
         if (_state.load() == SlotState::Formatting)
             return EBUSY;
-        if (_dropped) // disabled and unmounted already (drop); a switch may hold a copy of the map that names it
+        if (_dropped) // drop() disabled it; an older copy of the storage map may still name it
             return 0;
         disableInternal();
         doFsync();
         return 0;
     }
 
-    // Disables the Slot and unmounts its device, for a Slot that leaves the storage map (Storage::ejectSlot and
-    // Storage::removeSlot): the unmount, which syncs first and runs on_unmount_cb, happens here, under the Slot's
-    // mutex and on the dropping thread, before the map lets the Slot go, rather than in the destructor on whichever
-    // thread drops the last reference (a storage status copy, a file operation), which could be after a new Slot
-    // for the same device had mounted it at the same path. The destructor unmounts only a Slot that was not
-    // dropped: one that deinit destroys, or one that never entered the map. A dropped Slot is never enabled again.
-    // The internal Slot is not unmounted, as before; a deselected Slot keeps its mount (disable). The drop runs
-    // once: of an eject and a removal that race, the second finds the Slot dropped.
+    // For a Slot leaving the storage map: disables it and, unless internal, unmounts it on this thread, before the map
+    // lets it go, since the last reference may be released after a new Slot for the same device mounted the same
+    // path. Runs once, and a dropped Slot is never enabled again.
     vg_sta_e drop() noexcept
     {
         const std::unique_lock lock(_mutex);
@@ -375,8 +360,7 @@ private:
         // Disable relay
         disableNginxRelay();
 
-        // Admission closes first, which cancels what this Slot accepted but no worker claimed; then both workers
-        // finish and publish the task they run, before the index is released (docs/PLAN.md section 9)
+        // Admission closes first, canceling unclaimed tasks; the workers then finish theirs before the index goes
         closeAdmission();
         joinThreads();
 
@@ -387,16 +371,13 @@ private:
         _rotating.store(false, std::memory_order_release);
     }
 
-    // Closes this Slot's admission if it is open: no task is accepted for it afterwards, and its pending tasks
-    // are canceled.
     void closeAdmission() noexcept
     {
         if (const auto registration = _registration.exchange(0, std::memory_order_acq_rel))
             _ctx.slot_admission.close(registration);
     }
 
-    // Joins the threads that were started, the stop token set: the workers first, which may be finishing a
-    // task, then the manager.
+    // With the stop token set: the workers first, which may be finishing a task, then the manager.
     void joinThreads() noexcept
     {
         for (auto *const thread: { &_photo_worker_thread, &_video_worker_thread, &_manager_thread })
@@ -649,9 +630,7 @@ protected:
         return _writer_task_count;
     }
 
-    // Generates the thumbnail of a recorded file into the cache directory, from the frame its writer kept, and
-    // records its path for the publication. A media callback: the writer calls it while it still holds its media
-    // operation (docs/PLAN.md section 8.3), before the channel worker publishes.
+    // A media callback: the writer calls it while it still holds its media operation.
     void generateThumbnail(CacheFileInfo &cache_file_info) noexcept
     {
         if (!cache_file_info.thumbnail || !_ctx.c_api.media.thumbnail_generate_cb || cache_file_info.path.empty())
@@ -670,17 +649,14 @@ protected:
         cache_file_info.thumbnail_path = thumbnail_cache_path;
     }
 
-    // - MARK: Slot Channel Worker Adapter (docs/PLAN.md section 7.2)
+    // - MARK: Slot Channel Worker Adapter
 
     bool stopRequested() const noexcept
     {
         return _stop_token.load(std::memory_order_acquire);
     }
 
-    // Whether a running task may continue (docs/PLAN.md section 9): the Slot is not stopping, its filesystem is
-    // mounted and ready or saturated, and the free space exceeds the task's own critical watermark, bound at
-    // acceptance. Saturation under the aggregate admission watermark does not stop a running task; a write or
-    // device failure does.
+    // A running task keeps to its own critical watermark, bound at acceptance, so SATURATED does not stop it.
     bool canContinue(const WaterMarks &own) const noexcept
     {
         if (_stop_token.load(std::memory_order_acquire))
@@ -691,8 +667,7 @@ protected:
         return _stats.load(std::memory_order_acquire).free_bytes > criticalRemainBytes(own);
     }
 
-    // The writer of a claimed task, from the settings, the kind, and the channel revision bound into it; throws
-    // when it cannot be built, which the worker treats as a failed task.
+    // Throws when the writer cannot be built, which the worker treats as a failed task.
     std::unique_ptr<SlotAdaptedWriter<Slot>> createWriter(const std::shared_ptr<FileTask> &task)
     {
         switch (task->type)
@@ -708,17 +683,12 @@ protected:
         }
     }
 
-    // The media backlog before a continuous clip's writer is built (docs/PLAN.md section 8.2): kept from the
-    // boundary key frame the previous clip left when it is still buffered, dropped otherwise.
     void prepareContinuousClip(std::optional<std::chrono::steady_clock::time_point> boundary) noexcept
     {
         _ctx.slot_media_buffer.keepFrom(boundary);
     }
 
-    // Publishes a recorded file: moves it and its thumbnail from the cache directory to their final places,
-    // accounts for it, and reports it through the FILE callback. Pure filesystem work (docs/PLAN.md section 8.3):
-    // the worker calls it after releasing the writer, so no media operation is held, and the callback runs
-    // outside the publication lock.
+    // Filesystem work only, after the writer is released; the FILE callback runs outside the publication lock.
     void publish(CacheFileInfo &&cache_file_info) noexcept
     {
         if (cache_file_info.path.empty())
@@ -732,9 +702,7 @@ protected:
         size_t size = 0;
         std::filesystem::path target_file_path;
         {
-            // Publication excludes removal (rotation, free-up, explicit removal), so the target directory cannot
-            // disappear between its creation and the rename (docs/PLAN.md section 9). A taken name gets a numbered
-            // suffix; nothing is overwritten.
+            // Excludes removal, so the target directory cannot disappear before the rename
             const std::lock_guard lock(_publication_mutex);
             const auto target_dir_path = getRecordRootPath() / cache_file_info.first_level_dir_name;
             if (!EnsureDirectoryExists(target_dir_path, true, false, &_ctx))
@@ -820,13 +788,9 @@ protected:
         return;
     }
 
-    // One channel's worker reached its consecutive failure limit: the manager thread takes the Slot to the
-    // error state, as before, so the other channel stops too (a retained limitation; docs/PLAN.md section 7.2).
-    // The worker marks before it completes its task. The admission stays registered, as it did, but refuses
-    // from here (isReadyToWrite), and the tasks pending on either channel, bound to this Slot, are canceled
-    // instead of left unclaimed until the Slot is disabled: a dispatcher's admission section holds its channel
-    // lock, which the cancel takes after it, so a task admitted before the mark is canceled and none is admitted
-    // after it. The manager's next poll, up to 500 ms later, is when the state follows.
+    // A worker reached its consecutive failure limit: admission refuses from here, the pending tasks are canceled
+    // (the cancel takes each channel lock after the admission section, so none survives the mark), and the manager
+    // takes the Slot to ERROR on its next poll, which stops the other channel too (a kept limitation).
     void markFailed() noexcept
     {
         _failure.store(true, std::memory_order_release);
@@ -877,17 +841,9 @@ private:
         return probeDeviceOnline() && probeCorrectlyMounted() && probeCorrectlyConfigured();
     }
 
-    // The state from READY or SATURATED to what the index and the stats say, each manager round. With rotation
-    // off, Vigil frees no space: READY comes back from SATURATED only when a person frees space, raises the quota,
-    // or turns rotation on, or when the admission marks fall (one file action instead of two, a smaller format or
-    // estimate), so a task admitted within one worker probe before the state left READY, which no worker claims
-    // afterwards, is canceled as the ERROR states cancel theirs (markFailed, the give-up): the cancel takes the
-    // channel lock after a dispatcher's admission section, so a task admitted before the state changed is
-    // canceled and none is admitted after it. With rotation on, the rotate step of the same round frees space and
-    // READY returns within about a second, so the task waits. Retained (docs/RETURN.md section 4.2): it waits the
-    // same way when that step has nothing to give, and after a health reset that re-initializes into SATURATED;
-    // on the internal Slot, whose filesystem the system shares, free space can return without a person, and the
-    // cancel then cost one event.
+    // Runs each manager round. With rotation off, Vigil frees no space, so a move to SATURATED cancels the task
+    // admitted just before, as markFailed does; with rotation on, the task waits for the rotate step, even one with
+    // nothing to free. A health reset that re-initializes into SATURATED leaves it waiting too.
     void doSyncStateReadyOrSaturated(const WaterMarks &watermarks, const IndexManager::IndexResult *index_result,
         const SlotStats &stats, SlotState current) noexcept
     {
@@ -969,9 +925,7 @@ private:
             goto l_check_state_loop;
 
         l_check_state_loop_delayed:
-            // A full interval on every visit: NOT_FORMATTED and FORMATTING wait here without returning to the round's
-            // start (FILESYSTEM_CHECKING and INDEXING jump here too, but the manager leaves them before it reads the
-            // state), so a sleep measured from that start ended after the first interval and the loop spun.
+            // A full interval on every visit: the waits for a format loop here without returning to the round's start
             std::this_thread::sleep_for(kManagerProbeInterval);
 
         l_check_state_loop:
@@ -1052,17 +1006,11 @@ private:
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Storage slot for device path ", _dev_path,
                 " has reached maximum recovery attempts or marked as failed, giving up and entering error state");
             _state.store(SlotState::Error, std::memory_order_release);
-            // Nothing brings READY back until a person recovers the Slot, so a task admitted just before it left
-            // READY (within one worker probe) would stay pending with its reservation until then: canceled here as
-            // the failure mark cancels (markFailed), after the dispatcher's admission section, which holds the
-            // channel lock. The admission stays registered and refuses by the state.
+            // Nothing brings READY back until a person acts, so the task admitted just before is canceled
             _ctx.file_channels.cancelPendingBoundTo(_registration.load(std::memory_order_acquire));
         }
     }
 
-    // A worker thread: the channel worker of one file channel over this Slot (docs/PLAN.md section 7.2), with the
-    // production cooldown and failure limit. The Photo and Video workers share the Slot's probes, the budget
-    // registry, and the publication lock, and each counts its own failures.
     void workerThreadTask(CaptureType type) noexcept
     {
         FileChannelWorker<Slot> worker(_ctx, *this, type);
@@ -1290,10 +1238,7 @@ private:
         return true;
     }
 
-    // Syncs the filesystem mounted at the mount path (syncfs), at a disable (a switch) and before an unmount (an
-    // eject, a removal, deinit). The path is opened read-only: a directory cannot be opened for writing (EISDIR),
-    // which left this sync unrun from 2026-05-29 to 2026-10-21, so a busy eject, whose unmount can only detach,
-    // answered with the last files still in the page cache.
+    // Read-only: a directory cannot be opened for writing (EISDIR).
     bool doFsync() const noexcept
     {
         const auto fd = ::open(_mount_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -1336,8 +1281,7 @@ private:
         }
         {
             std::error_code ec;
-            std::filesystem::remove(_mount_path, ec); // empty once unmounted; a mount that landed there meanwhile
-                                                      // (a new Slot's, for the same device) is left alone
+            std::filesystem::remove(_mount_path, ec); // empty once unmounted; a newer mount there stays
             if (ec)
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove mount path ", _mount_path,
@@ -1414,9 +1358,7 @@ private:
         return false;
     }
 
-    // Mounts the device at the mount path, a directory reserved for Vigil (the internal_mount_point of
-    // vg_config_storage_t included, as its header says): whatever is mounted there is detached first, and what the
-    // directory holds is removed, so a path that is not Vigil's own would lose its contents.
+    // The mount path is Vigil's own: whatever is mounted there is detached first, and its contents are removed.
     bool doMount() const noexcept
     {
         {
@@ -1761,8 +1703,7 @@ private:
         return false;
     }
 
-    // The critical free-space mark of `watermarks` on this Slot: an internal filesystem keeps its preserved bytes
-    // on top.
+    // An internal filesystem keeps its preserved bytes on top.
     FileSize criticalRemainBytes(const WaterMarks &watermarks) const noexcept
     {
         return isInternal() ? static_cast<FileSize>(watermarks.critical_remain_bytes + GetInternalPreservedLimit())
@@ -1885,16 +1826,15 @@ private:
     // Public lifecycle flags
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _enabled;
     std::atomic<bool> _failure;
-    // The registration of the open admission (docs/PLAN.md section 8.1), 0 while closed: set after the workers
-    // start and cleared before they are joined
+    // The open admission's registration, 0 while closed: set after the workers start, cleared before they are joined
     std::atomic<uint64_t> _registration = 0;
 
     // Stop token for the manager and worker threads
     alignas(kHardwareDestructiveInterferenceSize) std::atomic<bool> _stop_token;
     mutable std::atomic<bool> _on_destruction;
-    bool _dropped; // the drop unmounted the Slot (eject, removal); under _mutex
+    bool _dropped; // under _mutex
 
-    // The manager thread and one channel worker thread per file channel (docs/PLAN.md section 7.2)
+    // Manager and channel worker threads
     std::unique_ptr<std::thread> _manager_thread;
     std::unique_ptr<std::thread> _photo_worker_thread;
     std::unique_ptr<std::thread> _video_worker_thread;

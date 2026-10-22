@@ -19,11 +19,9 @@
 
 namespace vigil_c_api {
 
-// Lifecycle (docs/PLAN.md section 8.3). `vigil_instance_lifecycle_mutex` serializes init and deinit for their
-// whole duration. `vigil_instance_mutex` only guards the instance pointer: every other call holds it shared
-// while it uses the runtime, and init/deinit take it exclusively just to publish or detach the pointer. The
-// runtime is built and destroyed with no instance lock held, so a callback that reenters the C API meanwhile
-// gets ESRCH instead of a deadlock, and no worker is joined under the entrance lock.
+// The lifecycle mutex serializes init and deinit. The instance mutex guards only the pointer: every other call holds
+// it shared, and init and deinit take it exclusively just to publish or detach it, so the runtime is built and
+// destroyed with no instance lock held and a callback that reenters meanwhile gets ESRCH instead of a deadlock.
 static inline std::mutex vigil_instance_lifecycle_mutex;
 static inline std::shared_mutex vigil_instance_mutex;
 static inline std::atomic<uint64_t> vigil_instance_generation = 0; // bumped whenever an instance is published
@@ -31,13 +29,9 @@ static inline std::mutex vigil_instance_scoped_suspend_mutex;
 static inline size_t vigil_instance_scoped_suspend_count = 0;
 static inline std::unique_ptr<vigil::Vigil> vigil_instance = nullptr;
 
-// The shared hold on the instance pointer that every call but init and deinit keeps for its duration
-// (docs/PLAN.md section 8.3). A std::shared_mutex may not be locked twice by one thread, so a C API call made
-// from a callback that runs on the thread of another C API call (the RULE callback of an HTTP activation, for
-// one) borrows that call's hold, which outlives it. Init and deinit refuse such a thread with EDEADLK: deinit
-// would wait for the exclusive lock against the hold the thread itself keeps, and init would lock shared again
-// for its existence check. Before 2026-10-20 every nested call locked again, which the standard leaves
-// undefined (glibc tolerates it).
+// The shared hold every call but init and deinit keeps. A std::shared_mutex may not be locked twice by one thread, so
+// a call from a callback on the thread of another C API call borrows that call's hold; init and deinit refuse such a
+// thread with EDEADLK.
 class InstanceHold final
 {
 public:
@@ -197,10 +191,8 @@ vg_sta_e vg_media_scoped_suspend_write(bool wait)
         generation = vigil_instance_generation.load(std::memory_order_acquire);
     }
 
-    // Drained with no instance hold of its own (a nested call drains under the hold of the call it runs in): a
-    // media callback may reenter the C API, and deinit may detach the runtime meanwhile (its workers leave the
-    // barrier as they are joined). `ctx` keeps the barrier alive. A runtime published since the capture is
-    // another instance, whose count must not be touched.
+    // Drained without an instance hold of its own, since a media callback may reenter the C API; `ctx` keeps the
+    // barrier alive, and a runtime published since then is another instance, whose count is left alone
     const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
     if (vigil_instance_generation.load(std::memory_order_acquire) != generation)
         return ESRCH;
@@ -397,7 +389,7 @@ static nlohmann::json vg_http_api_request_2_json(const vg_http_api_request_t &re
 {
     if (!request.payload || request.payload_len == 0)
         return {};
-    if (request.payload_len > vigil::kHTTPAPIRequestMaxBytes) // bounded before parsing (docs/PLAN.md section 5.2)
+    if (request.payload_len > vigil::kHTTPAPIRequestMaxBytes)
         throw vigil::Exception("Request body of " + std::to_string(request.payload_len) + " bytes exceeds the limit of "
                                + std::to_string(vigil::kHTTPAPIRequestMaxBytes) + " bytes");
     return nlohmann::json::parse(static_cast<const char *>(request.payload),
