@@ -233,11 +233,13 @@ struct Context
             continuity_breaks.fetch_add(1, std::memory_order_acq_rel);
     }
 
-    // Closes media admission and, with `wait`, drains it. It also breaks continuous recording's continuity, so the
-    // next clip starts at a fresh key frame whether or not the resume clears the buffer.
+    // Closes media admission and, with `wait`, drains it. A Sound trigger not yet playing is canceled, so none accepted
+    // before the suspension plays after it; and continuous recording's continuity breaks, so the next clip starts at a
+    // fresh key frame whether or not the resume clears the buffer.
     void suspendMedia(bool wait) noexcept
     {
         media_barrier.pause(wait);
+        sound_executor.cancelPending(); // after the pause: a later trigger sees it under the executor's lock
         continuity_breaks.fetch_add(1, std::memory_order_acq_rel);
     }
 
@@ -1005,21 +1007,21 @@ struct Context
             }
         }
 
-        // Claims and plays the Pending trigger; false when none. It enters the media barrier here, so a trigger
-        // accepted before a pause is canceled rather than played.
+        // Claims and plays the Pending trigger; false when none. It enters the media barrier with the claim, under the
+        // lock, so a suspension's cancel finds the trigger still pending or already admitted, and one claimed while
+        // media is paused is canceled rather than played.
         bool playPending() noexcept
         {
-            {
-                const std::lock_guard lock(_mutex);
-                if (_state != State::Pending)
-                    return false;
-                _state = State::Playing;
-            }
             bool played = false;
             vg_sta_e ret = 0;
             {
-                // Rechecked after the claim: a commit that disabled Sound or rules since the trigger cancels it
+                std::unique_lock lock(_mutex);
+                if (_state != State::Pending)
+                    return false;
+                _state = State::Playing;
                 const MediaBarrier::Operation operation(_ctx.media_barrier);
+                lock.unlock();
+                // Rechecked after the claim: a commit that disabled Sound or rules since the trigger cancels it
                 const auto settings = _ctx.action_settings.get().settings;
                 if (operation && settings && settings->sound_enabled
                     && _ctx.record_rule_enabled.load(std::memory_order_relaxed))

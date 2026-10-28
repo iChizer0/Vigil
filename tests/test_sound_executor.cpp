@@ -338,6 +338,24 @@ VG_TEST_CASE(a_pause_refuses_triggers_and_admission_and_a_waiting_pause_drains_p
     }
 }
 
+VG_TEST_CASE(a_suspension_cancels_a_pending_trigger_so_that_it_never_plays_after_the_resume)
+{
+    // Held pending without the worker, as when the worker has not run since the trigger: the suspension cancels it,
+    // so the resume leaves nothing to play.
+    Fixture f;
+    f.arm();
+    VG_CHECK(f.executor().tryTrigger());
+    f.ctx.suspendMedia(true);
+    VG_CHECK(f.executor().state() == State::Idle);
+    VG_CHECK(!f.executor().tryTrigger()); // refused while suspended
+    f.ctx.media_barrier.resume();
+    VG_CHECK(!f.serve());
+    VG_CHECK_EQ(f.sound.calls.load(), 0);
+    VG_CHECK(f.executor().tryTrigger()); // admitted again after the resume
+    VG_CHECK(f.serve());
+    VG_CHECK_EQ(f.sound.calls.load(), 1);
+}
+
 VG_TEST_CASE(a_claimed_trigger_is_canceled_when_a_gate_closed_since_the_trigger)
 {
     // The dispatcher loads the snapshot before it triggers, so a commit can disable Sound or rules in between

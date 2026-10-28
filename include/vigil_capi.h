@@ -78,8 +78,9 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
  * called from a media callback: a waiting suspension drains the callbacks under the lock this function takes.
  * @return vg_sta_e 0 on success, ESRCH without a runtime.
  * @note While suspended, incoming media frames may be dropped if internal buffers fill up. Generally used when the
- * frame settings are being changed to avoid partial writes. A suspension also ends the continuity of continuous
- * recording: the clip after it starts at a fresh key frame, whatever the resume's reset_media_queue.
+ * frame settings are being changed to avoid partial writes. A suspension also cancels a Sound trigger not yet playing,
+ * and ends the continuity of continuous recording: the clip after it starts at a fresh key frame, whatever the
+ * resume's reset_media_queue.
  */
 vg_sta_e vg_media_scoped_suspend_write(bool wait);
 
