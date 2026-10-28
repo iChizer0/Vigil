@@ -26,7 +26,7 @@ using namespace vigil::types;
 //   bool isReadyToWrite() const;
 //   uint64_t registration() const;                                       only tasks bound to it are claimed
 //   std::unique_ptr<W> createWriter(const std::shared_ptr<FileTask> &);  throws when it cannot be built
-//   void publish(CacheFileInfo &&);
+//   bool publish(CacheFileInfo &&);                                      false when the file could not be published
 //   void prepareContinuousClip(std::optional<steady_clock::time_point> boundary);
 //   void markFailed();                                                   before the failed task is completed
 //   std::string_view name() const;
@@ -104,12 +104,16 @@ private:
             auto writer = _adapter.createWriter(task);
             end = writer->endTime(); // the interval counts from the writer's start
             status = (*writer)()->status.load(std::memory_order_acquire);
-            if (continuous && status == WriteEvent::Status::Completed)
-                _boundary = writer->boundaryKeyFrame();
+            const auto boundary_key_frame = writer->boundaryKeyFrame();
             auto publication = writer->takePublication(); // the thumbnail is generated under the operation
             writer.reset();                               // the media operation leaves here
-            if (publication)
-                _adapter.publish(std::move(*publication));
+            if (publication && !_adapter.publish(std::move(*publication)))
+            {
+                status = WriteEvent::Status::Failed; // a lost file is a failed task, reported so through the hold
+                task->event->status.store(status, std::memory_order_release);
+            }
+            if (continuous && status == WriteEvent::Status::Completed)
+                _boundary = boundary_key_frame;
             admission.release(); // the index sees the file now
         }
         catch (const std::exception &e)
@@ -158,7 +162,8 @@ private:
     const std::chrono::steady_clock::duration _failure_cooldown;
     const size_t _consecutive_failure_max;
     size_t _consecutive_failures = 0;
-    // The key frame the last task ended on, when it was a continuous clip completed on one, left for the next clip
+    // The key frame the last task ended on, when it was a continuous clip completed on one and published, left for the
+    // next clip
     std::optional<std::chrono::steady_clock::time_point> _boundary;
 };
 

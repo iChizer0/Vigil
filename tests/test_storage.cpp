@@ -2,9 +2,10 @@
 // Storage is built with `run_manager_thread` false, and the netlink pass runs only on the socket pair of
 // `attachUeventSocket`; otherwise, as root, the pass would scan /sys/class/block and mount the host's partitions.
 // The device and mount paths are in a temporary directory, but for the bounce cases' fixed paths,
-// /dev/vigil-test-bounce, /mnt/rc_vigil-test-bounce, and /dev/vigil-test-internal, which they require absent. No
-// device exists but one case's zero-filled file, on which blkid finds no filesystem (it must stay so: a Slot mounts a
-// device it recognizes). One case times a wait, since what it pins is the absence of work over time.
+// /dev/vigil-test-bounce, /mnt/rc_vigil-test-bounce, and /dev/vigil-test-internal, which they require absent, and one
+// case's directory under /dev/shm, which it removes. No device exists but one case's zero-filled file, on which blkid
+// finds no filesystem (it must stay so: a Slot mounts a device it recognizes). One case times a wait, since what it
+// pins is the absence of work over time.
 
 #include <atomic>
 #include <chrono>
@@ -26,6 +27,7 @@
 
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "vigil/configs.hpp"
@@ -134,6 +136,17 @@ struct SlotTestAccess
     static bool ownsThreads(const Slot &slot)
     {
         return slot._manager_thread || slot._photo_worker_thread || slot._video_worker_thread;
+    }
+
+    // A publication as a channel worker makes it, and the cache directory its files come from.
+    static bool publish(Slot &slot, CacheFileInfo &&info)
+    {
+        return slot.publish(std::move(info));
+    }
+
+    static std::filesystem::path recordCachePath(const Slot &slot)
+    {
+        return slot.getRecordCachePath();
     }
 
     // The manager's state sync of a READY or SATURATED Slot, with the stats its round would have read and no index
@@ -341,12 +354,24 @@ private:
     }
 };
 
+// The file callbacks of one case, counted.
+struct FileEventRecorder
+{
+    static inline std::atomic<int> count = 0;
+
+    static void callback(const vg_file_evt_t *)
+    {
+        ++count;
+    }
+};
+
 // What a case changes in the fake configuration, which has no storage callback and no internal device.
 struct FixtureOptions
 {
     vg_sta_e (*log_cb)(vg_log_level_e, const char *, size_t) = nullptr; // replaces the logging callback
     void (*on_unmount_cb)(const char *, const char *) = nullptr;        // the storage callback of that name
     const char *internal_device_path = nullptr; // internal_device_path, mounted at the fixture's `internal_mount`
+    void (*on_file_event_cb)(const vg_file_evt_t *) = nullptr; // the file callback
 };
 
 struct Fixture
@@ -364,6 +389,7 @@ struct Fixture
     {
         if (options.log_cb)
             config.basic.log_cb = options.log_cb;
+        config.basic.on_file_event_cb = options.on_file_event_cb;
         config.storage.on_unmount_cb = options.on_unmount_cb;
         if (options.internal_device_path)
         {
@@ -593,6 +619,85 @@ VG_TEST_CASE(saturation_without_rotation_cancels_the_pending_task_and_with_rotat
     const auto next = photo.current();
     VG_CHECK(next != nullptr && next != task);
     VG_CHECK(next->event->status.load() == WriteEvent::Status::Pending);
+}
+
+VG_TEST_CASE(a_publication_that_fails_removes_its_file_and_a_moved_thumbnail_and_says_so)
+{
+    // Over a Slot that was never enabled, its mount path a directory of the case: publication reads no Slot state.
+    // Each clip is a cache file with its thumbnail, as a video writer leaves them.
+    FileEventRecorder::count = 0;
+    Fixture f(FixtureOptions { .on_file_event_cb = &FileEventRecorder::callback });
+    Slot slot(*f.ctx, f.dev, f.root + "/publish-mnt", /*removable*/ true, /*internal*/ false, "DCIM");
+    const auto root = slot.getRecordRootPath();
+    const auto cache = SlotTestAccess::recordCachePath(slot);
+    std::filesystem::create_directories(cache);
+    const auto write = [](const std::filesystem::path &path) {
+        std::ofstream out(path);
+        out << "data";
+        VG_REQUIRE(static_cast<bool>(out));
+    };
+    const auto clip = [&](const std::string &name, const std::string &day) {
+        CacheFileInfo info(std::make_shared<WriteEvent>(std::chrono::steady_clock::now(), 0, uint64_t { 0 }));
+        info.event->status.store(WriteEvent::Status::Completed);
+        info.path = cache / name;
+        info.first_level_dir_name = day;
+        info.thumbnail_path = cache / (name + ".jpg");
+        write(info.path);
+        write(info.thumbnail_path);
+        return info;
+    };
+    const auto thumbnail = [&](const std::string &day, const std::string &name) {
+        return index_manager::ThumbnailPathFrom(root / day / name);
+    };
+
+    // Published: the file and its thumbnail move under the day's directory, and the file callback reports it.
+    VG_CHECK(SlotTestAccess::publish(slot, clip("a.mp4", "day-a")));
+    VG_CHECK(std::filesystem::is_regular_file(root / "day-a" / "a.mp4"));
+    VG_CHECK(std::filesystem::is_regular_file(thumbnail("day-a", "a.mp4")));
+    VG_CHECK_EQ(FileEventRecorder::count.load(), 1);
+
+    // A file in the way of the day's directory: nothing moves, and the cache file and its thumbnail are removed.
+    write(root / "day-b");
+    VG_CHECK(!SlotTestAccess::publish(slot, clip("b.mp4", "day-b")));
+    VG_CHECK(!std::filesystem::exists(cache / "b.mp4") && !std::filesystem::exists(cache / "b.mp4.jpg"));
+
+    // The cache file is gone, as a create callback that wrote elsewhere leaves it: the size fails after the thumbnail
+    // moved, and the moved thumbnail is removed again.
+    auto missing = clip("c.mp4", "day-a");
+    std::filesystem::remove(missing.path);
+    VG_CHECK(!SlotTestAccess::publish(slot, std::move(missing)));
+    VG_CHECK(!std::filesystem::exists(thumbnail("day-a", "c.mp4")) && !std::filesystem::exists(cache / "c.mp4.jpg"));
+
+    // The rename fails, here because the cache file is on another filesystem: the file and the moved thumbnail are
+    // removed. Skipped where /dev/shm is not a filesystem of its own.
+    struct stat shm {};
+    struct stat tmp {};
+    std::string other = "/dev/shm/vigil-test-XXXXXX";
+    if (::stat("/dev/shm", &shm) == 0 && ::stat(f.root.c_str(), &tmp) == 0 && shm.st_dev != tmp.st_dev
+        && ::mkdtemp(other.data()) != nullptr)
+    {
+        struct RemovedOnExit
+        {
+            const std::string &path;
+
+            ~RemovedOnExit()
+            {
+                std::error_code ec;
+                std::filesystem::remove_all(path, ec);
+            }
+        } const removed { other };
+        auto elsewhere = clip("d.mp4", "day-a");
+        const auto moved = std::filesystem::path(other) / "d.mp4";
+        std::filesystem::copy_file(elsewhere.path, moved);
+        std::filesystem::remove(elsewhere.path);
+        elsewhere.path = moved;
+        VG_CHECK(!SlotTestAccess::publish(slot, std::move(elsewhere)));
+        VG_CHECK(!std::filesystem::exists(moved) && !std::filesystem::exists(thumbnail("day-a", "d.mp4")));
+        VG_CHECK(!std::filesystem::exists(root / "day-a" / "d.mp4"));
+    }
+
+    VG_CHECK_EQ(FileEventRecorder::count.load(), 1); // the failures reported nothing
+    VG_CHECK(std::filesystem::is_regular_file(root / "day-a" / "a.mp4"));
 }
 
 VG_TEST_CASE(a_selector_that_matches_several_slots_enables_one_and_keeps_the_enabled_one)

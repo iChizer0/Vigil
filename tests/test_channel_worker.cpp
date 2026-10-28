@@ -72,6 +72,7 @@ struct FakeSlot: FakeSlotAdmission
     std::atomic<int> prepared = 0;                                   // continuous clips whose backlog was prepared
     std::function<void()> on_prepare;            // runs after the backlog was prepared: what arrives after the claim
     std::atomic<bool> throw_on_create = false;   // a writer that cannot be built
+    std::atomic<bool> publish_fails = false;     // the file cannot be put in place
     std::atomic<bool> marked_while_held = false; // the channel still held the task when markFailed ran
 
     std::unique_ptr<FakeAdapter> createWriter(const std::shared_ptr<FileTask> &task)
@@ -100,13 +101,14 @@ struct FakeSlot: FakeSlotAdmission
             on_prepare();
     }
 
-    void publish(CacheFileInfo &&info) noexcept
+    bool publish(CacheFileInfo &&info) noexcept
     {
         const std::lock_guard lock(publications_mutex);
         publications.push_back(
             Publication { info.event, info.path, info.event->status.load(), ctx.file_channels.holdsTask(),
                 ctx.media_barrier.activeOperations(), ctx.in_flight_budgets.inFlight(kFilesystem) });
         ++published;
+        return !publish_fails;
     }
 
     // Counted only: the real Slot also refuses admission and cancels its pending tasks from the mark on, so a Video
@@ -377,6 +379,89 @@ VG_TEST_CASE(a_failed_task_holds_through_the_cooldown_and_the_limit_stops_the_wo
     VG_CHECK(task->event->status.load() == WriteEvent::Status::Failed); // completed before the stop
     VG_CHECK(photo.current() == nullptr && photo.last() == task);
     VG_CHECK_EQ(f.media.captures, 4);
+}
+
+VG_TEST_CASE(a_file_that_could_not_be_published_fails_its_task_from_the_publication_on)
+{
+    // The writer completed and the Slot could not put the file in place: the task is Failed from then on, through the
+    // hold; it is held through the interval and the cooldown, and counts toward the limit like any failed task.
+    Fixture f;
+    f.enable(CaptureType::Image, std::chrono::milliseconds(200));
+    auto &photo = f.channel(CaptureType::Image);
+    Worker worker(f.ctx, f.slot, CaptureType::Image, std::chrono::milliseconds(30), 2); // injected: 30 ms, 2
+
+    f.slot.publish_fails = true;
+    auto task = f.dispatch();
+    const auto before = Clock::now();
+    auto step = Step::Idle;
+    std::thread stepping([&] { step = worker.step(); });
+    VG_CHECK(Fixture::waitFor([&] { return task->event->status.load() == WriteEvent::Status::Failed; }));
+    VG_CHECK(photo.current() == task); // still held
+    stepping.join();
+    VG_CHECK(step == Step::Ran);
+    VG_CHECK(Clock::now() - before >= std::chrono::milliseconds(230)); // the interval and the cooldown
+    VG_CHECK(photo.current() == nullptr && photo.last() == task);
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Failed);
+    VG_REQUIRE(f.slot.publications.size() == size_t { 1 });
+    VG_CHECK(f.slot.publications[0].status == WriteEvent::Status::Completed); // as the writer ended it
+    VG_CHECK_EQ(f.slot.failure_marks.load(), 0);
+    VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
+
+    task = f.dispatch();
+    VG_CHECK(worker.step() == Step::Stop); // the second consecutive failure reaches the limit
+    VG_CHECK_EQ(f.slot.failure_marks.load(), 1);
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Failed);
+    VG_CHECK_EQ(f.media.captures, 2);
+}
+
+VG_TEST_CASE(an_interrupted_clip_whose_file_could_not_be_published_fails_too)
+{
+    // Interrupted after its first frame, which would retire it at once, then lost at publication: held as failed.
+    Fixture f;
+    f.enable(CaptureType::Video, std::chrono::milliseconds(50));
+    Worker worker(f.ctx, f.slot, CaptureType::Video, std::chrono::milliseconds(30), 10); // injected: 30 ms, 10
+    f.pushKeyFrame();
+    f.media.stop_after_frames = 1;
+    f.slot.publish_fails = true;
+    const auto task = f.dispatch();
+    const auto before = Clock::now();
+    VG_CHECK(worker.step() == Step::Ran);
+    VG_CHECK(Clock::now() - before >= std::chrono::milliseconds(80)); // the interval and the cooldown
+    VG_CHECK(task->event->status.load() == WriteEvent::Status::Failed);
+    VG_REQUIRE(f.slot.publications.size() == size_t { 1 });
+    VG_CHECK(f.slot.publications[0].status == WriteEvent::Status::Interrupted);
+}
+
+VG_TEST_CASE(a_continuous_clip_whose_file_could_not_be_published_leaves_no_boundary)
+{
+    // The lost clip completed on a key frame it left queued, but the next clip is an entry and drops it.
+    Fixture f;
+    f.slot.wait_bounds
+        = VideoWriter<FakeAdapter>::WaitBounds { std::chrono::milliseconds(100), std::chrono::seconds(10) };
+    Worker worker(f.ctx, f.slot, CaptureType::Video, std::chrono::milliseconds(30), 10); // injected: 30 ms, 10
+    f.enableContinuous();
+    f.slot.on_prepare = [&] {
+        f.pushKeyFrame();
+        f.pushFrame(false);
+        f.pushKeyFrame();
+    };
+    f.media.finish_after_frames = 2;
+    f.slot.publish_fails = true;
+    const auto lost = f.dispatchContinuous();
+    VG_CHECK(worker.step() == Step::Ran);
+    VG_CHECK(lost->event->status.load() == WriteEvent::Status::Failed);
+    VG_CHECK_EQ(f.media.queue.size(), size_t { 1 }); // its closing key frame
+
+    f.slot.publish_fails = false;
+    size_t backlog = SIZE_MAX;
+    f.slot.on_prepare = [&] {
+        backlog = f.media.queue.size();
+        f.pushKeyFrame();
+    };
+    f.media.finish_after_frames = 3;
+    f.dispatchContinuous();
+    VG_CHECK(worker.step() == Step::Ran);
+    VG_CHECK_EQ(backlog, size_t { 0 });
 }
 
 VG_TEST_CASE(a_stop_request_ends_the_hold_after_completing_the_task_and_closing_admission_retires_pending_work)

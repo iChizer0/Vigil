@@ -688,17 +688,19 @@ protected:
         _ctx.slot_media_buffer.keepFrom(boundary);
     }
 
-    // Filesystem work only, after the writer is released; the FILE callback runs outside the publication lock.
-    void publish(CacheFileInfo &&cache_file_info) noexcept
+    // Filesystem work only, after the writer is released; the FILE callback runs outside the publication lock. False
+    // when the file could not be published, which removes it and its thumbnail.
+    bool publish(CacheFileInfo &&cache_file_info) noexcept
     {
         if (cache_file_info.path.empty())
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR,
                 "Cache file info has empty path, first-level dir name: ", cache_file_info.first_level_dir_name);
-            return;
+            return false;
         }
 
         auto thumbnail_cache_path = std::move(cache_file_info.thumbnail_path);
+        std::filesystem::path moved_thumbnail_path; // removed again when the file does not follow it
         size_t size = 0;
         std::filesystem::path target_file_path;
         {
@@ -725,6 +727,8 @@ protected:
                             " to ", thumbnail_path, ": ", ec.message());
                         std::filesystem::remove_all(thumbnail_cache_path, ec);
                     }
+                    else
+                        moved_thumbnail_path = thumbnail_path;
                 }
                 else
                 {
@@ -732,7 +736,7 @@ protected:
                     VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to create thumbnail directory at ",
                         thumbnail_path.parent_path());
                 }
-                thumbnail_cache_path.clear(); // moved or removed: nothing left to clean up
+                thumbnail_cache_path.clear(); // moved or removed: nothing left in the cache
             }
 
             {
@@ -778,14 +782,16 @@ protected:
             };
             _ctx.c_api.basic.on_file_event_cb(&file_evt);
         }
-        return;
+        return true;
 
     l_fail_and_clean_up:
         std::error_code ec;
         std::filesystem::remove_all(cache_file_info.path, ec);
         if (!thumbnail_cache_path.empty())
             std::filesystem::remove_all(thumbnail_cache_path, ec);
-        return;
+        if (!moved_thumbnail_path.empty())
+            std::filesystem::remove(moved_thumbnail_path, ec);
+        return false;
     }
 
     // A worker reached its consecutive failure limit: admission refuses from here, the pending tasks are canceled

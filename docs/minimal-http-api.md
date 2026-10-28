@@ -1,7 +1,7 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2026-10-22
+Revised: 2026-10-28
 Version: 2.0.0
 
 ## Rule API
@@ -60,10 +60,11 @@ Notes:
 Capability limits:
 
 - Vigil owns the rules, the admission, and the file lifecycle, not the devices behind the callbacks.
-- A file callback that keeps failing stops recording on the storage slot. Each file channel counts its failed tasks (a failing create, write, finish, or capture callback, or a writer that could not be built), and after each one stays held through its interval plus a 3-second cooldown. After 10 failed tasks without a completed one in between, it takes the slot to `ERROR` (Storage Status), which stops the other channel and continuous recording too until the slot is disabled and enabled again: reselect it through the storage configuration after selecting another, eject and reinsert a removable device, or restart the service. A persistently failing Photo callback therefore ends Video recording on that slot as well.
+- A file callback that keeps failing, or files that keep failing to publish, stop recording on the storage slot. Each file channel counts its failed tasks (a failing create, write, finish, or capture callback, a writer that could not be built, or a recorded file that could not be moved into its day's directory and was removed instead), and after each one stays held through its interval plus a 3-second cooldown. After 10 failed tasks without a completed one in between, it takes the slot to `ERROR` (Storage Status), which stops the other channel and continuous recording too until the slot is disabled and enabled again: reselect it through the storage configuration after selecting another, eject and reinsert a removable device, or restart the service. A persistently failing Photo callback therefore ends Video recording on that slot as well.
 - Sound plays only through the host's callback, which must return in bounded time. Vigil queues no playback and retries nothing.
 - The timing in this document (the buffer period, the clip length and its key frame and input loss waits, the action intervals, and the 10 ms rule evaluation and 50 ms worker probe periods behind them) is the host logic's target, verified with fake callbacks on a development host. Real-device latency, callback duration, and the gap between clips depend on the host's media pipeline and storage, and are the integration's to measure.
 - Storage calls on the slot's filesystem must return promptly: the free-space probe at each admission (on the rule thread and an HTTP activation's thread), the directory creation and rename at publication (on the slot's workers), and the filesystem sync at a disable or before an unmount (on the thread of the switch, the eject, or the removal). A hanging device stalls the threads that make them.
+- On FAT a day's directory holds about 16,000 files, since a FAT directory has at most 65,536 entries and each recorded file's name takes four. Once it is full, every further file of that day fails to publish and counts as a failed task (above), so the slot reaches `ERROR` soon after. A photo every 5 seconds, as `ALWAYS_ON` takes them at the default interval, fills it at about 23:00; under another rule, one every 6 seconds or more leaves room for continuous clips too. On FAT, keep a day's files under that, or use ext4.
 - The host's video sink must admit every file Vigil creates. With a single video sink the second create fails and counts like any other failure: a manual video capture that overlaps continuous recording fails the automatic clips meanwhile, and ten such failures reach the limit above in about 30 seconds (one 3-second cooldown each).
 - Video frames must carry a key frame at least every 10 seconds, the buffer period. A clip's first and closing key frames are waited for at most that long, and a longer GOP cancels clips or ends them without a boundary.
 
@@ -147,7 +148,7 @@ Notes:
 
 - `INTERRUPTED`: a gate, pause, stop, settings change, or input loss stopped a task that had started; its file is kept.
 - `CANCELED`: nothing was recorded and no file exists. The task was retired before a worker claimed it, the gate was already closed when the writer started, or no key frame arrived before the clip's key frame wait, gate, or end.
-- `HOLDING`: the task finished (its `sStatus` is terminal) and the channel still holds it, through its interval after a completed task, or its interval plus the failure cooldown after a failed one. An interrupted or canceled task is retired at once.
+- `HOLDING`: the task finished and the channel still holds it, through its interval after a completed task, or its interval plus the failure cooldown after a failed one. Its file is published as the hold begins: if that fails, the file is removed, a `COMPLETED` or `INTERRUPTED` status turns `FAILED`, and the task is held as a failed one. An interrupted or canceled task is otherwise retired at once.
 - A continuous clip is not a rule event: it shows under `dActionStates.dVideo` only, never in `dLastRuleEvent`.
 - `dLastDispatchedOwner` moves ahead of `dLastRuleEventOwner` when the file actions rejected the event or did not apply to it.
 - While continuous recording is configured, the video channel records clips without an owner (`iOwnerUID` 0) and admits no triggered video.
