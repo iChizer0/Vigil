@@ -611,21 +611,28 @@ VG_TEST_CASE(schedule_closure_blocks_dispatch_and_reopening_restores_it)
 VG_TEST_CASE(the_schedule_gate_is_published_with_the_configuration_and_on_every_tick_before_the_enable_check)
 {
     // The gate lives in the context, so admission reads the same state as the rule loop and the HTTP precheck;
-    // publishing it on every tick keeps it current while rules are disabled.
+    // publishing it on every tick keeps it current while rules are disabled. Each closure it publishes breaks
+    // continuous recording's continuity; an opening, or a tick that finds it closed already, does not.
     Fixture f;
     f.start();
     VG_CHECK(!f.ctx->record_rule_enabled.load());
     VG_CHECK(f.ctx->schedule_open.load()); // no schedule configured: open
+    const auto breaks = f.ctx->continuity_breaks.load();
     VG_CHECK_EQ(f.postScheduleRuleConfig(ScheduleWindowJson(3 * kHour, 4 * kHour)), 0);
     VG_CHECK(!f.ctx->schedule_open.load()); // published with the configuration
+    VG_CHECK_EQ(f.ctx->continuity_breaks.load(), breaks + 1);
+    f.evaluate();
+    VG_CHECK_EQ(f.ctx->continuity_breaks.load(), breaks + 1);
     f.ctx->schedule_open.store(true);
     f.evaluate(); // and on every tick, rules disabled or not
     VG_CHECK(!f.ctx->schedule_open.load());
+    VG_CHECK_EQ(f.ctx->continuity_breaks.load(), breaks + 2);
     VG_CHECK_EQ(f.postScheduleRuleConfig(ScheduleWindowJson(-kHour, kHour)), 0);
     VG_CHECK(f.ctx->schedule_open.load());
     f.ctx->schedule_open.store(false);
     f.evaluate();
     VG_CHECK(f.ctx->schedule_open.load());
+    VG_CHECK_EQ(f.ctx->continuity_breaks.load(), breaks + 2);
 }
 
 VG_TEST_CASE(a_dispatch_without_a_usable_slot_reports_the_owner_and_the_next_owner_proceeds)

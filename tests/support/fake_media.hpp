@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "vigil/context.hpp"
 #include "vigil/types.hpp"
@@ -51,6 +52,7 @@ struct FakeMedia
     int finishes = 0;
     int captures = 0;
     int video_frames = 0;
+    std::vector<int64_t> video_pts; // of every video frame written, in order
     int audio_frames = 0;
     int thumbnails = 0;
     int last_fd = -1;
@@ -97,12 +99,13 @@ struct FakeMedia
         return m.finish_result;
     }
 
-    static vg_sta_e WriteVideo(int fd, const vg_video_frame_t *, void *user_data)
+    static vg_sta_e WriteVideo(int fd, const vg_video_frame_t *frame, void *user_data)
     {
         auto &m = of(user_data);
         {
             const std::lock_guard lock(m.records);
             ++m.video_frames;
+            m.video_pts.push_back(frame->pts);
             m.last_fd = fd;
             m.active_while_writing = m.ctx->media_barrier.activeOperations();
         }

@@ -196,7 +196,7 @@ vg_sta_e vg_media_scoped_suspend_write(bool wait)
     const std::unique_lock lock2(vigil_instance_scoped_suspend_mutex);
     if (vigil_instance_generation.load(std::memory_order_acquire) != generation)
         return ESRCH;
-    ctx->media_barrier.pause(wait);
+    ctx->suspendMedia(wait);
     ++vigil_instance_scoped_suspend_count;
     return 0;
 }

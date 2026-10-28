@@ -851,7 +851,7 @@ private:
         const bool open
             = !_schedule_rule || _schedule_rule->type() != VG_RULE_TYPE_SCHEDULE
               || static_cast<const ScheduleRule *>(_schedule_rule.get())->isActive(_ctx->shared_time.localTime());
-        _ctx->schedule_open.store(open, std::memory_order_release);
+        _ctx->publishScheduleGate(open);
     }
 
     inline void ruleTaskLoop()

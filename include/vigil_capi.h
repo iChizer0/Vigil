@@ -4,7 +4,7 @@
 #ifdef VG_CAPI_VERSION
 #error "Duplicate definition of VG_CAPI_VERSION"
 #else
-#define VG_CAPI_VERSION "2026.10.21"
+#define VG_CAPI_VERSION "2026.10.28"
 #endif
 
 #include "vigil_ctypes.h"
@@ -78,7 +78,8 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
  * called from a media callback: a waiting suspension drains the callbacks under the lock this function takes.
  * @return vg_sta_e 0 on success, ESRCH without a runtime.
  * @note While suspended, incoming media frames may be dropped if internal buffers fill up. Generally used when the
- * frame settings are being changed to avoid partial writes.
+ * frame settings are being changed to avoid partial writes. A suspension also ends the continuity of continuous
+ * recording: the clip after it starts at a fresh key frame, whatever the resume's reset_media_queue.
  */
 vg_sta_e vg_media_scoped_suspend_write(bool wait);
 
@@ -90,8 +91,8 @@ vg_sta_e vg_media_scoped_suspend_write(bool wait);
  * error status.
  * @note Use with reset_media_queue=true to discard any stale media frames that may have accumulated while writing was
  * suspended, also to end a suspension that spans a stall of the host's pipeline: the buffer is trimmed only as frames
- * arrive, so a resume without the reset records the frames from before the stall first. Only the resume that ends
- * the outermost suspension clears them.
+ * arrive, so without the reset a triggered clip's pre-roll and a capture start with the frames from before the stall.
+ * Only the resume that ends the outermost suspension clears them.
  */
 vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue);
 

@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -1021,6 +1022,137 @@ VG_TEST_CASE(a_continuous_clip_ignores_the_rule_flag_and_is_finished_by_the_sche
     VG_CHECK_EQ(f.slot.publications.size(), size_t { 3 });
     VG_CHECK_EQ(f.inFlight(), FileSize { 0 });
     VG_CHECK_EQ(f.ctx.media_barrier.activeOperations(), size_t { 0 });
+}
+
+VG_TEST_CASE(a_closure_a_suspension_or_a_switch_between_two_clips_starts_the_second_one_fresh)
+{
+    // Each pair starts from an empty buffer: its first clip completes on the last key frame its own frames brought,
+    // one frame arrives before the second clip's preparation, and the second clip's own frames arrive after it. The
+    // second clip continues from the first one's key frame only when nothing broke continuity since the first clip
+    // was claimed: not the schedule closing, media being suspended, or continuous recording switched off and on,
+    // whether between the clips, between the second clip's admission and its claim, or unseen by the first clip.
+    Fixture f;
+    f.slot.wait_bounds
+        = VideoWriter<FakeAdapter>::WaitBounds { std::chrono::milliseconds(100), std::chrono::seconds(10) };
+    Worker worker(f.ctx, f.slot, CaptureType::Video);
+    f.enableContinuous();
+    f.ctx.record_rule_enabled.store(false);
+    f.slot.on_prepare = [&] {
+        f.pushKeyFrame();
+        f.pushFrame(false);
+        f.pushKeyFrame();
+    };
+    // Runs a clip finished after two frames, with `after_admission` between its admission and its claim and
+    // `on_first_write` inside its first write; returns the pts of the frames it wrote.
+    const auto clip = [&](const std::function<void()> &after_admission, const std::function<void()> &on_first_write) {
+        f.media.video_pts.clear();
+        f.media.finish_after_frames = f.media.framesWritten() + 2;
+        bool written = false;
+        f.media.on_write = [&] {
+            if (!std::exchange(written, true) && on_first_write)
+                on_first_write();
+        };
+        const auto task = f.dispatchContinuous();
+        if (after_admission)
+            after_admission();
+        const auto step = worker.step();
+        f.media.on_write = nullptr;
+        VG_REQUIRE(step == Step::Ran);
+        VG_REQUIRE(task->event->status.load() == WriteEvent::Status::Completed);
+        return f.media.video_pts;
+    };
+    struct Hooks
+    {
+        std::function<void()> during_first = nullptr;    // inside the first clip's first write, which runs on
+        std::function<void()> between = nullptr;         // after the first clip, before the second is admitted
+        std::function<void()> after_admission = nullptr; // between the second clip's admission and its claim
+    };
+    // The pts of the key frame the first clip ended on, and of the frames the second clip wrote.
+    const auto pair = [&](const Hooks &hooks) {
+        {
+            const std::lock_guard lock(f.media.mutex);
+            f.media.queue.clear();
+        }
+        clip(nullptr, hooks.during_first);
+        const int64_t boundary = f.pts;
+        if (hooks.between)
+            hooks.between();
+        return std::pair(boundary, clip(hooks.after_admission, nullptr));
+    };
+    const auto push = [&] { f.pushFrame(false); };
+    const auto closeAndReopen = [&] {
+        f.ctx.publishScheduleGate(false);
+        f.ctx.publishScheduleGate(true);
+    };
+    const auto suspendAndResume = [&] {
+        f.ctx.suspendMedia(false);
+        f.ctx.media_barrier.resume();
+    };
+    using Pts = std::vector<int64_t>;
+
+    // Nothing between: the second clip continues from the boundary, with the frame that arrived meanwhile.
+    auto [boundary, written] = pair({ .between = push });
+    VG_CHECK(written == (Pts { boundary, boundary + 1 }));
+
+    // The schedule closes and opens again between the clips, the frame arriving while it is closed.
+    std::tie(boundary, written) = pair({ .between = [&] {
+        f.ctx.publishScheduleGate(false);
+        push();
+        VG_CHECK(!f.ctx.dispatchContinuous());
+        f.ctx.publishScheduleGate(true);
+    } });
+    VG_CHECK(written == (Pts { boundary + 2, boundary + 3 }));
+
+    // Media is suspended between the clips and resumed without clearing the buffer.
+    std::tie(boundary, written) = pair({ .between = [&] {
+        f.ctx.suspendMedia(true);
+        push();
+        VG_CHECK(!f.ctx.dispatchContinuous());
+        f.ctx.media_barrier.resume();
+    } });
+    VG_CHECK(written == (Pts { boundary + 2, boundary + 3 }));
+
+    // Continuous recording is switched off and on between the clips: the Video revision moves.
+    std::tie(boundary, written) = pair({ .between = [&] {
+        f.enable(CaptureType::Video, std::chrono::milliseconds(20));
+        push();
+        VG_CHECK(!f.ctx.dispatchContinuous());
+        f.enableContinuous();
+    } });
+    VG_CHECK(written == (Pts { boundary + 2, boundary + 3 }));
+
+    // The schedule closes and opens again after the second clip was admitted, before its claim.
+    std::tie(boundary, written) = pair({ .after_admission = [&] {
+        f.ctx.publishScheduleGate(false);
+        push();
+        f.ctx.publishScheduleGate(true);
+    } });
+    VG_CHECK(written == (Pts { boundary + 2, boundary + 3 }));
+
+    // Media is suspended after the second clip was admitted: the worker leaves it pending until the resume.
+    std::tie(boundary, written) = pair({ .after_admission = [&] {
+        f.ctx.suspendMedia(true);
+        push();
+        VG_CHECK(worker.step() == Step::Idle);
+        f.ctx.media_barrier.resume();
+    } });
+    VG_CHECK(written == (Pts { boundary + 2, boundary + 3 }));
+
+    // A closure, then a suspension, too short for the first clip to see: it completes, but the second starts fresh.
+    std::tie(boundary, written) = pair({ .during_first = closeAndReopen, .between = push });
+    VG_CHECK(written == (Pts { boundary + 2, boundary + 3 }));
+    std::tie(boundary, written) = pair({ .during_first = suspendAndResume, .between = push });
+    VG_CHECK(written == (Pts { boundary + 2, boundary + 3 }));
+
+    // A Slot briefly not ready between the clips keeps them continuous.
+    std::tie(boundary, written) = pair({ .between = [&] {
+        f.slot.ready = false;
+        push();
+        VG_CHECK(!f.ctx.dispatchContinuous());
+        VG_CHECK(worker.step() == Step::Idle);
+        f.slot.ready = true;
+    } });
+    VG_CHECK(written == (Pts { boundary, boundary + 1 }));
 }
 
 VG_TEST_MAIN()

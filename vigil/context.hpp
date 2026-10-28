@@ -226,6 +226,21 @@ struct Context
         }
     }
 
+    // Publishes the schedule gate; a closure breaks continuous recording's continuity.
+    void publishScheduleGate(bool open) const noexcept
+    {
+        if (schedule_open.exchange(open, std::memory_order_acq_rel) && !open)
+            continuity_breaks.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    // Closes media admission and, with `wait`, drains it. It also breaks continuous recording's continuity, so the
+    // next clip starts at a fresh key frame whether or not the resume clears the buffer.
+    void suspendMedia(bool wait) noexcept
+    {
+        media_barrier.pause(wait);
+        continuity_breaks.fetch_add(1, std::memory_order_acq_rel);
+    }
+
     // Shared data
     // Used to control rule evaluation and inference subscriptions
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> record_rule_enabled = false;
@@ -313,6 +328,9 @@ struct Context
     } media_barrier;
     // The schedule gate, published by the rule loop and by a schedule change; open until the first publication.
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> schedule_open = true;
+    // Raised when the schedule gate closes and when media is suspended: a continuous clip continues the previous one
+    // only while this has not moved since that one started.
+    alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<uint64_t> continuity_breaks = 0;
 
     // `update` publishes only for a caller that saw the current revision, so a commit and a media refresh cannot
     // interleave. A file channel's revision moves only when its own recording changes, which its running task watches.
