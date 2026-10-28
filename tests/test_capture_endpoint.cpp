@@ -484,4 +484,30 @@ VG_TEST_CASE(a_failed_capture_leaves_no_file_and_a_missing_callback_fails_it_at_
     }
 }
 
+VG_TEST_CASE(a_capture_whose_file_cannot_be_put_under_its_name_fails)
+{
+    // A directory holds the capture's name, so the rename fails, or the callback returned 0 without writing: FAILED
+    // either way, nothing is left under the cache name, and what was in the way is kept.
+    Fixture f;
+    const auto out = f.root + "/out";
+    std::filesystem::create_directories(out + "/taken.jpg");
+    VG_REQUIRE(f.start(out + "/taken.jpg", "JPG").at("code").get<int>() == 0);
+    f.media.on_capture = [&] { Fixture::WriteHostFile(f.media.last_path); };
+    f.probe();
+    VG_CHECK_EQ(f.media.captures, 1);
+    VG_CHECK_EQ(f.lastStatus(), std::string("FAILED"));
+    VG_CHECK(f.status().at("bReadyToStartNew").get<bool>());
+    VG_CHECK(std::filesystem::is_directory(out + "/taken.jpg") && std::filesystem::is_empty(out + "/taken.jpg"));
+    VG_CHECK(!std::filesystem::exists(out + "/.taken.jpg"));
+    VG_CHECK_EQ(f.ctx->media_barrier.activeOperations(), size_t { 0 });
+    VG_CHECK_EQ(f.ctx->in_flight_budgets.inFlight(*FilesystemIdOf(out)), FileSize { 0 });
+
+    f.media.on_capture = nullptr;
+    VG_REQUIRE(f.start(out + "/nothing.jpg", "JPG").at("code").get<int>() == 0);
+    f.probe();
+    VG_CHECK_EQ(f.media.captures, 2);
+    VG_CHECK_EQ(f.lastStatus(), std::string("FAILED"));
+    VG_CHECK(!std::filesystem::exists(out + "/nothing.jpg"));
+}
+
 VG_TEST_MAIN()

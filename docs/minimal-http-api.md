@@ -604,9 +604,10 @@ Notes:
 
 - `PENDING`: accepted and not yet running, also while media is paused.
 - `COMPLETED`: an image was captured, or a video reached its length or its stop and ended on the next key frame or, if none arrived, when the key frame wait ran out.
-- `FAILED`: a callback failed, the writer could not be built, or the output filesystem had no headroom; the capture leaves no file.
+- `FAILED`: a callback failed, the writer could not be built, the output filesystem had no headroom, or the finished file was missing or could not be renamed to its name (for example, a directory has that name); the capture leaves no file.
 - `INTERRUPTED`: a pause, the service stopping, input loss, or free space below the critical watermark (checked every 60 seconds) ended a video after it started; the file is kept.
 - `CANCELED`: nothing was recorded and no file exists, because media was paused or no key frame arrived within the key frame wait or before the capture was stopped.
+- A status is final once `bReadyToStartNew` is true. Until then a capture that reads `COMPLETED` or `INTERRUPTED` can still turn `FAILED` if its file is missing or cannot be renamed to its name.
 
 ### Start Capture
 

@@ -314,8 +314,8 @@ public:
         }
     }
 
-    // Publishes a Completed or Interrupted capture by renaming it from its cache name; a Failed capture's partial
-    // file is removed, as the automatic channels never publish one.
+    // Publishes a Completed or Interrupted capture by renaming it from its cache name, or fails it when the file is
+    // missing or the rename fails; a Failed capture's partial file is removed, as automatic channels never publish one.
     virtual ~CaptureAdaptedWriter() noexcept
     {
         const auto status = this->event()->status.load(std::memory_order_acquire);
@@ -323,8 +323,11 @@ public:
         if (std::error_code ec; !std::filesystem::exists(_output_cache_path, ec))
         {
             if (recorded)
+            {
                 VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_ERROR,
                     "CaptureAdaptedWriter cache file does not exist at path: ", _output_cache_path);
+                this->setEventStatus(WriteEvent::Status::Failed);
+            }
             else
                 VG_LOG(this->ctxRef().log, VG_LOG_LEVEL_INFO, "CaptureAdaptedWriter recorded nothing (",
                     WriteEvent::StatusString(status), "), no file at path: ", _output_file_path);
@@ -349,9 +352,10 @@ public:
                     "CaptureAdaptedWriter failed to rename cache file from path ", _output_cache_path,
                     " to final output path ", _output_file_path, ": ", ec.message());
                 std::filesystem::remove_all(_output_cache_path, ec);
+                this->setEventStatus(WriteEvent::Status::Failed);
             }
         }
-        _capture.handleCompletedCaptureEvent(_event);
+        _capture.handleCompletedCaptureEvent(_event); // last: a status read once the capture is complete is final
     }
 
 protected:
