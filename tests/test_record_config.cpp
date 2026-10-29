@@ -50,7 +50,7 @@ nlohmann::json Document(Overrides overrides = {})
         "dActions": {
             "dPhoto": { "bEnabled": false, "sFormat": "JPG", "iIntervalMs": 5000 },
             "dVideo": { "bEnabled": false, "iIntervalMs": 5000 },
-            "dSound": { "bEnabled": false }
+            "dSound": { "bEnabled": false, "sFilePath": "" }
         }
     })");
     for (const auto &[pointer, value]: overrides)
@@ -149,6 +149,35 @@ VG_TEST_CASE(parses_a_complete_document_and_returns_it_canonically)
     extra["sNote"] = "dropped";
     extra["dActions"]["dPhoto"]["iExtra"] = 1;
     VG_CHECK_EQ(Canonical(RecordConfig(extra, f.ctx), f.ctx), doc);
+}
+
+VG_TEST_CASE(the_sound_file_path_is_optional_and_must_be_absolute)
+{
+    // The one field a document may omit; GET always returns it, empty for the host's own sound.
+    Fixture f;
+    auto absent = Document();
+    absent["dActions"]["dSound"].erase("sFilePath");
+    VG_CHECK_EQ(Canonical(RecordConfig(absent, f.ctx), f.ctx), Document());
+
+    const auto doc = Document(
+        { { "/dActions/dSound/bEnabled", true }, { "/dActions/dSound/sFilePath", "/srv/sounds/alarm.wav" } });
+    const RecordConfig cfg(doc, f.ctx);
+    VG_CHECK_EQ(cfg.sound.file_path, "/srv/sounds/alarm.wav");
+    VG_CHECK_EQ(Canonical(cfg, f.ctx), doc);
+    const auto settings = cfg.prepare(f.ctx).settings;
+    VG_REQUIRE(settings != nullptr);
+    VG_CHECK(settings->sound_enabled);
+    VG_CHECK_EQ(settings->sound_file_path, "/srv/sounds/alarm.wav");
+    const auto refreshed = settings->refreshed(&f.ctx.c_api.media); // a media refresh keeps it
+    VG_REQUIRE(refreshed != nullptr);
+    VG_CHECK_EQ(refreshed->sound_file_path, "/srv/sounds/alarm.wav");
+    VG_CHECK(*refreshed == *settings);
+
+    // Only that it is absolute: whether it exists or plays is the host's to find out.
+    VG_CHECK(!Rejected(Document({ { "/dActions/dSound/sFilePath", "/" } }), f.ctx));
+    for (const auto &value:
+        { nlohmann::json("alarm.wav"), nlohmann::json("./alarm.wav"), nlohmann::json(nullptr), nlohmann::json(1) })
+        VG_CHECK(Rejected(Document({ { "/dActions/dSound/sFilePath", value } }), f.ctx));
 }
 
 VG_TEST_CASE(rejects_other_schemas_incomplete_documents_and_wrong_types)

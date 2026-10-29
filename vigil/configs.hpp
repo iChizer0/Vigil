@@ -563,7 +563,8 @@ private:
 
 struct RecordConfig
 {
-    // Only this schema is read, whole and in the shape GET returns; an external manager migrates older files.
+    // Only this schema is read, in the shape GET returns but for the optional sFilePath; an external manager migrates
+    // older files.
     static inline constexpr int kSchemaVersion = 2;
 
     struct PhotoAction
@@ -582,6 +583,7 @@ struct RecordConfig
     struct SoundAction
     {
         bool enabled = false;
+        std::string file_path; // absolute; empty for the host's own sound
     };
 
     bool rule_enabled = false;
@@ -593,7 +595,8 @@ struct RecordConfig
     // First-start defaults: rules disabled, every action disabled, continuous recording off.
     RecordConfig() noexcept = default;
 
-    // A missing field or a field of the wrong type is reported by nlohmann::json; nothing is defaulted.
+    // A missing field or a field of the wrong type is reported by nlohmann::json; nothing is defaulted but the
+    // optional sFilePath.
     RecordConfig(const nlohmann::json &j, const Context &ctx [[maybe_unused]])
     {
         if (const auto &version = j.at("iSchemaVersion"); !version.is_number_integer() || version != kSchemaVersion)
@@ -611,7 +614,11 @@ struct RecordConfig
         const auto &video_j = actions.at("dVideo");
         video.enabled = video_j.at("bEnabled").get<bool>();
         video.interval = IntervalFrom(video_j.at("iIntervalMs"));
-        sound.enabled = actions.at("dSound").at("bEnabled").get<bool>();
+        const auto &sound_j = actions.at("dSound");
+        sound.enabled = sound_j.at("bEnabled").get<bool>();
+        sound.file_path = sound_j.value("sFilePath", std::string());
+        if (!sound.file_path.empty() && sound.file_path.front() != '/') // whether it plays is the host's to find out
+            throw Exception("Invalid sound file path '" + sound.file_path + "', expected an absolute path");
 
         // Any combination of actions is valid here; what ALWAYS_ON can pace is the endpoint's check
     }
@@ -625,7 +632,7 @@ struct RecordConfig
         j["dActions"]["dPhoto"]
             = { { "bEnabled", photo.enabled }, { "sFormat", photo.format }, { "iIntervalMs", photo.interval.count() } };
         j["dActions"]["dVideo"] = { { "bEnabled", video.enabled }, { "iIntervalMs", video.interval.count() } };
-        j["dActions"]["dSound"] = { { "bEnabled", sound.enabled } };
+        j["dActions"]["dSound"] = { { "bEnabled", sound.enabled }, { "sFilePath", sound.file_path } };
     }
 
     // ALWAYS_ON paces one file channel: with it selected, at most one of Photo and Video is enabled, exactly one while
@@ -658,7 +665,7 @@ struct RecordConfig
                      video.interval, kRecordWriterPrefixDefault, kVideoClipLengthDefault, media)))
             return { base_revision, nullptr };
         return { base_revision, ActionSettings::create(continuous_enabled, sound.enabled, std::move(photo_settings),
-                                    std::move(video_settings), media) };
+                                    std::move(video_settings), media, sound.file_path) };
     }
 
     // Publishes the snapshot, then the rule flag; EAGAIN, with nothing applied, when the snapshot changed since it was

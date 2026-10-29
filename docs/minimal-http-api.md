@@ -32,7 +32,8 @@ Get or set rule enablement and the post-trigger actions.
             "iIntervalMs": 5000 // Integer, required, positive, the delay between recordings in milliseconds, write duration included
         },
         "dSound": {
-            "bEnabled": false // Boolean, required, play a sound on trigger through the host's playback callback; unavailable without one
+            "bEnabled": false, // Boolean, required, play a sound on trigger through the host's playback callback; unavailable without one
+            "sFilePath": "" // String, optional, the absolute path of the audio file the callback plays; empty or absent plays the host's own sound. Vigil checks only that it is absolute
         }
     },
     "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
@@ -42,7 +43,7 @@ Get or set rule enablement and the post-trigger actions.
 
 The payload is the version-2 record configuration (`record_config.json`). The document is always complete: `GET` returns every field, and `POST` takes the whole document back, so edit the `GET` response and post it; both use the canonical form. Unknown fields are ignored and dropped from the stored document. Only version 2 is read: an external manager migrates older files, and Vigil never rewrites a stored file it cannot read. A first start without `record_config.json` reports every action disabled.
 
-Any combination of actions may be enabled, including none with `bRuleEnabled` true, in which case every rule event is reported and nothing else happens. Photo and Video run independently, each on its own interval, and may both publish a file for one rule event. Sound plays through the host's callback and is never queued: a trigger while one is pending or playing is dropped. A SED rule with Sound enabled can retrigger itself through the microphone; any guard time belongs to the host's playback.
+Any combination of actions may be enabled, including none with `bRuleEnabled` true, in which case every rule event is reported and nothing else happens. Photo and Video run independently, each on its own interval, and may both publish a file for one rule event. Sound plays through the host's callback, which receives `sFilePath`, and is never queued: a trigger while one is pending or playing is dropped. A SED rule with Sound enabled can retrigger itself through the microphone; any guard time belongs to the host's playback.
 
 `bContinuousRecordEnabled` records MP4 clips of the target length (`bVideoClipLengthSeconds` in Rule Info) back to back on the video channel whenever the schedule is open and storage and media allow, whatever `bRuleEnabled` is. Its clips are not rule events: no rule callback reports them, and their files carry `event_uid` 0. While it is set, `dVideo` keeps its stored value but no triggered video is admitted for a rule event; Photo and Sound are unaffected, and an HTTP activation then needs storage only when Photo is enabled. Switching either way finishes the running clip first, under its own identity, before the other mode's first clip starts, and after a completed triggered clip the first continuous clip also waits for the rest of that clip's interval. A clip that loses the schedule, media, or storage ends early and is kept, and the next clip starts at a key frame enqueued after it is admitted. A schedule closure, a media pause, or switching continuous recording off and on between two clips does the same, so continuous recording records nothing from a closed schedule interval or a media pause; a slot that is briefly not ready between two clips does not, and the next clip continues where the previous one ended while that key frame is still buffered. A clip checks the schedule and the media pause as it starts and between frames, so it can still write the frames that arrive as a closure or pause begins or ends, and it keeps writing through a closure, or a pause the host does not wait for, that ends before its next check, after which the next clip starts fresh. `ALWAYS_ON`, the default record rule, cannot be combined with continuous recording, even while `bRuleEnabled` is false (see Always-On Rule).
 
@@ -52,7 +53,7 @@ A stored record configuration, record rule, or schedule file that cannot be load
 
 Notes:
 
-- A missing field, a field of the wrong type, a non-positive or non-integer interval, an unknown photo format, or any other `iSchemaVersion` is rejected with `EINVAL` (`30022`). A rejected payload changes neither the runtime nor the stored file.
+- A missing field (`sFilePath` excepted), a field of the wrong type, a non-positive or non-integer interval, an unknown photo format, a relative `sFilePath`, or any other `iSchemaVersion` is rejected with `EINVAL` (`30022`). A rejected payload changes neither the runtime nor the stored file.
 - While `ALWAYS_ON` is selected (the default), a payload with actions it cannot pace is rejected with `EINVAL` (see Always-On Rule); select another record rule first.
 - `EAGAIN` (`30011`) means the action settings changed (a media refresh or another commit) while the document was being prepared or applied. Post it again: the document may already be stored, with the runtime still on the previous one.
 - The C API reports rule events and published files through its rule and file callbacks, best-effort: the event objects are borrowed for the callback, a file callback may precede the rule callback of its event, and a rule event is followed by zero, one, or two file callbacks. The contract is stated in `include/vigil_ctypes.h`.

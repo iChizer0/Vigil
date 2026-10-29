@@ -4,7 +4,7 @@
 #ifdef VG_CTYPES_VERSION
 #error "Duplicate definition of VG_CTYPES_VERSION"
 #else
-#define VG_CTYPES_VERSION "2026.10.22"
+#define VG_CTYPES_VERSION "2026.10.29"
 #endif
 
 #include <stdbool.h>
@@ -93,10 +93,10 @@ typedef struct vg_config_media_t
         const char *thumb_filepath, const char *thumb_format, int max_wh, void *user_data); /**< Optional. Generates
                          a thumbnail image from the source image data and writes it to thumb_filepath; without it,
                          or when it fails, the video is published without a thumbnail. */
-    vg_sta_e (*sound_play_cb)(void *user_data); /**< Optional; without it the Sound action is unavailable. Plays the
-                         configured sound once and returns when playback is finished; Vigil makes one call at a time.
-                         It must complete in bounded time, also during shutdown: Vigil cannot interrupt it and waits
-                         for it. */
+    vg_sta_e (*sound_play_cb)(const char *filepath, void *user_data); /**< Optional; without it the Sound action is
+                         unavailable. Plays the configured file (an absolute path) or, with a null filepath, the host's
+                         own sound, once, and returns when playback is finished; Vigil makes one call at a time. It must
+                         complete in bounded time, also during shutdown: Vigil cannot interrupt it and waits for it. */
 } vg_config_media_t;
 
 // - MARK: Config Enums and Types

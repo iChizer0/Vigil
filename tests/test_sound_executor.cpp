@@ -56,13 +56,17 @@ struct FakeSound
     std::atomic<size_t> active_while_playing = 0;
     std::atomic<int> state_while_playing = -1;
     std::atomic<bool> retrigger_rejected = false;
+    std::atomic<bool> path_null = true;
+    std::string path; // of the last call; written before `calls` is bumped
     std::mutex mutex;
     std::condition_variable released_cv;
     bool released = false;
 
-    static vg_sta_e Play(void *user_data)
+    static vg_sta_e Play(const char *filepath, void *user_data)
     {
         auto &s = *static_cast<FakeSound *>(user_data);
+        s.path_null = filepath == nullptr;
+        s.path = filepath ? filepath : "";
         ++s.calls;
         s.active_while_playing = s.ctx->media_barrier.activeOperations();
         s.state_while_playing = static_cast<int>(s.ctx->sound_executor.state());
@@ -150,8 +154,8 @@ struct Fixture
     }
 
     // The version-2 document with rules enabled, the Video channel enabled, and the Photo and Sound actions as
-    // given.
-    static nlohmann::json Document(bool photo, bool sound)
+    // given; the sound file path is absent unless given.
+    static nlohmann::json Document(bool photo, bool sound, const char *sound_path = nullptr)
     {
         auto j = nlohmann::json::parse(R"({
             "iSchemaVersion": 2, "bRuleEnabled": true, "bContinuousRecordEnabled": false,
@@ -160,14 +164,16 @@ struct Fixture
         })");
         j["dActions"]["dPhoto"]["bEnabled"] = photo;
         j["dActions"]["dSound"]["bEnabled"] = sound;
+        if (sound_path)
+            j["dActions"]["dSound"]["sFilePath"] = sound_path;
         return j;
     }
 
     // Publishes the snapshot of a parsed configuration with the Video channel enabled and Sound switched as
     // given; the rule flag is the test's to set.
-    void publishSound(bool enabled)
+    void publishSound(bool enabled, const char *sound_path = nullptr)
     {
-        const RecordConfig cfg(Document(false, enabled), ctx);
+        const RecordConfig cfg(Document(false, enabled, sound_path), ctx);
         const auto prepared = cfg.prepare(ctx);
         VG_REQUIRE(ctx.action_settings.update(prepared.base_revision, prepared.settings));
     }
@@ -219,6 +225,29 @@ VG_TEST_CASE(a_trigger_is_accepted_from_idle_only_and_played_once)
     VG_CHECK(!f.serve()); // nothing was queued behind the rejected retriggers
     VG_CHECK_EQ(f.sound.calls.load(), 1);
     VG_CHECK(f.executor().tryTrigger()); // Idle again
+}
+
+VG_TEST_CASE(the_configured_file_path_reaches_the_callback_and_none_is_null)
+{
+    Fixture f;
+    f.arm(); // no path configured
+    VG_CHECK(f.executor().tryTrigger());
+    VG_CHECK(f.serve());
+    VG_CHECK_EQ(f.sound.calls.load(), 1);
+    VG_CHECK(f.sound.path_null.load());
+
+    f.publishSound(true, "/srv/sounds/alarm.wav");
+    VG_CHECK(f.executor().tryTrigger());
+    VG_CHECK(f.serve());
+    VG_CHECK_EQ(f.sound.calls.load(), 2);
+    VG_CHECK(!f.sound.path_null.load());
+    VG_CHECK_EQ(f.sound.path, "/srv/sounds/alarm.wav");
+
+    f.publishSound(true, ""); // the path is per snapshot: a commit with an empty one plays the host's own sound again
+    VG_CHECK(f.executor().tryTrigger());
+    VG_CHECK(f.serve());
+    VG_CHECK_EQ(f.sound.calls.load(), 3);
+    VG_CHECK(f.sound.path_null.load());
 }
 
 VG_TEST_CASE(a_failed_callback_is_logged_once_and_never_retried)

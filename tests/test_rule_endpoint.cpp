@@ -151,7 +151,7 @@ struct Fixture
         }
         auto cfg = MakeFakeConfig(dir.c_str());
         if (with_sound)
-            cfg.media.sound_play_cb = [](void *) -> vg_sta_e { return 0; };
+            cfg.media.sound_play_cb = [](const char *, void *) -> vg_sta_e { return 0; };
         if (with_gpio)
         {
             cfg.gpios.available_cb = &FakeGPIO::Available;
@@ -295,7 +295,7 @@ nlohmann::json RecordJson(bool enabled, const char *format, long interval_ms)
     j["dActions"]["dPhoto"] = { { "bEnabled", photo }, { "sFormat", photo ? format : "JPG" },
         { "iIntervalMs", photo ? interval_ms : 5000L } };
     j["dActions"]["dVideo"] = { { "bEnabled", video }, { "iIntervalMs", video ? interval_ms : 5000L } };
-    j["dActions"]["dSound"] = { { "bEnabled", false } };
+    j["dActions"]["dSound"] = { { "bEnabled", false }, { "sFilePath", "" } };
     return j;
 }
 

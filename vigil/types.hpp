@@ -1091,6 +1091,7 @@ private:
 struct ActionSettings
 {
     const bool sound_enabled;
+    const std::string sound_file_path;               // absolute; empty for the host's own sound
     const std::shared_ptr<FileWriterSettings> photo; // null when disabled
     const std::shared_ptr<FileWriterSettings> video; // null when disabled; suppressed while `continuous` is set
     // MP4 clips of the default length with no interval, which tells them from triggered Video; null unless configured
@@ -1103,7 +1104,7 @@ struct ActionSettings
     // task's place, or one default clip when no file action is configured.
     static std::shared_ptr<const ActionSettings> create(bool continuous, bool sound,
         std::shared_ptr<FileWriterSettings> photo, std::shared_ptr<FileWriterSettings> video,
-        const vg_config_media_t *media_capi) noexcept
+        const vg_config_media_t *media_capi, std::string sound_file_path = std::string()) noexcept
     {
         std::shared_ptr<FileWriterSettings> continuous_settings;
         if (continuous
@@ -1120,8 +1121,9 @@ struct ActionSettings
                 return recording->watermarks;
             return WaterMarks::from(kRecordWriterDefaultFormat, kVideoClipLengthDefault.count(), media_capi);
         }();
-        return std::shared_ptr<const ActionSettings>(new (std::nothrow)
-                ActionSettings(sound, std::move(photo), std::move(video), std::move(continuous_settings), watermarks));
+        return std::shared_ptr<const ActionSettings>(
+            new (std::nothrow) ActionSettings(sound, std::move(sound_file_path), std::move(photo), std::move(video),
+                std::move(continuous_settings), watermarks));
     }
 
     // The same configuration with every watermark estimated again by the host (a media refresh).
@@ -1133,7 +1135,7 @@ struct ActionSettings
         if (video && !(video_settings = Refreshed(*video, media_capi)))
             return nullptr;
         return create(continuous != nullptr, sound_enabled, std::move(photo_settings), std::move(video_settings),
-            media_capi);
+            media_capi, sound_file_path);
     }
 
     // As configured, suppressed or not: what rule info reports as enabled.
@@ -1178,15 +1180,16 @@ struct ActionSettings
 
     bool operator==(const ActionSettings &other) const noexcept
     {
-        return sound_enabled == other.sound_enabled && SameSettings(photo, other.photo)
-               && SameSettings(video, other.video) && SameSettings(continuous, other.continuous)
-               && watermarks == other.watermarks;
+        return sound_enabled == other.sound_enabled && sound_file_path == other.sound_file_path
+               && SameSettings(photo, other.photo) && SameSettings(video, other.video)
+               && SameSettings(continuous, other.continuous) && watermarks == other.watermarks;
     }
 
 private:
-    ActionSettings(bool sound, std::shared_ptr<FileWriterSettings> p, std::shared_ptr<FileWriterSettings> v,
-        std::shared_ptr<FileWriterSettings> c, WaterMarks wm) noexcept
-        : sound_enabled(sound), photo(std::move(p)), video(std::move(v)), continuous(std::move(c)), watermarks(wm)
+    ActionSettings(bool sound, std::string sound_path, std::shared_ptr<FileWriterSettings> p,
+        std::shared_ptr<FileWriterSettings> v, std::shared_ptr<FileWriterSettings> c, WaterMarks wm) noexcept
+        : sound_enabled(sound), sound_file_path(std::move(sound_path)), photo(std::move(p)), video(std::move(v)),
+          continuous(std::move(c)), watermarks(wm)
     {
     }
 

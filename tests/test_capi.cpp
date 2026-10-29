@@ -152,13 +152,17 @@ nlohmann::json SelectInternalSlot(const Fixture &f)
     return WaitForInternalSlot(f, true);
 }
 
-// The host's playback callback: counts its calls, which come from the runtime's Sound worker.
+// The host's playback callback: counts its calls, which come from the runtime's Sound worker, and keeps the last path.
 struct SoundCalls
 {
     static inline std::atomic<int> count = 0;
+    static inline std::atomic<bool> last_path_null = true;
+    static inline std::string last_path; // written before `count` is bumped
 
-    static vg_sta_e play(void *)
+    static vg_sta_e play(const char *filepath, void *)
     {
+        last_path_null = filepath == nullptr;
+        last_path = filepath ? filepath : "";
         ++count;
         return 0;
     }
@@ -274,15 +278,26 @@ VG_TEST_CASE(activation_without_a_file_action_needs_no_storage_and_plays_the_sou
     auto record = nlohmann::json::parse(R"({
         "iSchemaVersion": 2, "bRuleEnabled": true, "bContinuousRecordEnabled": false,
         "dActions": { "dPhoto": { "bEnabled": false, "sFormat": "JPG", "iIntervalMs": 5000 },
-                      "dVideo": { "bEnabled": false, "iIntervalMs": 5000 }, "dSound": { "bEnabled": true } }
+                      "dVideo": { "bEnabled": false, "iIntervalMs": 5000 },
+                      "dSound": { "bEnabled": true, "sFilePath": "/srv/sounds/alarm.wav" } }
     })");
     VG_CHECK_EQ(Post(&vg_http_api_rule_config_post, record), 0);
+    VG_CHECK_EQ(Get(&vg_http_api_rule_config_get), record);
     VG_CHECK_EQ(Post(&vg_http_api_rule_http_rule_activate_post, nlohmann::json::object()), 0);
     auto events = RuleEventRecorder::take();
     VG_REQUIRE(events.size() == size_t { 1 });
     VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_HTTP);
     VG_CHECK(!events[0].writer_created);
     VG_CHECK(WaitFor([] { return SoundCalls::count.load() == 1; }));
+    VG_CHECK(!SoundCalls::last_path_null.load());
+    VG_CHECK_EQ(SoundCalls::last_path, "/srv/sounds/alarm.wav");
+    auto relative = record;
+    relative["dActions"]["dSound"]["sFilePath"] = "sounds/alarm.wav"; // only an absolute path is accepted
+    VG_CHECK_EQ(Post(&vg_http_api_rule_config_post, relative), vigil::constants::kEndpointErrorBase + EINVAL);
+    VG_CHECK_EQ(Get(&vg_http_api_rule_config_get), record); // and the rejection changed nothing
+    record["dActions"]["dSound"].erase("sFilePath");        // absent: the host's own sound, and GET reports it empty
+    VG_CHECK_EQ(Post(&vg_http_api_rule_config_post, record), 0);
+    VG_CHECK_EQ(Get(&vg_http_api_rule_config_get).at("dActions").at("dSound").at("sFilePath").get<std::string>(), "");
 
     record["dActions"]["dSound"]["bEnabled"] = false; // rule-only
     VG_CHECK_EQ(Post(&vg_http_api_rule_config_post, record), 0);
@@ -313,7 +328,8 @@ VG_TEST_CASE(continuous_recording_is_accepted_through_the_c_api_and_suppresses_t
     const auto record = nlohmann::json::parse(R"({
         "iSchemaVersion": 2, "bRuleEnabled": true, "bContinuousRecordEnabled": true,
         "dActions": { "dPhoto": { "bEnabled": false, "sFormat": "JPG", "iIntervalMs": 5000 },
-                      "dVideo": { "bEnabled": true, "iIntervalMs": 5000 }, "dSound": { "bEnabled": false } }
+                      "dVideo": { "bEnabled": true, "iIntervalMs": 5000 },
+                      "dSound": { "bEnabled": false, "sFilePath": "" } }
     })");
     VG_CHECK_EQ(Post(&vg_http_api_rule_config_post, record), 0);
     VG_CHECK_EQ(Get(&vg_http_api_rule_config_get), record);

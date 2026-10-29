@@ -50,10 +50,10 @@ void on_file_event_cb(const vg_file_evt_t *evt)
               << ", rule event " << evt->event_uid << std::endl;
 }
 
-vg_sta_e sound_play_cb(void *user_data)
+vg_sta_e sound_play_cb(const char *filepath, void *user_data)
 {
     (void)user_data;
-    std::cout << "Sound playback requested" << std::endl;
+    std::cout << "Sound playback requested: " << (filepath ? filepath : "the host's own sound") << std::endl;
     return 0;
 }
 

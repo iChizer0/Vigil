@@ -911,8 +911,8 @@ struct Context
     std::optional<InferenceResult> shared_inference_result;
 
     // The Sound action executor: one worker, one state, no queue; a trigger is accepted from Idle only. The worker
-    // calls `sound_play_cb` under a media operation, outside every lock, and logs a failure, never replaying it.
-    // Without the callback there is no worker.
+    // calls `sound_play_cb` with the configured file path under a media operation, outside every lock, and logs a
+    // failure, never replaying it. Without the callback there is no worker.
     struct SoundActionExecutor
     {
     public:
@@ -1036,7 +1036,9 @@ struct Context
                     && _ctx.record_rule_enabled.load(std::memory_order_relaxed))
                 {
                     played = true;
-                    ret = _ctx.c_api.media.sound_play_cb(_ctx.c_api.media.user_data);
+                    const auto &path = settings->sound_file_path; // the snapshot outlives the call
+                    ret = _ctx.c_api.media.sound_play_cb(path.empty() ? nullptr : path.c_str(),
+                        _ctx.c_api.media.user_data);
                 }
             }
             if (!played)
