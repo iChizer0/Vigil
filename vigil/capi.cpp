@@ -19,11 +19,10 @@
 
 namespace vigil_c_api {
 
-// The lifecycle mutex serializes init and deinit. The instance mutex guards the pointer: every other call holds it
-// shared, and init and deinit take it exclusively just to publish or detach it, so the runtime is built and destroyed
-// with no instance lock held and a callback that reenters meanwhile gets ESRCH instead of a deadlock. The suspend
-// mutex nests inside it, for resume and for init's reset of the count; a suspension holds it through its drain, which
-// deinit has already emptied by the time init runs, so init never waits on a live drain.
+// Lock order: the lifecycle mutex (init and deinit only), the instance mutex, then the suspend mutex. Every other call
+// holds the instance mutex shared; init and deinit take it exclusively just to publish or detach the pointer, so the
+// runtime is built and destroyed with no instance lock held and a reentering callback gets ESRCH. A suspension drains
+// with the suspend mutex and no instance hold; deinit has emptied the drain by the time init resets the count under it.
 static inline std::mutex vigil_instance_lifecycle_mutex;
 static inline std::shared_mutex vigil_instance_mutex;
 static inline std::atomic<uint64_t> vigil_instance_generation = 0; // bumped whenever an instance is published
@@ -88,7 +87,7 @@ static void vg_log_exception(const vg_config_t &config, const std::exception &e)
 
 // - MARK: Core API
 
-vg_sta_e vg_service_init(vg_config_t *config)
+vg_sta_e vg_service_init(const vg_config_t *config)
 {
     if (!config || !config->basic.config_directory) // the one string the runtime cannot do without
         return EINVAL;
@@ -125,7 +124,7 @@ vg_sta_e vg_service_init(vg_config_t *config)
     return 0;
 }
 
-vg_sta_e vg_service_deinit()
+vg_sta_e vg_service_deinit(void)
 {
     if (InstanceHold::held()) // a callback on the thread of a C API call: that call holds the instance shared
         return EDEADLK;
