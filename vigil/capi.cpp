@@ -215,7 +215,7 @@ vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue)
             vigil_instance->context().action_settings.sync(vigil_instance->context().c_api.media);
             if (reset_media_queue)
                 vigil_instance->context().clearMediaBuffer();
-            vigil_instance->context().media_barrier.resume();
+            vigil_instance->context().resumeMedia();
             vigil_instance_scoped_suspend_count = 0;
             return 0;
         }

@@ -226,10 +226,10 @@ struct Context
         }
     }
 
-    // Publishes the schedule gate; a closure breaks continuous recording's continuity.
+    // Publishes the schedule gate; a closure and the opening after it both break continuous recording's continuity.
     void publishScheduleGate(bool open) const noexcept
     {
-        if (schedule_open.exchange(open, std::memory_order_acq_rel) && !open)
+        if (schedule_open.exchange(open, std::memory_order_acq_rel) != open)
             continuity_breaks.fetch_add(1, std::memory_order_acq_rel);
     }
 
@@ -241,6 +241,14 @@ struct Context
         media_barrier.pause(wait);
         sound_executor.cancelPending(); // after the pause: a later trigger sees it under the executor's lock
         continuity_breaks.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    // Reopens media admission. Continuity breaks again first, so a continuous clip prepared while media was suspended
+    // starts fresh once its writer is admitted.
+    void resumeMedia() noexcept
+    {
+        continuity_breaks.fetch_add(1, std::memory_order_acq_rel);
+        media_barrier.resume();
     }
 
     // Shared data
@@ -330,8 +338,9 @@ struct Context
     } media_barrier;
     // The schedule gate, published by the rule loop and by a schedule change; open until the first publication.
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<bool> schedule_open = true;
-    // Raised when the schedule gate closes and when media is suspended: a continuous clip continues the previous one
-    // only while this has not moved since that one started.
+    // Raised when the schedule gate closes or opens and when media is suspended or resumed: a continuous clip continues
+    // the previous one only while this has not moved since that one's writer was built, and starts fresh when it moves
+    // before its own writer is built.
     alignas(kHardwareDestructiveInterferenceSize) mutable std::atomic<uint64_t> continuity_breaks = 0;
 
     // `update` publishes only for a caller that saw the current revision, so a commit and a media refresh cannot

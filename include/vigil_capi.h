@@ -80,7 +80,9 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
  * @note While suspended, incoming media frames may be dropped if internal buffers fill up. Generally used when the
  * frame settings are being changed to avoid partial writes. A suspension also cancels a Sound trigger not yet playing,
  * and ends the continuity of continuous recording: the clip after it starts at a fresh key frame, whatever the
- * resume's reset_media_queue.
+ * resume's reset_media_queue. A video clip checks the suspension as it starts and between frames, so it can still
+ * write the frames that arrive as one begins or ends; without wait, an admitted clip records through a suspension
+ * that has ended by its next check.
  */
 vg_sta_e vg_media_scoped_suspend_write(bool wait);
 

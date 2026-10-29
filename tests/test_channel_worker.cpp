@@ -70,14 +70,25 @@ struct FakeSlot: FakeSlotAdmission
     }
 
     std::optional<VideoWriter<FakeAdapter>::WaitBounds> wait_bounds; // injected into every video writer
-    std::atomic<int> prepared = 0;                                   // continuous clips whose backlog was prepared
+    std::atomic<int> prepared = 0;                                   // preparations of a continuous clip's backlog
     std::function<void()> on_prepare;            // runs after the backlog was prepared: what arrives after the claim
+    std::function<void()> on_create;             // runs before a writer is built, so before its media admission
+    std::function<void()> on_claim;              // runs on each probe past the worker's check of the pause
     std::atomic<bool> throw_on_create = false;   // a writer that cannot be built
     std::atomic<bool> publish_fails = false;     // the file cannot be put in place
     std::atomic<bool> marked_while_held = false; // the channel still held the task when markFailed ran
 
+    uint64_t registration() const noexcept
+    {
+        if (on_claim)
+            on_claim();
+        return FakeSlotAdmission::registration();
+    }
+
     std::unique_ptr<FakeAdapter> createWriter(const std::shared_ptr<FileTask> &task)
     {
+        if (on_create)
+            on_create();
         if (throw_on_create)
             throw std::runtime_error("injected: the writer cannot be built");
         if (task->type == CaptureType::Image)
@@ -860,8 +871,8 @@ VG_TEST_CASE(a_continuous_clip_runs_without_an_owner_or_a_hold_and_an_entry_drop
     auto &video = f.channel(CaptureType::Video);
     Worker worker(f.ctx, f.slot, CaptureType::Video);
 
-    // A triggered clip first: its pre-roll is written (the backlog is not prepared) and its closing key frame
-    // stays queued.
+    // A triggered clip first: its pre-roll is written (the backlog is not prepared, even after a suspension just
+    // before its writer is built) and its closing key frame stays queued.
     f.enable(CaptureType::Video, std::chrono::milliseconds(20));
     f.pushKeyFrame();
     f.pushFrame(false);
@@ -869,7 +880,12 @@ VG_TEST_CASE(a_continuous_clip_runs_without_an_owner_or_a_hold_and_an_entry_drop
     f.media.finish_after_frames = 2;
     const auto triggered = f.dispatch();
     VG_CHECK_EQ(RuleEventRecorder::take().size(), size_t { 1 });
+    f.slot.on_create = [&] {
+        f.ctx.suspendMedia(true);
+        f.ctx.resumeMedia();
+    };
     VG_CHECK(worker.step() == Step::Ran);
+    f.slot.on_create = nullptr;
     VG_CHECK(triggered->kind == FileTask::Kind::Triggered);
     VG_CHECK(triggered->event->status.load() == WriteEvent::Status::Completed);
     VG_CHECK_EQ(f.media.video_frames, 2);
@@ -1027,34 +1043,57 @@ VG_TEST_CASE(a_continuous_clip_ignores_the_rule_flag_and_is_finished_by_the_sche
 VG_TEST_CASE(a_closure_a_suspension_or_a_switch_between_two_clips_starts_the_second_one_fresh)
 {
     // Each pair starts from an empty buffer: its first clip completes on the last key frame its own frames brought,
-    // one frame arrives before the second clip's preparation, and the second clip's own frames arrive after it. The
-    // second clip continues from the first one's key frame only when nothing broke continuity since the first clip
-    // was claimed: not the schedule closing, media being suspended, or continuous recording switched off and on,
-    // whether between the clips, between the second clip's admission and its claim, or unseen by the first clip.
+    // and every preparation of a clip is followed by that clip's own frames. The second clip continues from the first
+    // one's key frame only when nothing broke continuity since the first clip's writer was built: not the schedule
+    // closing, media being suspended, or continuous recording switched off and on, whether between the clips, between
+    // the second clip's admission and its claim, before its writer is built, or unseen by the first clip. A break that
+    // begins or ends between a clip's claim and the building of its writer makes that clip prepare again, fresh.
     Fixture f;
     f.slot.wait_bounds
         = VideoWriter<FakeAdapter>::WaitBounds { std::chrono::milliseconds(100), std::chrono::seconds(10) };
     Worker worker(f.ctx, f.slot, CaptureType::Video);
     f.enableContinuous();
     f.ctx.record_rule_enabled.store(false);
+    std::function<void()> at_next_claim;       // runs in the next probe past the pause check: the next clip's claim
+    std::function<void()> in_next_preparation; // runs inside the next preparation only, before its frames arrive
+    std::function<void()> before_next_writer;  // runs before the next writer is built only
+    const auto runOnce = [](std::function<void()> &hook) {
+        if (const auto run = std::exchange(hook, nullptr))
+            run();
+    };
+    f.slot.on_claim = [&] { runOnce(at_next_claim); };
     f.slot.on_prepare = [&] {
+        runOnce(in_next_preparation);
         f.pushKeyFrame();
         f.pushFrame(false);
         f.pushKeyFrame();
     };
-    // Runs a clip finished after two frames, with `after_admission` between its admission and its claim and
-    // `on_first_write` inside its first write; returns the pts of the frames it wrote.
-    const auto clip = [&](const std::function<void()> &after_admission, const std::function<void()> &on_first_write) {
+    f.slot.on_create = [&] { runOnce(before_next_writer); };
+    // Where one clip's hooks run: between its admission and its claim, as the worker claims it, inside its
+    // preparation, after that before its writer is built, and inside its first write, which runs on.
+    struct ClipHooks
+    {
+        std::function<void()> after_admission = nullptr;
+        std::function<void()> at_claim = nullptr;
+        std::function<void()> in_preparation = nullptr;
+        std::function<void()> before_writer = nullptr;
+        std::function<void()> on_first_write = nullptr;
+    };
+    // Runs a clip finished after two frames, and returns the pts of the frames it wrote.
+    const auto clip = [&](const ClipHooks &hooks) {
         f.media.video_pts.clear();
         f.media.finish_after_frames = f.media.framesWritten() + 2;
+        at_next_claim = hooks.at_claim;
+        in_next_preparation = hooks.in_preparation;
+        before_next_writer = hooks.before_writer;
         bool written = false;
         f.media.on_write = [&] {
-            if (!std::exchange(written, true) && on_first_write)
-                on_first_write();
+            if (!std::exchange(written, true) && hooks.on_first_write)
+                hooks.on_first_write();
         };
         const auto task = f.dispatchContinuous();
-        if (after_admission)
-            after_admission();
+        if (hooks.after_admission)
+            hooks.after_admission();
         const auto step = worker.step();
         f.media.on_write = nullptr;
         VG_REQUIRE(step == Step::Ran);
@@ -1063,9 +1102,13 @@ VG_TEST_CASE(a_closure_a_suspension_or_a_switch_between_two_clips_starts_the_sec
     };
     struct Hooks
     {
-        std::function<void()> during_first = nullptr;    // inside the first clip's first write, which runs on
-        std::function<void()> between = nullptr;         // after the first clip, before the second is admitted
-        std::function<void()> after_admission = nullptr; // between the second clip's admission and its claim
+        std::function<void()> first_preparation = nullptr; // inside the first clip's preparation
+        std::function<void()> during_first = nullptr;      // inside the first clip's first write, which runs on
+        std::function<void()> between = nullptr;           // after the first clip, before the second is admitted
+        std::function<void()> after_admission = nullptr;   // between the second clip's admission and its claim
+        std::function<void()> at_claim = nullptr;          // as the worker claims the second clip
+        std::function<void()> preparation = nullptr;       // inside the second clip's preparation
+        std::function<void()> before_writer = nullptr;     // after that, before the second clip's writer is built
     };
     // The pts of the key frame the first clip ended on, and of the frames the second clip wrote.
     const auto pair = [&](const Hooks &hooks) {
@@ -1073,20 +1116,27 @@ VG_TEST_CASE(a_closure_a_suspension_or_a_switch_between_two_clips_starts_the_sec
             const std::lock_guard lock(f.media.mutex);
             f.media.queue.clear();
         }
-        clip(nullptr, hooks.during_first);
+        clip({ .in_preparation = hooks.first_preparation, .on_first_write = hooks.during_first });
         const int64_t boundary = f.pts;
         if (hooks.between)
             hooks.between();
-        return std::pair(boundary, clip(hooks.after_admission, nullptr));
+        const ClipHooks second { .after_admission = hooks.after_admission,
+            .at_claim = hooks.at_claim,
+            .in_preparation = hooks.preparation,
+            .before_writer = hooks.before_writer };
+        return std::pair(boundary, clip(second));
     };
     const auto push = [&] { f.pushFrame(false); };
+    const auto closeSchedule = [&] { f.ctx.publishScheduleGate(false); };
+    const auto openSchedule = [&] { f.ctx.publishScheduleGate(true); };
     const auto closeAndReopen = [&] {
-        f.ctx.publishScheduleGate(false);
-        f.ctx.publishScheduleGate(true);
+        closeSchedule();
+        openSchedule();
     };
+    const auto resume = [&] { f.ctx.resumeMedia(); };
     const auto suspendAndResume = [&] {
         f.ctx.suspendMedia(false);
-        f.ctx.media_barrier.resume();
+        resume();
     };
     using Pts = std::vector<int64_t>;
 
@@ -1108,7 +1158,7 @@ VG_TEST_CASE(a_closure_a_suspension_or_a_switch_between_two_clips_starts_the_sec
         f.ctx.suspendMedia(true);
         push();
         VG_CHECK(!f.ctx.dispatchContinuous());
-        f.ctx.media_barrier.resume();
+        resume();
     } });
     VG_CHECK(written == (Pts { boundary + 2, boundary + 3 }));
 
@@ -1134,9 +1184,52 @@ VG_TEST_CASE(a_closure_a_suspension_or_a_switch_between_two_clips_starts_the_sec
         f.ctx.suspendMedia(true);
         push();
         VG_CHECK(worker.step() == Step::Idle);
-        f.ctx.media_barrier.resume();
+        resume();
     } });
     VG_CHECK(written == (Pts { boundary + 2, boundary + 3 }));
+
+    // The schedule closes and opens again inside the second clip's preparation, which kept the key frame to continue
+    // from, the frame arriving while it is closed.
+    std::tie(boundary, written) = pair({ .preparation = [&] {
+        f.ctx.publishScheduleGate(false);
+        push();
+        f.ctx.publishScheduleGate(true);
+    } });
+    VG_CHECK(written == (Pts { boundary + 5, boundary + 6 }));
+
+    // Media is suspended after the second clip's preparation, before its writer is built, so the suspension has no
+    // writer to wait for.
+    std::tie(boundary, written) = pair({ .before_writer = [&] {
+        f.ctx.suspendMedia(true);
+        push();
+        resume();
+    } });
+    VG_CHECK(written == (Pts { boundary + 5, boundary + 6 }));
+
+    // The schedule closes after the second clip's admission and opens again only once its preparation brought its
+    // frames, before its writer is built.
+    std::tie(boundary, written) = pair({ .after_admission = closeSchedule, .before_writer = openSchedule });
+    VG_CHECK(written == (Pts { boundary + 4, boundary + 5 }));
+
+    // Media is suspended as the worker claims the second clip, past its check of the pause, and resumed only once
+    // that clip's preparation brought its frames, before its writer is built.
+    const auto suspend = [&] { f.ctx.suspendMedia(true); };
+    std::tie(boundary, written) = pair({ .at_claim = suspend, .before_writer = resume });
+    VG_CHECK(written == (Pts { boundary + 4, boundary + 5 }));
+
+    // A closure between the clips leaves the second one nothing to continue from, and a key frame arrives during
+    // another closure inside its preparation: the clip does not start at that one.
+    const auto keyFrameWhileClosed = [&] {
+        f.ctx.publishScheduleGate(false);
+        f.pushKeyFrame();
+        f.ctx.publishScheduleGate(true);
+    };
+    std::tie(boundary, written) = pair({ .between = closeAndReopen, .preparation = keyFrameWhileClosed });
+    VG_CHECK(written == (Pts { boundary + 5, boundary + 6 }));
+
+    // A closure inside the first clip's preparation starts that clip fresh, and the second continues from it.
+    std::tie(boundary, written) = pair({ .first_preparation = closeAndReopen, .between = push });
+    VG_CHECK(written == (Pts { boundary, boundary + 1 }));
 
     // A closure, then a suspension, too short for the first clip to see: it completes, but the second starts fresh.
     std::tie(boundary, written) = pair({ .during_first = closeAndReopen, .between = push });

@@ -32,7 +32,8 @@ using namespace vigil::types;
 //   void markFailed();                                                   before the failed task is completed
 //   std::string_view name() const;
 //
-// The writer W runs its task with operator() and provides endTime(), boundaryKeyFrame(), and takePublication().
+// The writer W runs its task with operator() and provides endTime(), boundaryKeyFrame(), and takePublication(). A
+// continuous clip's backlog may be prepared again, empty, once its writer is built.
 template<typename Adapter>
 class FileChannelWorker final
 {
@@ -95,8 +96,10 @@ private:
         VG_LOG(_ctx.log, VG_LOG_LEVEL_DEBUG, "Starting a ", channelName(), " writer task for ", _adapter.name());
         auto admission = std::move(task->reservation); // released after publication, or at once on a throw
         const bool continuous = task->kind == FileTask::Kind::Continuous;
-        // Read before the backlog is prepared: a break from here on ends this clip's continuity with the next one
-        const auto breaks = _ctx.continuity_breaks.load(std::memory_order_acquire);
+        // Read before the backlog is prepared and again once the writer is built, after its media admission: a break
+        // that begins or ends in between starts this clip fresh, and a later one is left to the writer's gates and
+        // ends its continuity with the next clip
+        auto breaks = _ctx.continuity_breaks.load(std::memory_order_acquire);
         const auto boundary = std::exchange(_boundary, std::nullopt);
         auto status = WriteEvent::Status::Failed;
         auto end = std::chrono::steady_clock::now() + task->settings->interval; // a constructor failure holds from here
@@ -110,6 +113,12 @@ private:
             }
             auto writer = _adapter.createWriter(task);
             end = writer->endTime(); // the interval counts from the writer's start
+            const auto latest = _ctx.continuity_breaks.load(std::memory_order_acquire);
+            if (continuous && latest != breaks)
+            {
+                breaks = latest;
+                _adapter.prepareContinuousClip(std::nullopt);
+            }
             status = (*writer)()->status.load(std::memory_order_acquire);
             const auto boundary_key_frame = writer->boundaryKeyFrame();
             auto publication = writer->takePublication(); // the thumbnail is generated under the operation
@@ -170,8 +179,8 @@ private:
     const size_t _consecutive_failure_max;
     size_t _consecutive_failures = 0;
     // The key frame the last task ended on, when it was a continuous clip completed on one and published, left for the
-    // next clip, with the continuity breaks read before that clip and its Video revision: the next clip continues from
-    // it only while neither has moved
+    // next clip, with the continuity breaks read once that clip's writer was built and its Video revision: the next
+    // clip continues from it only while neither has moved
     struct Boundary
     {
         std::chrono::steady_clock::time_point key_frame;
