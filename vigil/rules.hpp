@@ -23,7 +23,6 @@
 #include <variant>
 #include <vector>
 
-#include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -860,9 +859,11 @@ private:
         return _fd >= 0;
     }
 
+    // Never blocks: the socket is non-blocking before the connect, which for a Unix stream socket completes at once or
+    // fails (EAGAIN while the peer's accept queue is full); the next evaluation tries again.
     void openSocket(const Context &ctx) const noexcept
     {
-        _fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        _fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
         if (_fd < 0)
         {
             VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create Unix socket for TTY '", _socket_path,
@@ -889,18 +890,7 @@ private:
             return;
         }
 
-        auto flags = fcntl(_fd, F_GETFL, 0);
-        auto ret = fcntl(_fd, F_SETFL, flags | O_NONBLOCK);
-        if (ret < 0)
-        {
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to set non-blocking flags for Unix socket at '", _socket_path,
-                "': ", strerror(errno), ", code: ", ret);
-            closeSocket();
-            return;
-        }
-
-        VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Connected to Unix socket at '", _socket_path, "' with fd ", _fd,
-            ", flags set to:", flags);
+        VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Connected to Unix socket at '", _socket_path, "' with fd ", _fd);
 
         _cmd_pos = 0;
         std::fill(_buffer.begin(), _buffer.end(), 0);

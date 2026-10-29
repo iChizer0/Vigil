@@ -292,7 +292,7 @@ Rule events from a GPIO rule (the rule callback and `dLastRuleEventOwner`) carry
 }
 ```
 
-Rule events from a TTY rule carry the command as the rule ID and the TTY name as the source ID.
+Rule events from a TTY rule carry the command as the rule ID and the TTY name as the source ID. The rule connects to the TTY's socket when it is selected and tries again on each evaluation while it is not connected; a peer that is not accepting connections blocks neither the selection nor the evaluation.
 
 #### HTTP Rule
 

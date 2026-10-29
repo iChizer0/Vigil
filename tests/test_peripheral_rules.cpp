@@ -498,6 +498,35 @@ VG_TEST_CASE(tty_rule_reads_more_than_its_buffer_in_one_evaluation)
     VG_CHECK((*rule)(f.ctx) == nullptr);
 }
 
+VG_TEST_CASE(tty_rule_is_not_blocked_by_a_peer_whose_accept_queue_is_full)
+{
+    // Two connections the peer does not accept yet fill its backlog of one. The rule's connect then fails at once
+    // instead of waiting for a free slot, and once the peer accepts again a later evaluation connects.
+    TTYFixture f;
+    const auto fill = [&f] {
+        AutoCloseFD fd(::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
+        sockaddr_un addr {};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, f.peer.path.c_str(), sizeof(addr.sun_path) - 1);
+        if (!fd || ::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
+            throw std::runtime_error("the filler could not connect");
+        return fd;
+    };
+    const AutoCloseFD fillers[] = { fill(), fill() };
+
+    // Refused at once, and again at an evaluation: once the peer has accepted the fillers, nothing else is queued
+    const auto rule = std::make_unique<TTYRule>(
+        TTYRuleConfig(nlohmann::json { { "sName", "tty0" }, { "sCommand", "go" } }, f.ctx), f.ctx);
+    VG_CHECK((*rule)(f.ctx) == nullptr);
+    VG_REQUIRE(f.peer.acceptWithin(kWait));
+    VG_REQUIRE(f.peer.acceptWithin(kWait));
+    VG_CHECK(!f.peer.acceptWithin(std::chrono::milliseconds(0)));
+    VG_CHECK((*rule)(f.ctx) == nullptr); // connected now, with nothing to read yet
+    f.peer.accept();
+    f.peer.send("go");
+    VG_CHECK((*rule)(f.ctx) != nullptr);
+}
+
 VG_TEST_CASE(sound_event_rule_config_rejects_a_negative_window_and_malformed_filters)
 {
     SEDFixture f;
