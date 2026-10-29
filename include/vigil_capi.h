@@ -4,7 +4,7 @@
 #ifdef VG_CAPI_VERSION
 #error "Duplicate definition of VG_CAPI_VERSION"
 #else
-#define VG_CAPI_VERSION "2026.10.28"
+#define VG_CAPI_VERSION "2026.10.29"
 #endif
 
 #include "vigil_ctypes.h"
@@ -28,7 +28,8 @@ extern "C" {
  * EDEADLK from a callback on the thread of another C API call, EFAULT when the runtime could not be built (the cause
  * goes to log_cb).
  * @note May launch child threads for media processing and HTTP serving, and the Unix socket path used for TTY should be
- * created by the caller.
+ * created by the caller. Storage management runs mount, fsck, and mkfs as child processes: the host leaves SIGCHLD at
+ * its default disposition and does not reap Vigil's children, or those commands are reported as failed.
  */
 vg_sta_e vg_service_init(vg_config_t *config);
 

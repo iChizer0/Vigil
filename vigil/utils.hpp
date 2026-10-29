@@ -88,7 +88,7 @@ public:
         if ((status = ::posix_spawn_file_actions_init(&file_actions)) != 0) [[unlikely]]
             return -status;
 
-        if ((::posix_spawn_file_actions_addclosefrom_np(&file_actions, 3)) != 0) [[unlikely]]
+        if ((status = ::posix_spawn_file_actions_addclosefrom_np(&file_actions, 3)) != 0) [[unlikely]]
             goto l_check_status;
 
         if ((status
@@ -104,12 +104,14 @@ public:
         if (status != 0)
             return -status;
 
+        // A wait that fails other than with EINTR leaves the status unknown, as when SIGCHLD is ignored or the host
+        // reaps the child itself (ECHILD): an error, never a success
         if (signal == nullptr)
         {
             while (::waitpid(pid, &status, 0) == -1)
             {
                 if (errno != EINTR)
-                    return -1;
+                    return -errno;
             }
         }
         else
@@ -124,7 +126,7 @@ public:
                 {
                     if (errno == EINTR)
                         continue;
-                    break;
+                    return -errno;
                 }
 
                 int cur_sig = signal->load(std::memory_order_acquire);

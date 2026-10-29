@@ -8,6 +8,7 @@
 // pins is the absence of work over time.
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include <signal.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -36,6 +38,7 @@
 #include "vigil/slot.hpp"
 #include "vigil/storage.hpp"
 #include "vigil/types.hpp"
+#include "vigil/utils.hpp"
 
 #include "check.hpp"
 #include "fake_config.hpp"
@@ -953,6 +956,24 @@ VG_TEST_CASE(the_internal_device_keeps_its_slot_kind_across_a_bounce_of_its_node
     VG_CHECK_EQ(second->mountPath().string(), f.internal_mount);
     VG_CHECK_EQ(storage.ejectSlot(dev_path), ENOTSUP); // refused for the internal Slot, as for the scan's
     VG_CHECK_EQ(storage.getStatus().slots_status.size(), size_t { 1 });
+}
+
+VG_TEST_CASE(a_child_the_host_reaps_is_reported_as_a_failure)
+{
+    // The Slot's commands run through Execute. With SIGCHLD ignored the kernel reaps the child, so its exit status is
+    // unknowable: an error, where the default disposition reports the status itself.
+    std::atomic<int> sig = 0;
+    VG_CHECK_EQ(utils::Execute("sh", { "-c", "exit 3" })(&sig), 3);
+    VG_CHECK_EQ(utils::Execute("sh", { "-c", "exit 3" })(nullptr), 3);
+    struct sigaction ignore {};
+    struct sigaction previous {};
+    ignore.sa_handler = SIG_IGN;
+    VG_REQUIRE(::sigaction(SIGCHLD, &ignore, &previous) == 0);
+    const auto polled = utils::Execute("sh", { "-c", "exit 0" })(&sig);
+    const auto waited = utils::Execute("sh", { "-c", "exit 0" })(nullptr);
+    VG_REQUIRE(::sigaction(SIGCHLD, &previous, nullptr) == 0);
+    VG_CHECK_EQ(polled, -ECHILD);
+    VG_CHECK_EQ(waited, -ECHILD);
 }
 
 VG_TEST_MAIN()
