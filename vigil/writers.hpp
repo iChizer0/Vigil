@@ -179,8 +179,15 @@ public:
         _slot.writerCountRef().fetch_add(1, std::memory_order_acq_rel);
     }
 
+    // A Failed task's file is removed here (a Canceled one created none); a recorded one is published, or removed, by
+    // the Slot.
     virtual ~SlotAdaptedWriter() noexcept
     {
+        if (this->event()->status.load(std::memory_order_acquire) == WriteEvent::Status::Failed)
+        {
+            std::error_code ec;
+            std::filesystem::remove_all(_cache_file_info.path, ec);
+        }
         _slot.writerCountRef().fetch_sub(1, std::memory_order_acq_rel);
     }
 

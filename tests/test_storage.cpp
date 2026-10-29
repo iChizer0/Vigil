@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -33,12 +34,14 @@
 #include <unistd.h>
 
 #include "vigil/configs.hpp"
+#include "vigil/constants.hpp"
 #include "vigil/context.hpp"
 #include "vigil/json.hpp" // IWYU pragma: keep
 #include "vigil/slot.hpp"
 #include "vigil/storage.hpp"
 #include "vigil/types.hpp"
 #include "vigil/utils.hpp"
+#include "vigil/writers.hpp"
 
 #include "check.hpp"
 #include "fake_config.hpp"
@@ -150,6 +153,12 @@ struct SlotTestAccess
     static std::filesystem::path recordCachePath(const Slot &slot)
     {
         return slot.getRecordCachePath();
+    }
+
+    // The stats the manager's round would have read; a never-enabled Slot has none.
+    static void setStats(Slot &slot, const SlotStats &stats)
+    {
+        slot._stats.store(stats, std::memory_order_release);
     }
 
     // The manager's state sync of a READY or SATURATED Slot, with the stats its round would have read and no index
@@ -457,6 +466,43 @@ struct UeventPeer
         append("DEVTYPE=" + std::string(devtype));
         if (::send(fd, msg.data(), msg.size(), 0) != static_cast<ssize_t>(msg.size()))
             throw std::runtime_error("send failed");
+    }
+};
+
+// A host sink that creates the file it is given and then fails: a video write that fails at the first frame, an image
+// capture that fails after writing.
+struct FailingSink
+{
+    static inline std::string created_path;
+
+    static vg_sta_e Create(int *fd, const char *path, const char *, void *)
+    {
+        created_path = path;
+        *fd = ::open(path, O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
+        return *fd < 0 ? EIO : 0;
+    }
+
+    static vg_sta_e WriteVideo(int, const vg_video_frame_t *, void *)
+    {
+        return EIO;
+    }
+
+    static vg_sta_e WriteAudio(int, const vg_audio_frame_t *, void *)
+    {
+        return EIO;
+    }
+
+    static vg_sta_e Finish(int fd, void *)
+    {
+        ::close(fd);
+        return 0;
+    }
+
+    static vg_sta_e Capture(const char *path, const char *, void *)
+    {
+        created_path = path;
+        std::ofstream(path) << "partial";
+        return EIO;
     }
 };
 
@@ -974,6 +1020,52 @@ VG_TEST_CASE(a_child_the_host_reaps_is_reported_as_a_failure)
     VG_REQUIRE(::sigaction(SIGCHLD, &previous, nullptr) == 0);
     VG_CHECK_EQ(polled, -ECHILD);
     VG_CHECK_EQ(waited, -ECHILD);
+}
+
+VG_TEST_CASE(a_failed_automatic_task_leaves_no_file_in_the_cache)
+{
+    // Over a never-enabled Slot whose gates a triggered task passes (READY and registered, free space, rules enabled,
+    // the channel revision unchanged): a video sink that fails at the first frame and an image capture that fails
+    // after writing each fail their task with no publication, and the file the host created goes with the writer.
+    Fixture f;
+    auto cfg = MakeFakeConfig(f.root.c_str());
+    cfg.media.video_file_create_cb = &FailingSink::Create;
+    cfg.media.video_file_finish_cb = &FailingSink::Finish;
+    cfg.media.video_file_write_video_frame_cb = &FailingSink::WriteVideo;
+    cfg.media.video_file_write_audio_frame_cb = &FailingSink::WriteAudio;
+    cfg.media.image_capture_cb = &FailingSink::Capture;
+    Context ctx(cfg);
+    Slot slot(ctx, f.dev, f.root + "/failed-mnt", /*removable*/ true, /*internal*/ false, "DCIM");
+    std::filesystem::create_directories(SlotTestAccess::recordCachePath(slot));
+    SlotTestAccess::openReady(slot);
+    SlotTestAccess::setStats(slot, SlotStats(FileSize { 1 } << 40, FileSize { 1 } << 40));
+    ctx.record_rule_enabled.store(true);
+
+    const auto settings = [](CaptureType type, const char *format) {
+        return FileWriterSettings::create(type, format, std::chrono::milliseconds(5000),
+            constants::kRecordWriterPrefixDefault, constants::kVideoClipLengthDefault,
+            WaterMarks::from(format, 1, nullptr));
+    };
+    const auto event = [] {
+        return std::make_shared<WriteEvent>(std::chrono::steady_clock::now(), int64_t { 1000 }, uint64_t { 42 });
+    };
+    const auto run = [](auto writer) {
+        VG_CHECK((*writer)()->status.load() == WriteEvent::Status::Failed);
+        VG_CHECK(!writer->takePublication());
+        VG_CHECK(std::filesystem::is_regular_file(FailingSink::created_path)); // the host's file, until the writer goes
+        writer.reset();
+        VG_CHECK(!std::filesystem::exists(FailingSink::created_path));
+    };
+
+    uint8_t data[4] = { 1, 2, 3, 4 };
+    const vg_video_frame_t frame { .pts = 1, .data = data, .bytes_len = sizeof data, .key_frame = true };
+    ctx.slot_media_buffer.enqueue(MediaFrame(frame));
+    run(std::make_unique<writers::VideoWriter<writers::SlotAdaptedWriter<Slot>>>(std::ref(slot),
+        ctx.action_settings.channelRevision(CaptureType::Video), FileTask::Kind::Triggered, std::ref(ctx),
+        settings(CaptureType::Video, "MP4"), event()));
+    run(std::make_unique<writers::ImageWriter<writers::SlotAdaptedWriter<Slot>>>(std::ref(slot),
+        ctx.action_settings.channelRevision(CaptureType::Image), FileTask::Kind::Triggered, std::ref(ctx),
+        settings(CaptureType::Image, "JPG"), event()));
 }
 
 VG_TEST_MAIN()
