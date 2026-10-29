@@ -21,19 +21,8 @@ namespace vigil::workers {
 using namespace vigil::constants;
 using namespace vigil::types;
 
-// The per-task loop of one automatic file channel, over an adapter that stands for the Slot it writes to:
-//
-//   bool stopRequested() const;
-//   bool isReadyToWrite() const;
-//   uint64_t registration() const;                                       only tasks bound to it are claimed
-//   std::unique_ptr<W> createWriter(const std::shared_ptr<FileTask> &);  throws when it cannot be built
-//   bool publish(CacheFileInfo &&);                                      false when the file could not be published
-//   void prepareContinuousClip(std::optional<steady_clock::time_point> boundary);
-//   void markFailed();                                                   before the failed task is completed
-//   std::string_view name() const;
-//
-// The writer W runs its task with operator() and provides endTime(), boundaryKeyFrame(), and takePublication(). A
-// continuous clip's backlog may be prepared again, empty, once its writer is built.
+// The per-task loop of one automatic file channel, over an adapter that stands for the Slot it writes to. A continuous
+// clip's backlog may be prepared again, empty, once its writer is built.
 template<typename Adapter>
 class FileChannelWorker final
 {
