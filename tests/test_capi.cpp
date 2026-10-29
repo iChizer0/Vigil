@@ -14,6 +14,8 @@
 #include <system_error>
 #include <thread>
 
+#include "inference.pb.h"
+
 #include "vigil/constants.hpp"
 #include "vigil/json.hpp" // IWYU pragma: keep
 #include "vigil_capi.h"
@@ -452,6 +454,30 @@ VG_TEST_CASE(a_callback_on_the_thread_of_a_c_api_call_can_call_the_c_api_but_not
     VG_REQUIRE(events.size() == size_t { 1 });
     VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_HTTP);
     VG_CHECK_EQ(vg_service_deinit(), 0); // outside any call, the runtime still exists
+}
+
+VG_TEST_CASE(a_negative_inference_timestamp_is_refused)
+{
+    // The event time seeds the owner UIDs, which a negative one would wrap. Refused before the delivery is read, so
+    // for a direct EVENT and a FRAME alike; 0 is accepted.
+    Fixture f;
+    VG_REQUIRE(vg_service_init(&f.config) == 0);
+    ::InferenceResult message;
+    message.set_source_id("cam");
+    message.set_delivery(INFERENCE_DELIVERY_EVENT);
+    const auto enqueue = [&message](int64_t timestamp_ms) {
+        message.set_timestamp_ms(timestamp_ms);
+        const auto bytes = message.SerializeAsString();
+        return vg_inference_enqueue_protobuf(bytes.data(), bytes.size());
+    };
+    VG_CHECK_EQ(enqueue(-1), EINVAL);
+    VG_CHECK_EQ(enqueue(0), 0);
+    message.set_delivery(INFERENCE_DELIVERY_FRAME);
+    auto *entry = message.mutable_detection()->add_entries();
+    entry->set_class_name("person");
+    entry->set_score(0.9f);
+    VG_CHECK_EQ(enqueue(-1), EINVAL);
+    VG_CHECK_EQ(enqueue(1), 0);
 }
 
 VG_TEST_MAIN()

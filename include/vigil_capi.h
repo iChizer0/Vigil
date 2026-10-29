@@ -110,9 +110,10 @@ vg_sta_e vg_media_scoped_resume_write(bool reset_media_queue);
  *
  * @param data Pointer to the protobuf-encoded message buffer.
  * @param data_len Length of the protobuf buffer in bytes.
- * @return vg_sta_e 0 when accepted, otherwise error status.
+ * @return vg_sta_e 0 when accepted, EINVAL for a null, empty, or oversized buffer, one that does not parse, or a
+ * negative timestamp_ms, ENOTSUP for a FRAME without a supported result, otherwise an error status.
  * @note The message's timestamp_ms is the event time in Unix milliseconds, reported as such for FRAME and direct
- * EVENT owners (0 too: Vigil never substitutes the current time); it must not be negative.
+ * EVENT owners (0 too: Vigil never substitutes the current time); a negative one is refused.
  */
 vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len);
 

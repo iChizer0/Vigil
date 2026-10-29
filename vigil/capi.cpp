@@ -251,6 +251,8 @@ vg_sta_e vg_inference_enqueue_protobuf(const void *data, size_t data_len)
         ::InferenceResult proto_result;
         if (!proto_result.ParseFromArray(data, static_cast<int>(data_len)))
             return EINVAL;
+        if (proto_result.timestamp_ms() < 0) // the event time, which seeds the owner UIDs
+            return EINVAL;
 
         vigil::InferenceResult result;
         result.timestamp_ms = proto_result.timestamp_ms();
