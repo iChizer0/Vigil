@@ -19,9 +19,11 @@
 
 namespace vigil_c_api {
 
-// The lifecycle mutex serializes init and deinit. The instance mutex guards only the pointer: every other call holds
-// it shared, and init and deinit take it exclusively just to publish or detach it, so the runtime is built and
-// destroyed with no instance lock held and a callback that reenters meanwhile gets ESRCH instead of a deadlock.
+// The lifecycle mutex serializes init and deinit. The instance mutex guards the pointer: every other call holds it
+// shared, and init and deinit take it exclusively just to publish or detach it, so the runtime is built and destroyed
+// with no instance lock held and a callback that reenters meanwhile gets ESRCH instead of a deadlock. The suspend
+// mutex nests inside it, for resume and for init's reset of the count; a suspension holds it through its drain, which
+// deinit has already emptied by the time init runs, so init never waits on a live drain.
 static inline std::mutex vigil_instance_lifecycle_mutex;
 static inline std::shared_mutex vigil_instance_mutex;
 static inline std::atomic<uint64_t> vigil_instance_generation = 0; // bumped whenever an instance is published
@@ -112,14 +114,14 @@ vg_sta_e vg_service_init(vg_config_t *config)
     }
 
     {
+        // Reset with the publication, under both locks in resume's order: a suspension of a previous instance counted
+        // before, which this wipes, or sees the new generation and counts nothing; one of this instance counts after it
         const std::unique_lock lock(vigil_instance_mutex);
+        const std::lock_guard lock2(vigil_instance_scoped_suspend_mutex);
         vigil_instance = std::move(instance);
         vigil_instance_generation.fetch_add(1, std::memory_order_release);
+        vigil_instance_scoped_suspend_count = 0;
     }
-    // Reset after publishing: a suspension of a previous instance still in flight either counted before this
-    // reset, which wipes it, or sees the new generation and counts nothing.
-    const std::lock_guard lock2(vigil_instance_scoped_suspend_mutex);
-    vigil_instance_scoped_suspend_count = 0;
     return 0;
 }
 
