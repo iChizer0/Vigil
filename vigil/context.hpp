@@ -161,7 +161,8 @@ struct Context
     }
 
     // Runs on the rule thread and on HTTP requests. `writer_created` reports file acceptance only, and the result
-    // is true when a channel accepted a task or no file action is enabled.
+    // is true when a channel accepted a task or no file action is enabled. The event lists, per file channel, the
+    // task accepted for it, else the one PENDING or WRITING as the channel refused it.
     bool dispatchRuleEvent(std::shared_ptr<EventOwner> owner) const noexcept
     {
         if (!owner)
@@ -172,13 +173,21 @@ struct Context
         try
         {
             last_dispatched_owner.set(owner);
+            uint64_t file_ids[2] = {};
+            size_t file_ids_len = 0;
             if (loaded.settings)
             {
                 file_action_enabled = loaded.settings->fileChannel() != nullptr;
-                if (file_channels.photo.tryAccept(owner, loaded))
+                uint64_t photo_file_id = 0;
+                uint64_t video_file_id = 0;
+                if (file_channels.photo.tryAccept(owner, loaded, &photo_file_id))
                     accepted = true;
-                if (file_channels.video.tryAccept(owner, loaded))
+                if (file_channels.video.tryAccept(owner, loaded, &video_file_id))
                     accepted = true;
+                if (photo_file_id != 0)
+                    file_ids[file_ids_len++] = photo_file_id;
+                if (video_file_id != 0)
+                    file_ids[file_ids_len++] = video_file_id;
                 if (loaded.settings->sound_enabled)
                     sound_executor.tryTrigger();
             }
@@ -191,7 +200,9 @@ struct Context
                     .source_id = owner->source_id.c_str(),
                     .source_delivery = EventOwner::SourceDeliveryString(owner->source_delivery),
                     .writer_created = accepted,
-                    .dispatch_timestamp = owner->dispatch_timestamp };
+                    .dispatch_timestamp = owner->dispatch_timestamp,
+                    .file_ids = file_ids,
+                    .file_ids_len = file_ids_len };
                 c_api.basic.on_rule_event_cb(&evt);
             }
         }
@@ -442,12 +453,14 @@ struct Context
         }
 
         // Checks the gates, the channel's revision, and the Slot's admission in one critical section, so no task is
-        // created for old settings, an old Slot, or a closed gate. Null when refused.
+        // created for old settings, an old Slot, or a closed gate. Null when refused. `file_id`, when given, receives
+        // the id of the task the event lists, read in that section: the accepted one, else the one PENDING or
+        // WRITING, else 0.
         std::shared_ptr<FileTask> tryAccept(const std::shared_ptr<EventOwner> &owner,
-            const SharedActionSettings::Loaded &loaded)
+            const SharedActionSettings::Loaded &loaded, uint64_t *file_id = nullptr)
         {
             return accept(FileTask::Kind::Triggered, owner, loaded.settings ? loaded.settings->channel(_type) : nullptr,
-                loaded);
+                loaded, file_id);
         }
 
         // The same without the rule flag, which does not gate a continuous clip. Null on the Photo channel.
@@ -541,14 +554,15 @@ struct Context
 
     private:
         std::shared_ptr<FileTask> accept(FileTask::Kind kind, const std::shared_ptr<EventOwner> &owner,
-            const std::shared_ptr<FileWriterSettings> &settings, const SharedActionSettings::Loaded &loaded)
+            const std::shared_ptr<FileWriterSettings> &settings, const SharedActionSettings::Loaded &loaded,
+            uint64_t *file_id = nullptr)
         {
-            if (!settings)
-                return nullptr;
             const bool continuous = kind == FileTask::Kind::Continuous;
             const auto steady_time = _ctx.shared_time.steadyTime();
             const std::unique_lock lock(_mutex);
-            if (_current || _ctx.action_settings.channelRevision(_type) != loaded.channelRevision(_type))
+            if (file_id)
+                *file_id = inProgressFileIdUnsafe();
+            if (!settings || _current || _ctx.action_settings.channelRevision(_type) != loaded.channelRevision(_type))
                 return nullptr;
             if ((!continuous && !_ctx.record_rule_enabled.load(std::memory_order_relaxed))
                 || !_ctx.schedule_open.load(std::memory_order_acquire) || _ctx.media_barrier.isPaused())
@@ -556,14 +570,29 @@ struct Context
             auto admitted = _ctx.slot_admission.tryAdmit(loaded.settings->watermarks, settings->watermarks.task_bytes);
             if (!admitted.registration)
                 return nullptr;
-            // The owner's event time, not the current time; a continuous clip has the current time and UID 0
-            auto event = continuous
-                             ? std::make_shared<WriteEvent>(steady_time, _ctx.shared_time.unixTime(), uint64_t { 0 })
-                             : std::make_shared<WriteEvent>(steady_time, owner->timestamp, owner->uid);
+            // The owner's event time, not the current time; a continuous clip has the current time and UID 0. The
+            // file id is minted here, so the rule and file callbacks name the file by it
+            const auto unix_time = _ctx.shared_time.unixTime();
+            const auto minted = EventOwner::NextUid(static_cast<uint64_t>(unix_time));
+            auto event = std::make_shared<WriteEvent>(steady_time, continuous ? unix_time : owner->timestamp,
+                continuous ? uint64_t { 0 } : owner->uid, minted);
             _current = std::make_shared<FileTask>(kind, _type, owner, settings, loaded.channelRevision(_type),
                 _ctx.file_task_sequence.fetch_add(1, std::memory_order_relaxed) + 1, admitted.registration,
                 std::move(admitted.reservation), std::move(event));
+            if (file_id)
+                *file_id = _current->event->file_id;
             return _current;
+        }
+
+        // Call with the lock held: the id of the task PENDING or WRITING, else 0.
+        uint64_t inProgressFileIdUnsafe() const noexcept
+        {
+            if (!_current)
+                return 0;
+            const auto status = _current->event->status.load(std::memory_order_acquire);
+            return status == WriteEvent::Status::Pending || status == WriteEvent::Status::Writing
+                       ? _current->event->file_id
+                       : 0;
         }
 
         // Call with the lock held. Releases the reservation of a task retired unrun; a claimed task's is its worker's.

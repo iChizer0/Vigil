@@ -90,11 +90,12 @@ struct WriteEvent
     const std::chrono::steady_clock::time_point timepoint;
     const int64_t timestamp;
     const uint64_t owner_uid;
+    const uint64_t file_id; // the file's identity in the rule and file callbacks; 0 outside an automatic task
 
-    WriteEvent() : status(Status::Pending), timepoint(), timestamp(0), owner_uid(0) { }
+    WriteEvent() : status(Status::Pending), timepoint(), timestamp(0), owner_uid(0), file_id(0) { }
 
-    WriteEvent(std::chrono::steady_clock::time_point tp, int64_t ts, uint64_t o)
-        : status(Status::Pending), timepoint(tp), timestamp(ts), owner_uid(o)
+    WriteEvent(std::chrono::steady_clock::time_point tp, int64_t ts, uint64_t o, uint64_t file = 0)
+        : status(Status::Pending), timepoint(tp), timestamp(ts), owner_uid(o), file_id(file)
     {
     }
 

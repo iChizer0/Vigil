@@ -344,6 +344,7 @@ VG_TEST_CASE(continuous_recording_is_accepted_through_the_c_api_and_suppresses_t
     VG_REQUIRE(events.size() == size_t { 1 });
     VG_CHECK_EQ(events[0].type, VG_RULE_TYPE_HTTP);
     VG_CHECK(!events[0].writer_created);
+    VG_CHECK(events[0].file_ids.empty()); // no Slot, so no clip in progress
     nlohmann::json always_on;
     always_on["sCurrentSelected"] = "ALWAYS_ON";
     VG_CHECK_EQ(Post(&vg_http_api_rule_record_config_post, always_on), vigil::constants::kEndpointErrorBase + EINVAL);

@@ -128,6 +128,13 @@ typedef struct vg_rule_evt_t
                                     written, and nothing about Sound. */
     int64_t dispatch_timestamp;  /**< When Vigil created the event, in Unix milliseconds; equals timestamp for owners
                                     that observe their condition themselves. */
+    const uint64_t *file_ids;    /**< The files for this event, as the file_id of their file callbacks, borrowed for
+                                    the call and never null: per file channel, Photo before Video, the task accepted
+                                    for it, else the one PENDING or WRITING as the channel refused it, a continuous
+                                    clip included; a channel with neither adds nothing, and an id's channel is told
+                                    by the extension of its file callback's path, or by rule info while the task is
+                                    held. The tasks may still be canceled or fail. */
+    size_t file_ids_len;         /**< The number of file_ids; 0 when no channel has one. */
 } vg_rule_evt_t;
 
 typedef enum vg_file_evt_op_type_e {
@@ -135,8 +142,9 @@ typedef enum vg_file_evt_op_type_e {
 } vg_file_evt_op_type_e;
 
 /**
- * One published file, borrowed with its strings for the duration of on_file_event_cb. A file serves at most one rule
- * event; a rule event may produce zero, one, or two files (Photo and Video).
+ * One published file, borrowed with its strings for the duration of on_file_event_cb. A file is created for at most
+ * one rule event and listed by every one dispatched while it was PENDING or WRITING; a rule event may produce zero,
+ * one, or two files (Photo and Video).
  */
 typedef struct vg_file_evt_t
 {
@@ -146,6 +154,8 @@ typedef struct vg_file_evt_t
     const char *attributes; /**< The task's status at publication: COMPLETED or INTERRUPTED. */
     int64_t timestamp;      /**< Publication time in Unix milliseconds, not the rule event's. */
     uint64_t event_uid;     /**< The rule event's uid; 0 for a continuous recording clip. */
+    uint64_t file_id;       /**< This file's identity, never 0, as the rule events list it and rule info reports it
+                               (iFileID). */
 } vg_file_evt_t;
 
 /**

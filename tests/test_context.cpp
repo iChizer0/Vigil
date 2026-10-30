@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "vigil/configs.hpp"
 #include "vigil/constants.hpp"
@@ -257,6 +258,10 @@ VG_TEST_CASE(rule_event_is_reported_on_every_dispatch_but_the_writer_event_is_cr
     VG_CHECK_EQ(events[0].uid, owner1->uid);
     VG_CHECK_EQ(events[0].timestamp, int64_t { 5000 });
     VG_CHECK_EQ(events[0].dispatch_timestamp, owner1->dispatch_timestamp);
+    VG_CHECK(events[0].file_ids == std::vector<uint64_t> { current->event->file_id }); // the accepted clip
+    VG_CHECK(current->event->file_id != 0 && current->event->file_id != owner1->uid);
+    VG_CHECK(events[1].file_ids == std::vector<uint64_t> { current->event->file_id }); // the clip in progress
+    VG_CHECK(!events[0].file_ids_is_null && !events[1].file_ids_is_null);
     VG_CHECK(!events[0].id_is_null); // borrowed strings are empty, never null
     VG_CHECK_EQ(events[0].id, "");
     VG_CHECK(!events[0].source_id_is_null);
@@ -412,6 +417,16 @@ VG_TEST_CASE(dispatch_accepts_into_every_enabled_channel_and_reports_either_acce
     VG_REQUIRE(events.size() == size_t { 3 });
     VG_CHECK(events[0].writer_created && !events[1].writer_created && events[2].writer_created);
     VG_CHECK_EQ(events[1].uid, owner2->uid);
+
+    // Each event lists, Photo before Video, the task accepted for it, else the one PENDING or WRITING as it was
+    // refused.
+    const auto photo_id = photo.current()->event->file_id;    // owner1's, held throughout
+    const auto first_clip = video.last()->event->file_id;     // owner1's clip, retired above
+    const auto second_clip = video.current()->event->file_id; // owner3's
+    VG_CHECK(photo_id != first_clip && first_clip != second_clip);
+    VG_CHECK((events[0].file_ids == std::vector<uint64_t> { photo_id, first_clip }));
+    VG_CHECK((events[1].file_ids == std::vector<uint64_t> { photo_id, first_clip })); // both PENDING at owner2's
+    VG_CHECK((events[2].file_ids == std::vector<uint64_t> { photo_id, second_clip }));
 
     // A task is bound to the settings the dispatcher loaded: a channel whose settings were republished since
     // refuses it, and the other channel is unaffected.

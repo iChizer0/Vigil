@@ -28,6 +28,8 @@ struct RecordedRuleEvent
     std::string source_id;
     std::string source_delivery;
     bool writer_created;
+    std::vector<uint64_t> file_ids;
+    bool file_ids_is_null;
     bool id_is_null;
     bool source_id_is_null;
     bool source_delivery_is_null;
@@ -54,6 +56,9 @@ public:
                 .source_id = evt->source_id ? evt->source_id : "",
                 .source_delivery = evt->source_delivery ? evt->source_delivery : "",
                 .writer_created = evt->writer_created,
+                .file_ids = evt->file_ids ? std::vector<uint64_t>(evt->file_ids, evt->file_ids + evt->file_ids_len)
+                                          : std::vector<uint64_t> {},
+                .file_ids_is_null = evt->file_ids == nullptr,
                 .id_is_null = evt->id == nullptr,
                 .source_id_is_null = evt->source_id == nullptr,
                 .source_delivery_is_null = evt->source_delivery == nullptr,

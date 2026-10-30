@@ -41,13 +41,16 @@ vg_sta_e log_cb(vg_log_level_e level, const char *msg, size_t bytes_len)
 void on_rule_event_cb(const vg_rule_evt_t *evt)
 {
     std::cout << "Rule activated: " << (evt->id ? evt->id : "unknown") << ", event time " << evt->timestamp
-              << ", dispatched " << evt->dispatch_timestamp << std::endl;
+              << ", dispatched " << evt->dispatch_timestamp << ", files";
+    for (size_t i = 0; i < evt->file_ids_len; ++i)
+        std::cout << ' ' << evt->file_ids[i];
+    std::cout << std::endl;
 }
 
 void on_file_event_cb(const vg_file_evt_t *evt)
 {
     std::cout << "File published: " << evt->path << ", " << evt->size_bytes << " bytes, " << evt->attributes
-              << ", rule event " << evt->event_uid << std::endl;
+              << ", rule event " << evt->event_uid << ", file " << evt->file_id << std::endl;
 }
 
 vg_sta_e sound_play_cb(const char *filepath, void *user_data)

@@ -613,6 +613,7 @@ public:
                     obj["sStatus"] = WriteEvent::StatusString(evt->status.load(std::memory_order_relaxed));
                     obj["iTimestamp"] = evt->timestamp;
                     obj["iOwnerUID"] = evt->owner_uid;
+                    obj["iFileID"] = evt->file_id;
                     return obj;
                 };
 

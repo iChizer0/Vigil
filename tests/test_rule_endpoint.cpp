@@ -15,6 +15,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <vector>
 
 #include "vigil/configs.hpp"
 #include "vigil/constants.hpp"
@@ -816,6 +817,8 @@ VG_TEST_CASE(rule_info_reports_the_last_dispatched_owner_and_the_state_of_each_a
     VG_CHECK_EQ(info.at("dLastDispatchedOwner").at("sRuleType").get<std::string>(), "TIMER");
     VG_CHECK_EQ(info.at("dLastRuleEventOwner").at("iUID").get<uint64_t>(), events[0].uid);
     VG_CHECK_EQ(info.at("bReadyForNewEvent").get<bool>(), false);
+    VG_REQUIRE(events[0].file_ids.size() == size_t { 2 }); // Photo, then Video
+    VG_CHECK(events[0].file_ids[0] != events[0].file_ids[1]);
     for (const char *name: { "dPhoto", "dVideo" })
     {
         const auto &channel = info.at("dActionStates").at(name);
@@ -823,6 +826,8 @@ VG_TEST_CASE(rule_info_reports_the_last_dispatched_owner_and_the_state_of_each_a
         VG_CHECK_EQ(channel.at("sState").get<std::string>(), "PENDING");
         VG_CHECK_EQ(channel.at("dEvent").at("sStatus").get<std::string>(), "PENDING");
         VG_CHECK_EQ(channel.at("dEvent").at("iOwnerUID").get<uint64_t>(), events[0].uid);
+        VG_CHECK_EQ(channel.at("dEvent").at("iFileID").get<uint64_t>(), // the id the rule event listed
+            events[0].file_ids[std::string(name) == "dPhoto" ? 0 : 1]);
     }
     VG_CHECK_EQ(info.at("dActionStates").at("dSound").at("bReady").get<bool>(), false);
     VG_CHECK_EQ(info.at("dActionStates").at("dSound").at("sState").get<std::string>(), "PENDING");
@@ -917,12 +922,26 @@ VG_TEST_CASE(rule_info_reports_a_continuous_clip_as_the_video_state_and_not_as_a
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "PENDING");
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("dEvent").at("iOwnerUID").get<uint64_t>(), uint64_t { 0 });
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("bReady").get<bool>(), false);
+    // The refused event lists the clip in progress, so a host can find its footage
+    VG_REQUIRE(events[0].file_ids.size() == size_t { 1 });
+    VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("dEvent").at("iFileID").get<uint64_t>(),
+        events[0].file_ids[0]);
 
     // Claimed: WRITING; completed: IDLE, and still no rule event.
     auto &video = f.ctx->file_channels.video;
     const auto clip = f.claimVideo();
     info = f.endpoint->getRuleInfo();
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "WRITING");
+    // A rule event lists the clip while it is WRITING, and nothing once the clip is held finished
+    f.evaluate();
+    auto later = RuleEventRecorder::take();
+    VG_REQUIRE(later.size() == size_t { 1 });
+    VG_CHECK(later[0].file_ids == std::vector<uint64_t> { clip->event->file_id });
+    clip->event->status.store(WriteEvent::Status::Completed);
+    f.evaluate();
+    later = RuleEventRecorder::take();
+    VG_REQUIRE(later.size() == size_t { 1 });
+    VG_CHECK(later[0].file_ids.empty() && !later[0].file_ids_is_null);
     video.complete(clip, WriteEvent::Status::Completed);
     info = f.endpoint->getRuleInfo();
     VG_CHECK_EQ(info.at("dActionStates").at("dVideo").at("sState").get<std::string>(), "IDLE");

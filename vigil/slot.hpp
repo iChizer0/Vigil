@@ -779,6 +779,7 @@ protected:
                 .attributes = attributes_str,
                 .timestamp = _ctx.shared_time.unixTime(),
                 .event_uid = cache_file_info.event ? cache_file_info.event->owner_uid : 0, // 0 for a continuous clip
+                .file_id = cache_file_info.event ? cache_file_info.event->file_id : 0,
             };
             _ctx.c_api.basic.on_file_event_cb(&file_evt);
         }

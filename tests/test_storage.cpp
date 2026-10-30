@@ -370,9 +370,11 @@ private:
 struct FileEventRecorder
 {
     static inline std::atomic<int> count = 0;
+    static inline std::atomic<uint64_t> last_file_id = 0;
 
-    static void callback(const vg_file_evt_t *)
+    static void callback(const vg_file_evt_t *evt)
     {
+        last_file_id = evt->file_id;
         ++count;
     }
 };
@@ -675,6 +677,7 @@ VG_TEST_CASE(a_publication_that_fails_removes_its_file_and_a_moved_thumbnail_and
     // Over a Slot that was never enabled, its mount path a directory of the case: publication reads no Slot state.
     // Each clip is a cache file with its thumbnail, as a video writer leaves them.
     FileEventRecorder::count = 0;
+    FileEventRecorder::last_file_id = 0;
     Fixture f(FixtureOptions { .on_file_event_cb = &FileEventRecorder::callback });
     Slot slot(*f.ctx, f.dev, f.root + "/publish-mnt", /*removable*/ true, /*internal*/ false, "DCIM");
     const auto root = slot.getRecordRootPath();
@@ -686,7 +689,8 @@ VG_TEST_CASE(a_publication_that_fails_removes_its_file_and_a_moved_thumbnail_and
         VG_REQUIRE(static_cast<bool>(out));
     };
     const auto clip = [&](const std::string &name, const std::string &day) {
-        CacheFileInfo info(std::make_shared<WriteEvent>(std::chrono::steady_clock::now(), 0, uint64_t { 0 }));
+        CacheFileInfo info(
+            std::make_shared<WriteEvent>(std::chrono::steady_clock::now(), 0, uint64_t { 0 }, uint64_t { 77 }));
         info.event->status.store(WriteEvent::Status::Completed);
         info.path = cache / name;
         info.first_level_dir_name = day;
@@ -704,6 +708,7 @@ VG_TEST_CASE(a_publication_that_fails_removes_its_file_and_a_moved_thumbnail_and
     VG_CHECK(std::filesystem::is_regular_file(root / "day-a" / "a.mp4"));
     VG_CHECK(std::filesystem::is_regular_file(thumbnail("day-a", "a.mp4")));
     VG_CHECK_EQ(FileEventRecorder::count.load(), 1);
+    VG_CHECK_EQ(FileEventRecorder::last_file_id.load(), uint64_t { 77 }); // the file id reaches the callback
 
     // A file in the way of the day's directory: nothing moves, and the cache file and its thumbnail are removed.
     write(root / "day-b");
