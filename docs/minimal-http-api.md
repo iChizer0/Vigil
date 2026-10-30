@@ -1,8 +1,10 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2026-10-28
+Revised: 2026-10-29
 Version: 2.0.0
+
+Every `POST` answers with `code`, 0 on success, else 30000 plus the POSIX errno, and `message` on failure; a `GET` carries them only on failure (see Error Handling). The examples show every field once with its type and meaning.
 
 ## Rule API
 
@@ -19,55 +21,62 @@ Get or set rule enablement and the post-trigger actions.
 ```json
 {
     "iSchemaVersion": 2, // Integer, required, must be 2
-    "bRuleEnabled": true, // Boolean, required, enable or disable the evaluation of all rules; the schedule rule takes precedence over the record rule
-    "bContinuousRecordEnabled": false, // Boolean, required, record MP4 clips back to back while the schedule is open, whatever bRuleEnabled is (see below)
+    "bRuleEnabled": true, // Boolean, required, evaluate the rules; the schedule gates them as well
+    "bContinuousRecordEnabled": false, // Boolean, required, record MP4 clips back to back while the schedule is open, whatever bRuleEnabled is
     "dActions": { // Object, required, the post-trigger actions
         "dPhoto": {
             "bEnabled": false, // Boolean, required
-            "sFormat": "JPG", // String, required, case-sensitive, one of: "JPG", "RAW"
-            "iIntervalMs": 5000 // Integer, required, positive, the delay between captures in milliseconds, write duration included
+            "sFormat": "JPG", // String, required, case-sensitive, "JPG" or "RAW"
+            "iIntervalMs": 5000 // Integer, required, positive, in milliseconds: the delay between captures, write included
         },
         "dVideo": {
-            "bEnabled": true, // Boolean, required; the format is always MP4
-            "iIntervalMs": 5000 // Integer, required, positive, the delay between recordings in milliseconds, write duration included
+            "bEnabled": true, // Boolean, required; the format is MP4
+            "iIntervalMs": 5000 // Integer, required, positive, in milliseconds: the delay between recordings, write included
         },
         "dSound": {
             "bEnabled": false, // Boolean, required, play a sound on trigger through the host's playback callback; unavailable without one
-            "sFilePath": "" // String, optional, the absolute path of the audio file the callback plays; empty or absent plays the host's own sound. Vigil checks only that it is absolute
+            "sFilePath": "" // String, optional, the absolute path of the audio file to play; empty or absent plays the host's own sound, and Vigil checks only that it is absolute
         }
     },
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // POST response only, see Error Handling
 }
 ```
 
-The payload is the version-2 record configuration (`record_config.json`). The document is always complete: `GET` returns every field, and `POST` takes the whole document back, so edit the `GET` response and post it; both use the canonical form. Unknown fields are ignored and dropped from the stored document. Only version 2 is read: an external manager migrates older files, and Vigil never rewrites a stored file it cannot read. A first start without `record_config.json` reports every action disabled.
+The payload is the version-2 `record_config.json`, always complete and in the canonical form: `GET` returns every field and `POST` takes the whole document back, so edit the `GET` response and post it. Unknown fields are ignored and dropped from the stored document. Only version 2 is read; an external manager migrates older files, and Vigil never rewrites a file it cannot read. A first start without the file reports every action disabled.
 
-Any combination of actions may be enabled, including none with `bRuleEnabled` true, in which case every rule event is reported and nothing else happens. Photo and Video run independently, each on its own interval, and may both publish a file for one rule event. Sound plays through the host's callback, which receives `sFilePath`, and is never queued: a trigger while one is pending or playing is dropped. A SED rule with Sound enabled can retrigger itself through the microphone; any guard time belongs to the host's playback.
+Any combination of actions may be enabled, including none with `bRuleEnabled` true, when every rule event is reported and nothing else happens. Photo and Video run independently on their own intervals and may both publish a file for one rule event. Sound plays through the host's callback, which receives `sFilePath`, and is never queued: a trigger while one is pending or playing is dropped. A SED rule with Sound enabled can retrigger itself through the microphone; any guard time belongs to the host's playback.
 
-`bContinuousRecordEnabled` records MP4 clips of the target length (`bVideoClipLengthSeconds` in Rule Info) back to back on the video channel whenever the schedule is open and storage and media allow, whatever `bRuleEnabled` is. Its clips are not rule events: no rule callback reports them, and their files carry `event_uid` 0; a rule event dispatched while a clip is pending or being written lists the clip's file id in its `file_ids`, as it lists a triggered clip accepted for it or already in progress, so a host can find a trigger's footage (see `include/vigil_ctypes.h`). While it is set, `dVideo` keeps its stored value but no triggered video is admitted for a rule event; Photo and Sound are unaffected, and an HTTP activation then needs storage only when Photo is enabled. Switching either way finishes the running clip first, under its own identity, before the other mode's first clip starts, and after a completed triggered clip the first continuous clip also waits for the rest of that clip's interval. A clip that loses the schedule, media, or storage ends early and is kept, and the next clip starts at a key frame enqueued after it is admitted. A schedule closure, a media pause, or switching continuous recording off and on between two clips does the same, so continuous recording records nothing from a closed schedule interval or a media pause; a slot that is briefly not ready between two clips does not, and the next clip continues where the previous one ended while that key frame is still buffered. A clip checks the schedule and the media pause as it starts and between frames, so it can still write the frames that arrive as a closure or pause begins or ends, and it keeps writing through a closure, or a pause the host does not wait for, that ends before its next check, after which the next clip starts fresh. `ALWAYS_ON`, the default record rule, cannot be combined with continuous recording, even while `bRuleEnabled` is false (see Always-On Rule).
+`bContinuousRecordEnabled` records clips of the target length (`bVideoClipLengthSeconds` in Rule Info) back to back on the video channel whenever the schedule is open and storage and media allow. Its clips are not rule events: no rule callback reports them and their files carry `event_uid` 0, but a rule event dispatched while a clip is pending or being written lists the clip's file id in `file_ids`, as it lists a triggered clip accepted for it or already in progress, so a host can find a trigger's footage (see `include/vigil_ctypes.h`).
 
-A triggered video recording starts from the oldest key frame still buffered, so it holds up to the buffer period (10 seconds) before its event. It ends on the first key frame after the target clip length has elapsed since the recording started or, if none arrives, when the key frame wait runs out. A continuous clip that follows a completed one, with no schedule closure, media pause, or switch between them, starts at the key frame that clip ended on, so the two neither overlap nor leave a gap; any other continuous clip starts at a key frame enqueued after it is admitted.
+While it is set, `dVideo` keeps its stored value but no triggered video is admitted; Photo and Sound are unaffected, and an HTTP activation needs storage only when Photo is enabled. `ALWAYS_ON`, the default record rule, cannot be combined with it, even while `bRuleEnabled` is false (see Always-On Rule).
 
-A stored record configuration, record rule, or schedule file that cannot be loaded at startup is left in place, and rules and continuous recording stay off until a valid record configuration is posted. Meanwhile `GET` reports the defaults in the unusable file's place: every action disabled, the `ALWAYS_ON` rule, or the disabled schedule, whose gate is always open. To recover, first post the unusable file's own document (the record rule or schedule configuration), then the record configuration; posting the record configuration first would turn on the defaults those `GET`s show. Every valid schedule `POST` is stored, so posting back what its `GET` shows repairs that file.
+Switching either way finishes the running clip under its own identity before the other mode's first clip starts, and after a completed triggered clip the first continuous clip also waits out the rest of that clip's interval.
+
+A clip that loses the schedule, media, or storage ends early and is kept, and the next clip starts at a key frame enqueued after it is admitted. A schedule closure, a media pause, or switching continuous recording off and on between two clips does the same, so nothing is recorded from a closed interval or a pause. A slot briefly not ready between two clips is different: the next clip continues where the previous one ended while that key frame is still buffered.
+
+A clip checks the schedule and the pause as it starts and between frames, so it still writes the frames that arrive as a closure or pause begins or ends, and it keeps writing through a closure, or a pause the host does not wait for, that ends before its next check; the next clip then starts fresh.
+
+A triggered video recording starts from the oldest buffered key frame, so it holds up to the buffer period (10 seconds) before its event, and ends on the first key frame after the target length has elapsed since the recording started or, if none arrives, when the key frame wait runs out. A continuous clip following a completed one with no closure, pause, or switch between them starts at the key frame that clip ended on, with neither overlap nor gap; any other continuous clip starts at a key frame enqueued after its admission.
+
+A stored record configuration, record rule, or schedule file that cannot be loaded at startup stays in place, and rules and continuous recording stay off until a valid record configuration is posted; meanwhile `GET` reports the defaults in its place: every action disabled, the `ALWAYS_ON` rule, or the disabled schedule, whose gate is always open. Recover by posting the unusable file's own document (the record rule or schedule configuration) first, then the record configuration; the other order would turn on the defaults those `GET`s show. Every valid schedule `POST` is stored, so posting back what its `GET` shows repairs that file.
 
 Notes:
 
-- A missing field (`sFilePath` excepted), a field of the wrong type, a non-positive or non-integer interval, an unknown photo format, a relative `sFilePath`, or any other `iSchemaVersion` is rejected with `EINVAL` (`30022`). A rejected payload changes neither the runtime nor the stored file.
-- While `ALWAYS_ON` is selected (the default), a payload with actions it cannot pace is rejected with `EINVAL` (see Always-On Rule); select another record rule first.
-- `EAGAIN` (`30011`) means the action settings changed (a media refresh or another commit) while the document was being prepared or applied. Post it again: the document may already be stored, with the runtime still on the previous one.
-- The C API reports rule events and published files through its rule and file callbacks, best-effort: the event objects are borrowed for the callback, a file callback may precede the rule callback of its event, and a rule event is followed by zero, one, or two file callbacks. Every automatic file has a file id, carried by its file callback and by rule info as `iFileID`, and a rule event lists in `file_ids` the file of each channel that has one at its dispatch: the one accepted for it, else the one already in progress, pending or being written. The contract is stated in `include/vigil_ctypes.h`.
+- `EINVAL` (`30022`): a missing field (`sFilePath` excepted), a wrong type, a non-positive or non-integer interval, an unknown photo format, a relative `sFilePath`, or another `iSchemaVersion`. A rejected payload changes neither the runtime nor the stored file.
+- `EINVAL` also while `ALWAYS_ON` is selected (the default) and the payload has actions it cannot pace (see Always-On Rule); select another record rule first.
+- `EAGAIN` (`30011`): the action settings changed (a media refresh or another commit) while the document was being prepared or applied. Post it again; the document may already be stored, with the runtime still on the previous one.
+- The C API reports rule events and published files through its callbacks, best-effort: the objects are borrowed for the call, a file callback may precede the rule callback of its event, and a rule event is followed by zero, one, or two file callbacks. Every automatic file has a file id, carried by its file callback and by rule info as `iFileID`, and a rule event lists in `file_ids` the file of each channel that has one at its dispatch: the one accepted for it, else the one already pending or being written. The contract is in `include/vigil_ctypes.h`.
 
 Capability limits:
 
 - Vigil owns the rules, the admission, and the file lifecycle, not the devices behind the callbacks.
-- A file callback that keeps failing, or files that keep failing to publish, stop recording on the storage slot. Each file channel counts its failed tasks (a failing create, write, finish, or capture callback, a writer that could not be built, or a recorded file that could not be moved into its day's directory and was removed instead), and after each one stays held through its interval plus a 3-second cooldown. After 10 failed tasks without a completed one in between, it takes the slot to `ERROR` (Storage Status), which stops the other channel and continuous recording too until the slot is disabled and enabled again: reselect it through the storage configuration after selecting another, eject and reinsert a removable device, or restart the service. A persistently failing Photo callback therefore ends Video recording on that slot as well.
-- Sound plays only through the host's callback, which must return in bounded time. Vigil queues no playback and retries nothing.
-- The timing in this document (the buffer period, the clip length and its key frame and input loss waits, the action intervals, and the 10 ms rule evaluation and 50 ms worker probe periods behind them) is the host logic's target, verified with fake callbacks on a development host. Real-device latency, callback duration, and the gap between clips depend on the host's media pipeline and storage, and are the integration's to measure.
-- Storage calls on the slot's filesystem must return promptly: the free-space probe at each admission (on the rule thread and an HTTP activation's thread), the directory creation and rename at publication (on the slot's workers), and the filesystem sync at a disable or before an unmount (on the thread of the switch, the eject, or the removal). A hanging device stalls the threads that make them.
-- On FAT a day's directory holds about 16,000 files, since a FAT directory has at most 65,536 entries and each recorded file's name takes four. Once it is full, every further file of that day fails to publish and counts as a failed task (above), so the slot reaches `ERROR` soon after. A photo every 5 seconds, as `ALWAYS_ON` takes them at the default interval, fills it at about 23:00; under another rule, one every 6 seconds or more leaves room for continuous clips too. On FAT, keep a day's files under that, or use ext4.
-- The host's video sink must admit every file Vigil creates. With a single video sink the second create fails and counts like any other failure: a manual video capture that overlaps continuous recording fails the automatic clips meanwhile, and ten such failures reach the limit above in about 30 seconds (one 3-second cooldown each).
-- Video frames must carry a key frame at least every 10 seconds, the buffer period. A clip's first and closing key frames are waited for at most that long, and a longer GOP cancels clips or ends them without a boundary.
+- A file callback that keeps failing, or files that keep failing to publish, stop recording on the slot. Each file channel counts its failed tasks (a failing create, write, finish, or capture callback, a writer that could not be built, or a recorded file that could not be moved into its day's directory and was removed instead) and holds through its interval plus a 3-second cooldown after each. After 10 failed tasks with no completed one between, the slot goes to `ERROR` (Storage Status), which stops the other channel and continuous recording too until the slot is disabled and enabled again: reselect it through the storage configuration after selecting another, eject and reinsert a removable device, or restart the service. A persistently failing Photo callback therefore ends Video recording on that slot as well.
+- Sound plays only through the host's callback, which must return in bounded time; Vigil queues no playback and retries nothing.
+- The timing in this document (the buffer period, the clip length and its key frame and input loss waits, the action intervals, and the 10 ms rule evaluation and 50 ms worker probe periods behind them) is the host logic's target, verified with fake callbacks on a development host; real-device latency, callback duration, and the gap between clips depend on the host's media pipeline and storage, and are the integration's to measure.
+- Storage calls on the slot's filesystem must return promptly: the free-space probe at each admission (on the rule thread or an HTTP activation's), the directory creation and rename at publication (on the slot's workers), and the sync at a disable or before an unmount (on the thread of the switch, the eject, or the removal). A hanging device stalls those threads.
+- On FAT a day's directory holds about 16,000 files: a FAT directory has at most 65,536 entries and each recorded file's name takes four. Once it is full, every further file of that day fails to publish and counts as a failed task, so the slot reaches `ERROR` soon after. A photo every 5 seconds, the `ALWAYS_ON` default, fills it at about 23:00; under another rule one every 6 seconds or more leaves room for continuous clips too. Keep a day's files under that on FAT, or use ext4.
+- The host's video sink must admit every file Vigil creates. With a single sink the second create fails and counts like any other failure: a manual video capture overlapping continuous recording fails the automatic clips meanwhile, and ten such failures reach the limit in about 30 seconds (one 3-second cooldown each).
+- Video frames must carry a key frame at least every 10 seconds, the buffer period: a clip's first and closing key frames are waited for at most that long, and a longer GOP cancels clips or ends them without a boundary.
 
 ### Rule Info
 
@@ -82,67 +91,58 @@ Get the information about the rule system.
 ```json
 {
     "bReadyForNewEvent": true, // Boolean, false while a file channel holds a triggered task (PENDING, WRITING, or HOLDING); a continuous clip does not count
-    "dLastRuleEvent": { // Object or null, the most recently accepted triggered file task: the held one while a channel holds one (the one accepted last when both do), otherwise the last retired one (a later continuous clip replaces the video channel's)
-        "sStatus": "COMPLETED", // String, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", "UNKNOWN" (see the notes)
-        "iTimestamp": 1735574400000, // Integer, the owner's event time in Unix milliseconds
-        "iOwnerUID": 1735574400123, // Integer, UID of the owner that created the event (exact 64-bit value); 0 for a continuous clip, seen only in dActionStates.dVideo.dEvent
+    "dLastRuleEvent": { // Object or null, the most recently accepted triggered file task: the held one while a channel holds one (the later accepted when both do), else the last retired one; a later continuous clip replaces the video channel's
+        "sStatus": "COMPLETED", // String, "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", or "UNKNOWN" (see the notes)
+        "iTimestamp": 1735574400000, // Integer, the owner's event time, Unix milliseconds
+        "iOwnerUID": 1735574400123, // Integer, the owner's UID (exact 64-bit value); 0 for a continuous clip, seen only under dActionStates.dVideo.dEvent
         "iFileID": 1735574400124 // Integer, the file's identity (exact 64-bit value); its file callback carries it as file_id if the file is published, and the rule events dispatched while the task was PENDING or WRITING list it
     },
     "dLastRuleEventOwner": { // Object or null, the owner of dLastRuleEvent
-        "sRuleType": "TIMER", // String, rule type; "UNKNOWN" for a direct EVENT delivered without a rule
+        "sRuleType": "TIMER", // String, the rule type; "UNKNOWN" for a direct EVENT delivered without a rule
         "sRuleID": "", // String, the condition: the inference member ID, the GPIO signal (e.g. "RISING"), the TTY command, or the SED rule's sID; empty for other rules
-        "sSourceID": "", // String, the inference source for inference and direct EVENT owners, the pin name for GPIO, the TTY name for TTY, otherwise empty
+        "sSourceID": "", // String, the inference source for inference and direct EVENT owners, the pin name for GPIO, the TTY name for TTY; otherwise empty
         "sSourceDelivery": "EVENT", // String, "FRAME" for inference frame owners, "EVENT" for every other owner
-        "iTimestamp": 1735574400000, // Integer, event time in Unix milliseconds: the input's timestamp for FRAME and EVENT owners, otherwise when the condition was observed
-        "iDispatchTimestamp": 1735574400000, // Integer, Unix milliseconds when Vigil created the owner; equals iTimestamp for owners without an input
-        "iUID": 1735574400123 // Integer, unique owner ID (exact 64-bit value), also carried by the rule and file callbacks
+        "iTimestamp": 1735574400000, // Integer, the event time, Unix milliseconds: the input's timestamp for FRAME and EVENT owners, else when the condition was observed
+        "iDispatchTimestamp": 1735574400000, // Integer, when Vigil created the owner, Unix milliseconds; equals iTimestamp for owners without an input
+        "iUID": 1735574400123 // Integer, the owner's unique ID (exact 64-bit value), also carried by the rule and file callbacks
     },
-    "dLastDispatchedOwner": { // Object or null, the owner of the most recent dispatch, whatever the actions did with it, in the shape of dLastRuleEventOwner
-        // ...
+    "dLastDispatchedOwner": { // Object or null, the owner of the most recent dispatch whatever the actions did with it, in the shape of dLastRuleEventOwner
     },
     "dActionStates": { // Object, the state of each post-trigger action
         "dPhoto": {
-            "bEnabled": true, // Boolean, whether the action is enabled in the general rule configuration
+            "bEnabled": true, // Boolean, enabled in the general rule configuration
             "bReady": false, // Boolean, enabled and holding no task: the next event can be admitted here, subject to the gates and the storage slot
-            "sState": "WRITING", // String, one of: "IDLE" (no task held), "PENDING" (accepted, not yet claimed by a worker), "WRITING", "HOLDING" (see the notes)
+            "sState": "WRITING", // String, "IDLE" (no task held), "PENDING" (accepted, not yet claimed by a worker), "WRITING", or "HOLDING" (see the notes)
             "dEvent": { // Object or null, the held task's event, in the shape of dLastRuleEvent
-                "sStatus": "WRITING",
-                "iTimestamp": 1735574400000,
-                "iOwnerUID": 1735574400123,
-                "iFileID": 1735574400124
             }
         },
-        "dVideo": {
-            // ... The same fields as dPhoto, where bReady is false while continuous recording is configured, plus:
-            "bContinuous": false // Boolean, whether continuous recording is configured; bEnabled still reports dVideo.bEnabled as configured
+        "dVideo": { // The fields of dPhoto, with bReady false while continuous recording is configured, plus:
+            "bContinuous": false // Boolean, continuous recording is configured; bEnabled still reports dVideo.bEnabled as stored
         },
         "dSound": {
-            "bEnabled": false, // Boolean, whether the action is enabled in the general rule configuration
+            "bEnabled": false, // Boolean, enabled in the general rule configuration
             "bReady": false, // Boolean, enabled, available, and idle: the next event can trigger playback, subject to the gates
-            "sState": "UNAVAILABLE" // String, one of: "UNAVAILABLE" (the host provides no playback callback), "IDLE", "PENDING" (triggered, not yet playing), "PLAYING", "STOPPING" (the service is shutting down)
+            "sState": "UNAVAILABLE" // String, "UNAVAILABLE" (no playback callback), "IDLE", "PENDING" (triggered, not yet playing), "PLAYING", or "STOPPING" (the service is shutting down)
         }
     },
-    "dAvailableGPIOs": { // Object, available GPIO pins
-        "GPIO_01": { // Key: String, GPIO pin name
-            "iNum": 1, // Integer, GPIO number
-            "sState": "FLOATING", // String (optional), one of: "DISABLED", "FLOATING", "PULL_UP", "PULL_DOWN", null if unable to get the state of the pin
-            "lCapabilities": ["FLOATING", "PULL_UP", "PULL_DOWN"], // Array of all available configurable input modes, all possible values already listed here, not for the purpose of peripheral circuit
-            "sLevel": "HIGH" // String (optional), current level of the pin, one of: "HIGH", "LOW", null if unable to get the level of the pin
-        },
-        // ... More GPIO pins
+    "dAvailableGPIOs": { // Object, the GPIO pins the host offers, by name
+        "GPIO_01": {
+            "iNum": 1, // Integer, the GPIO number
+            "sState": "FLOATING", // String or null, "DISABLED", "FLOATING", "PULL_UP", or "PULL_DOWN"; null when the state cannot be read
+            "lCapabilities": ["FLOATING", "PULL_UP", "PULL_DOWN"], // Array of the input modes the pin supports, whatever the peripheral circuit; the example lists every possible value
+            "sLevel": "HIGH" // String or null, "HIGH" or "LOW"; null when the level cannot be read
+        }
     },
-    "dAvailableTTYs": { // Object, available TTY devices
-        "ttyS0": { // Key: String, TTY name
-            "sSocketPath": "/tmp/ttyS0.sock", // String, Unix socket path for inter-process communication
-            "iBufferSize": 1024 // Integer, buffer size in bytes, suggested maximum command length
-        },
-        // ... More TTY devices
+    "dAvailableTTYs": { // Object, the TTYs the host offers, by name
+        "ttyS0": {
+            "sSocketPath": "/tmp/ttyS0.sock", // String, the Unix socket the rule connects to
+            "iBufferSize": 1024 // Integer, the read buffer in bytes; a command longer than it is refused
+        }
     },
-    "bVideoClipLengthSeconds": 60, // Integer (the b prefix is kept for compatibility), target video clip length in seconds; a clip ends at the first key frame after it, so its length varies with the GOP
-    "bMediaPaused": false, // Boolean, whether media capture is currently paused (e.g., due to configuration update in underlying encoder system)
-    "bRecordEnabled": true, // Boolean, whether rules are enabled (bRuleEnabled of the general rule configuration); the schedule must also be open for a rule to trigger
-    "dRecordSlot": {
-        // ... The storage slot object of the Storage Status response for the enabled slot, whatever its readiness; null while no slot is enabled
+    "bVideoClipLengthSeconds": 60, // Integer (the b prefix is kept for compatibility), the target clip length in seconds; a clip ends at the first key frame after it, so its length varies with the GOP
+    "bMediaPaused": false, // Boolean, media capture is paused (for example while the host reconfigures its encoder)
+    "bRecordEnabled": true, // Boolean, bRuleEnabled of the general rule configuration; the schedule must also be open for a rule to trigger
+    "dRecordSlot": { // Object or null, the slot object of Storage Status for the enabled slot, whatever its readiness; null while no slot is enabled
     }
 }
 ```
@@ -151,7 +151,7 @@ Notes:
 
 - `INTERRUPTED`: a gate, pause, stop, settings change, or input loss stopped a task that had started; its file is kept.
 - `CANCELED`: nothing was recorded and no file exists. The task was retired before a worker claimed it, the gate was already closed when the writer started, or no key frame arrived before the clip's key frame wait, gate, or end.
-- `HOLDING`: the task finished and the channel still holds it, through its interval after a completed task, or its interval plus the failure cooldown after a failed one. Its file is published as the hold begins: if that fails, the file is removed, a `COMPLETED` or `INTERRUPTED` status turns `FAILED`, and the task is held as a failed one. An interrupted or canceled task is otherwise retired at once.
+- `HOLDING`: the task finished and the channel still holds it, through its interval after a completed task, or its interval plus the failure cooldown after a failed one. Its file is published as the hold begins; if that fails, the file is removed, a `COMPLETED` or `INTERRUPTED` status turns `FAILED`, and the task is held as a failed one. An interrupted or canceled task is otherwise retired at once.
 - A continuous clip is not a rule event: it shows under `dActionStates.dVideo` only, never in `dLastRuleEvent`.
 - `dLastDispatchedOwner` moves ahead of `dLastRuleEventOwner` when the file actions rejected the event or did not apply to it.
 - While continuous recording is configured, the video channel records clips without an owner (`iOwnerUID` 0) and admits no triggered video.
@@ -169,16 +169,14 @@ Get or set the schedule rule configuration.
 
 ```json
 {
-    "bEnabled": true, // Boolean, enable or disable schedule rule, the schedule rule always evaluated as true when disabled
-    "lActiveWeekdays": [ // Array of time ranges for active recording periods, evaluated in local time
+    "bEnabled": true, // Boolean; a disabled schedule is always open
+    "lActiveWeekdays": [ // Array of open periods, in local time
         {
-            "sStart": "Mon 09:00:00", // String, format: "Day HH:MM:SS", case-sensitive short weekday name with ISO 8601 time, (Day: Sun, Mon, Tue, Wed, Thu, Fri, Sat)
-            "sEnd": "Mon 18:00:00" // String, format: "Day HH:MM:SS", Hour 24:00:00 is valid for end-of-day
-        },
-        // ... More time ranges, e.g., full week: {"sStart": "Mon 00:00:00", "sEnd": "Sun 24:00:00"}
+            "sStart": "Mon 09:00:00", // String, "Day HH:MM:SS": a case-sensitive short weekday (Sun, Mon, Tue, Wed, Thu, Fri, Sat) and an ISO 8601 time
+            "sEnd": "Mon 18:00:00" // String, the same form; 24:00:00 is the end of the day, so {"sStart": "Mon 00:00:00", "sEnd": "Sun 24:00:00"} is the full week
+        }
     ],
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // POST response only, see Error Handling
 }
 ```
 
@@ -192,41 +190,38 @@ Get or set the record rule (trigger) configuration.
 
 **Response Body for `GET` or Request Payload for `POST`:**
 
-The payload depends on the `sCurrentSelected` field. An activation while a file channel still holds its previous task (through the interval after its start, plus the cooldown after a failed one) is reported and triggers Sound, but admits no new file on that channel; `ALWAYS_ON` waits for the channel instead.
+The payload depends on `sCurrentSelected`. An activation while a file channel still holds its previous task (through the interval after its start, plus the cooldown after a failed one) is reported and triggers Sound, but admits no new file on that channel; `ALWAYS_ON` waits for the channel instead.
 
 #### Inference Set Rule
 
 ```json
 {
-    "sCurrentSelected": "INFERENCE_SET", // String, one of: "SED", "INFERENCE_SET", "TIMER", "GPIO", "TTY", "HTTP", "ALWAYS_ON"
-    "lInferenceSet": [
+    "sCurrentSelected": "INFERENCE_SET", // String, "SED", "INFERENCE_SET", "TIMER", "GPIO", "TTY", "HTTP", or "ALWAYS_ON"
+    "lInferenceSet": [ // Array of member rules, ORed together
         {
-            "sID": "person_detection", // String, rule ID (uniqueness not enforced but recommended)
-            "lSourceFilter": ["builtin", "fall-detection"], // Optional; array of source ids to consume, empty or absent matches every source. "builtin" is the on-device inference pipeline
-            "iDebounceTimes": 3, // Integer, 0 to 2147483647, the threshold of the saturating counter described below
-            "lConfidenceFilter": [0.5, 1.0], // Array of number [min, max], confidence range to filter, configurable range between 0.0 and 1.0 for each part
-            "lClassFilter": ["person", "car"], // Array of strings, class names to filter
-            "lRegionFilter": [ // Optional, list of regions to filter, empty list means no region filtering
+            "sID": "person_detection", // String, the member's ID; uniqueness is recommended, not enforced
+            "lSourceFilter": ["builtin", "fall-detection"], // Array of strings, optional, the source ids to consume; empty or absent matches every source, and "builtin" is the on-device pipeline
+            "iDebounceTimes": 3, // Integer, 0 to 2147483647, the threshold of the saturating counter (below)
+            "lConfidenceFilter": [0.5, 1.0], // Array [min, max], each within 0.0 to 1.0
+            "lClassFilter": ["person", "car"], // Array of strings, the class names that match
+            "lRegionFilter": [ // Array, optional, regions ORed together; empty means no region filtering
                 {
-                    "lPolygon": [ // Array of polygons, each polygon is a list of points sorted in clockwise or counter-clockwise order
-                        [0.0, 0.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5] // List of [x, y] points (0.0-1.0), origin at top-left corner
+                    "lPolygon": [ // Array of [x, y] points within 0.0 to 1.0, origin at the top left, in clockwise or counterclockwise order
+                        [0.0, 0.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5]
                     ]
-                },
-                // ... More regions, all regions are ORed together
+                }
             ]
-        },
-        // ... More inference set rules, all rules are ORed together
+        }
     ],
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // POST response only, see Error Handling
 }
 ```
 
-`lSourceFilter` selects the result sources this rule consumes, matched against the canonical source id. Source ids are stamped by the receiving ingress from the peer identity; a producer's self-reported `source_id` is never taken as is. An absent or empty filter matches every source. Results from unlisted sources neither advance nor decay this rule's debounce state.
+`lSourceFilter` selects the result sources this rule consumes, matched against the canonical source id, which the receiving ingress stamps from the peer identity; a producer's self-reported `source_id` is never taken as is. Results from unlisted sources neither advance nor decay the debounce counter.
 
-`iDebounceTimes` is the threshold of a saturating counter, not a count of consecutive frames. A consumed frame with a matching detection raises the counter by one, up to the threshold; a consumed frame without one lowers it by one, down to zero; and a frame activates the rule when the counter stands at the threshold afterwards. So a single non-matching frame deactivates the rule and a single matching one reactivates it, while a run of non-matching frames as long as the threshold empties the counter, and as many matching frames are needed again. Frames from unlisted sources and ticks without a frame leave the counter alone. A threshold of zero activates on every consumed frame, matching or not; a negative or oversized threshold is rejected with `EINVAL`.
+`iDebounceTimes` is the threshold of a saturating counter, not a count of consecutive frames: a consumed frame with a matching detection raises it by one up to the threshold, one without lowers it by one down to zero, and a frame activates the rule when the counter stands at the threshold afterwards. So one non-matching frame deactivates and one matching frame reactivates, while a run of non-matching frames as long as the threshold empties the counter and as many matching frames are needed again. Unlisted sources and ticks without a frame leave the counter alone. A threshold of zero activates on every consumed frame, matching or not; a negative or oversized one is rejected with `EINVAL`.
 
-Applications whose post-processing does not fit the detection or classification formats can decide on recording themselves and emit a discrete event (`INFERENCE_DELIVERY_EVENT` with no result payload) instead. Subject to rule enablement and the schedule, such an event owns the tick it is consumed on and dispatches at once, bypassing the selected rule, its filters, and the debounce counter. It is reported with rule type `UNKNOWN`, an empty rule id, the source id as `sSourceID`, delivery `EVENT`, and the input's timestamp as the event time.
+An application whose post-processing fits neither the detection nor the classification format can decide on recording itself and emit a discrete event (`INFERENCE_DELIVERY_EVENT` with no result payload). Subject to rule enablement and the schedule, it owns the tick it is consumed on and dispatches at once, bypassing the selected rule, its filters, and the counter, reported with rule type `UNKNOWN`, an empty rule id, the source id as `sSourceID`, delivery `EVENT`, and the input's timestamp as the event time.
 
 #### Sound Event Rule
 
@@ -234,21 +229,20 @@ Applications whose post-processing does not fit the detection or classification 
 {
     "sCurrentSelected": "SED",
     "dSED": {
-        "sID": "00000000-0000-0000-0000-000000000000", // String, AcousticsLab head/model ID to match against inference head_id; empty string accepts any model
-        "iConsecutiveWindowMs": 1000, // Integer, required consecutive active duration in milliseconds before activation, must be >= 0
-        "lConfidenceFilter": [0.5, 1.0], // Array of number [min, max], confidence range to filter, configurable range between 0.0 and 1.0
-        "lClassFilter": ["doorbell", "baby_cry"] // Array of strings, class labels to filter; an empty array matches no label, so the rule never activates
+        "sID": "00000000-0000-0000-0000-000000000000", // String, the AcousticsLab head (model) ID to match against the inference head_id; empty accepts any
+        "iConsecutiveWindowMs": 1000, // Integer, at least 0, the active run required before activation, in milliseconds
+        "lConfidenceFilter": [0.5, 1.0], // Array [min, max], each within 0.0 to 1.0
+        "lClassFilter": ["doorbell", "baby_cry"] // Array of strings, the labels that match; empty matches none, so the rule never activates
     },
-    "code": 0,
-    "message": ""
+    "code": 0, "message": "" // POST response only, see Error Handling
 }
 ```
 
-The rule reads AcousticsLab inference frames from the Unix socket `/dev/shm/acousticslabd-result.sock`. Each frame is a little-endian 32-bit payload length, between 1 and 65536 bytes, followed by an `acousticslab.v1.Envelope`. A frame is active when its inference carries the configured head id (any head with an empty `sID`) and a top-k entry whose label is in `lClassFilter` and whose probability lies within `lConfidenceFilter`; an envelope without an inference payload is ignored and does not end the run.
+The rule reads AcousticsLab inference frames from the Unix socket `/dev/shm/acousticslabd-result.sock`: each frame is a little-endian 32-bit payload length, 1 to 65536 bytes, then an `acousticslab.v1.Envelope`. A frame is active when its inference carries the configured head id (any, with an empty `sID`) and a top-k entry whose label is in `lClassFilter` with a probability within `lConfidenceFilter`; an envelope without an inference payload is ignored and does not end the run.
 
-The rule activates on the first active frame at least `iConsecutiveWindowMs` after its run of active frames began, and on every active frame after that. An inactive frame ends the run, but silence does not, since the window is measured on frames rather than by a timer; with a window of 0 every active frame activates. An activation is latched until the next rule evaluation consumes it, however long that takes, and several activations before an evaluation count once. Rules are evaluated only while `bRuleEnabled` is true and the schedule is open, so an activation during a closure is reported once after reopening.
+The rule activates on the first active frame at least `iConsecutiveWindowMs` after its run of active frames began, and on every active frame after that. An inactive frame ends the run, silence does not, since the window is measured on frames rather than by a timer, and a window of 0 activates on every active frame. An activation is latched until the next rule evaluation consumes it, however long that takes, and several before an evaluation count once. Rules are evaluated only while `bRuleEnabled` is true and the schedule is open, so an activation during a closure is reported once after reopening.
 
-A zero or oversized frame length, a malformed payload, a frame whose bytes stop arriving for 5 seconds, or the peer closing the socket ends the connection. The rule then reconnects after a backoff that doubles from 100 ms to 5 s across connections that delivered no valid frame and returns to 100 ms once one did; while connected, it waits without limit for the next frame. The rule plays no sound itself: `dSound` in the general rule configuration does, through the host's callback.
+A zero or oversized frame length, a malformed payload, a frame whose bytes stop arriving for 5 seconds, or the peer closing the socket ends the connection. The rule reconnects after a backoff doubling from 100 ms to 5 s across connections that delivered no valid frame, back to 100 ms once one did, and waits without limit for the next frame while connected. The rule plays no sound itself: `dSound` does, through the host's callback.
 
 #### Timer Rule
 
@@ -256,10 +250,9 @@ A zero or oversized frame length, a malformed payload, a frame whose bytes stop 
 {
     "sCurrentSelected": "TIMER",
     "dTimer": {
-        "iIntervalSeconds": 60 // Integer, trigger interval in seconds, must be >= 0
+        "iIntervalSeconds": 60 // Integer, at least 0, the trigger interval in seconds
     },
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // POST response only, see Error Handling
 }
 ```
 
@@ -269,17 +262,16 @@ A zero or oversized frame length, a malformed payload, a frame whose bytes stop 
 {
     "sCurrentSelected": "GPIO",
     "dGPIO": {
-        "sName": "GPIO_01", // String, GPIO pin name (or provide "iNum" instead)
-        "sState": "FLOATING", // String, GPIO pin state, one of: "FLOATING", "PULL_UP", "PULL_DOWN" ("DISABLED" is rejected: a rule needs a readable pin)
-        "sSignal": "HIGH", // String, GPIO pin signal to trigger recording, one of: "HIGH", "LOW", "RISING", "FALLING"
-        "iDebounceDurationMs": 100 // Integer, debounce duration in milliseconds, must be >= 0
+        "sName": "GPIO_01", // String, the pin name; or "iNum", the pin number, instead
+        "sState": "FLOATING", // String, "FLOATING", "PULL_UP", or "PULL_DOWN"; "DISABLED" is rejected, a rule needs a readable pin
+        "sSignal": "HIGH", // String, the trigger: "HIGH", "LOW", "RISING", or "FALLING"
+        "iDebounceDurationMs": 100 // Integer, at least 0, the debounce in milliseconds
     },
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // POST response only, see Error Handling
 }
 ```
 
-Rule events from a GPIO rule (the rule callback and `dLastRuleEventOwner`) carry the signal as the rule ID and the pin name as the source ID.
+A GPIO rule's events (the rule callback and `dLastRuleEventOwner`) carry the signal as the rule ID and the pin name as the source ID.
 
 #### TTY Rule
 
@@ -287,45 +279,42 @@ Rule events from a GPIO rule (the rule callback and `dLastRuleEventOwner`) carry
 {
     "sCurrentSelected": "TTY",
     "dTTY": {
-        "sName": "ttyS0", // String, TTY name
-        "sCommand": "RECORD" // String, non-empty command string to activate recording
+        "sName": "ttyS0", // String, the TTY name
+        "sCommand": "RECORD" // String, non-empty, the command that triggers
     },
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // POST response only, see Error Handling
 }
 ```
 
-Rule events from a TTY rule carry the command as the rule ID and the TTY name as the source ID. The rule connects to the TTY's socket when it is selected and tries again on each evaluation while it is not connected; a peer that is not accepting connections blocks neither the selection nor the evaluation.
+A TTY rule's events carry the command as the rule ID and the TTY name as the source ID. The rule connects to the TTY's socket when selected and tries again on each evaluation while not connected; a peer that is not accepting connections blocks neither the selection nor the evaluation.
 
 #### HTTP Rule
 
-The HTTP rule needs no further configuration: select it to trigger recording through the HTTP Rule Activation API.
+No further configuration: select it and trigger through HTTP Rule Activation.
 
 ```json
 {
     "sCurrentSelected": "HTTP",
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // POST response only, see Error Handling
 }
 ```
 
 #### Always-On Rule
 
-The always-on rule needs no further configuration. When selected, it triggers every `iIntervalMs` of the enabled file action (see General Rule Configuration): the next recording starts no earlier than the interval after the previous one started, and only once the previous write has finished.
+No further configuration. Selected, it triggers every `iIntervalMs` of the enabled file action (General Rule Configuration): the next recording starts no earlier than the interval after the previous one started, and only once the previous write has finished.
 
-Because it paces one file action, selecting `ALWAYS_ON` requires the stored general rule configuration to satisfy an invariant: `dSound` and `bContinuousRecordEnabled` false, at most one of `dPhoto` and `dVideo` enabled, and exactly one while `bRuleEnabled` is true. The first-start configuration satisfies it. The record rule `POST` that selects `ALWAYS_ON` is rejected with `EINVAL` otherwise, and while it is selected the general rule configuration `POST` is held to the same limit, so simplify the actions or select another rule first. Both checks share one lock, so neither the order of the posts nor concurrent posts can bypass it. At startup a stored pair that violates it keeps rules and continuous recording off (`bRuleEnabled` and `bContinuousRecordEnabled` read false), with both files left in place.
+Because it paces one file action, selecting `ALWAYS_ON` requires the stored general rule configuration to satisfy an invariant: `dSound` and `bContinuousRecordEnabled` false, at most one of `dPhoto` and `dVideo` enabled, and exactly one while `bRuleEnabled` is true; the first-start configuration satisfies it. The record rule `POST` selecting `ALWAYS_ON` is otherwise rejected with `EINVAL`, and while it is selected the general rule configuration `POST` is held to the same limit, so simplify the actions or select another rule first; both checks share one lock, so neither the order of the posts nor concurrent posts bypass it. At startup a stored pair that violates it keeps rules and continuous recording off (`bRuleEnabled` and `bContinuousRecordEnabled` read false), with both files left in place.
 
 ```json
 {
     "sCurrentSelected": "ALWAYS_ON",
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // POST response only, see Error Handling
 }
 ```
 
 ### HTTP Rule Activation
 
-Trigger the currently selected HTTP rule (no payload required).
+Trigger the selected HTTP rule; no payload.
 
 **Path:** `.../vigil/rule/http_rule/activate`
 
@@ -335,17 +324,16 @@ Trigger the currently selected HTTP rule (no payload required).
 
 ```json
 {
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // see Error Handling
 }
 ```
 
 Notes:
 
-- Returns `EPERM` if rules are disabled, the schedule is closed, or the selected rule is not `HTTP`.
-- Returns `EBUSY` if a file action is enabled and the storage slot is not ready for writing. A rule-only or Sound-only activation needs no storage.
-- Returns `EBUSY` if a file action is enabled and no file channel accepted the event: every enabled channel still holds a task, the slot has no headroom or turned unusable after the precheck, or a commit changed the settings meanwhile. The event is still reported and Sound is triggered. A gate that closed after the precheck (the rule flag, the schedule, or the media pause, which the precheck does not read) also answers `EBUSY`, and refuses Sound too.
-- A refused activation leaves no pending event behind: the next activation is admitted afresh.
+- `EPERM`: rules are disabled, the schedule is closed, or the selected rule is not `HTTP`.
+- `EBUSY`: a file action is enabled and the storage slot is not ready for writing; a rule-only or Sound-only activation needs no storage.
+- `EBUSY` also when a file action is enabled and no file channel accepted the event: every enabled channel still holds a task, the slot has no headroom or turned unusable after the precheck, or a commit changed the settings meanwhile. The event is still reported and Sound is triggered. A gate that closed after the precheck (the rule flag, the schedule, or the media pause, which the precheck does not read) answers `EBUSY` too, and refuses Sound as well.
+- A refused activation leaves no pending event behind; the next one is admitted afresh.
 - A Sound-only activation answers 0 once its owner is dispatched, even when the Sound trigger was dropped: one was pending or playing, the media pause refused or canceled it, or a tick of the rule loop that had read rules as disabled canceled it right after a commit enabled them.
 
 ## Storage API
@@ -362,18 +350,17 @@ Get or set the storage configuration.
 
 ```json
 {
-    "dSelectSlotToEnable": { // Object, set to null to disable the enabled slot or enable none
-        "sByDevPath": "/dev/sda1", // String, device path to filter the target enabled slot, empty string to skip this filter
-        "sByUUID": "550e8400-e29b-41d4-a716-446655440000" // String, UUID to filter the target enabled slot, empty string to skip this filter
+    "dSelectSlotToEnable": { // Object or null; null disables the enabled slot and enables none
+        "sByDevPath": "/dev/sda1", // String, the device path to match; empty skips this filter
+        "sByUUID": "550e8400-e29b-41d4-a716-446655440000" // String, the UUID to match; empty skips this filter
     },
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // POST response only, see Error Handling
 }
 ```
 
 A selector that matches several slots, such as a UUID shared by cloned cards, enables one of them (the one already enabled, if any), and each matching slot reports `bSelected`.
 
-The internal storage root (for example `/userdata`, `root:root 01777`) and any bind alias of it belong to the factory image: their mode keeps admin and application write access while protecting root-owned configuration entries, and Vigil never changes their owner or mode. Vigil sets the mounted root of every other slot (any device but `internal_device_path` of the storage C API) to `1000:1000`, mode `0777`. Recording subdirectories are unaffected.
+The internal storage root (for example `/userdata`, `root:root 01777`) and any bind alias of it belong to the factory image: their mode keeps admin and application write access while protecting root-owned configuration entries, and Vigil never changes their owner or mode. Vigil sets the mounted root of every other slot (any device but `internal_device_path` of the storage C API) to `1000:1000`, mode `0777`; recording subdirectories are unaffected.
 
 ### Storage Status
 
@@ -389,48 +376,47 @@ Get the current status of all storage slots.
 {
     "lSlots": [
         {
-            "sDevPath": "/dev/sda1", // String, device path of the physical storage partition or volume
-            "sMountPath": "/mnt/sda1", // String, target mount path, always non-empty, but the actual mount may not exist if eState < MOUNTED
-            "bRemovable": true, // Boolean, whether the storage is removable
-            "bInternal": false, // Boolean, whether the storage is the internal partition
-            "sLabel": "MyDrive", // String (optional), volume label, null if not available or not formatted yet, may not exist if eState < NOT_MOUNTED
-            "sUUID": "550e8400-e29b-41d4-a716-446655440000", // String (optional), volume UUID, null if not available or not formatted yet, may not exist if eState < NOT_MOUNTED
-            "sType": "ext4", // String (optional), filesystem type, null if not available or not formatted yet, may not exist if eState < NOT_MOUNTED
-            "bSelected": true, // Boolean, whether this slot is the target enabled slot according to the current configuration
-            "bEnabled": true, // Boolean, whether this slot is currently enabled
-            "bDirty": false, // Boolean (optional), whether the filesystem is marked dirty and may need fsck; null if not checked or unknown
-            "bSyncing": false, // Boolean, whether this slot is currently indexing its files
-            "bWriting": false, // Boolean, whether this slot currently has active writing tasks (e.g., recording videos, writing images)
-            "bRotating": false, // Boolean, whether this slot is currently performing quota rotation
-            "eState": 8, // Integer, state of the slot (-1: ERROR, 1: NOT_FORMATTED_OR_FORMAT_UNSUPPORTED, 2: FORMATTING, 3: NOT_MOUNTED, 4: FILESYSTEM_CHECKING, 5: MOUNTED, 6: CONFIGURED, 7: INDEXING, 8: READY, 9: SATURATED)
-            "sState": "READY", // String, human-readable state ("ERROR", "NOT_FORMATTED_OR_FORMAT_UNSUPPORTED", "FORMATTING", "NOT_MOUNTED", "FILESYSTEM_CHECKING", "MOUNTED", "CONFIGURED", "INDEXING", "READY", "SATURATED")
-            "iStatsSizeBytes": 1000000000, // Integer, total size of the partition, not accurate if eState < MOUNTED
-            "iStatsFreeBytes": 500000000, // Integer, free space of the partition, not accurate if eState < MOUNTED
-            "iQuotaMinimumRecommendBytes": 200000000, // Integer, minimum recommended quota limit; a lower limit may not work well
-            "iQuotaPreservedBytes": 0, // Integer, space preserved for system use; a quota limit above (iStatsSizeBytes - iQuotaPreservedBytes) may not be fully usable
-            "iQuotaUsedBytes": 10000000, // Integer (optional), space used under the quota, null if eState < CONFIGURED, not accurate if eState < READY
-            "iQuotaLimitBytes": 100000000, // Integer, configured quota limit, -1 means no limit, not accurate or the default if eState < CONFIGURED
-            "bQuotaRotate": true // Boolean, whether quota rotation is enabled, not accurate or the default if eState < CONFIGURED
-        },
-        // ... More storage slots, dynamically updated
+            "sDevPath": "/dev/sda1", // String, the device path of the partition or volume
+            "sMountPath": "/mnt/sda1", // String, the mount path, always set; below MOUNTED the mount may not exist
+            "bRemovable": true, // Boolean, the device is removable
+            "bInternal": false, // Boolean, the internal partition
+            "sLabel": "MyDrive", // String or null, the volume label; null when unavailable or not yet formatted
+            "sUUID": "550e8400-e29b-41d4-a716-446655440000", // String or null, the volume UUID, likewise
+            "sType": "ext4", // String or null, the filesystem type, likewise
+            "bSelected": true, // Boolean, the slot the configuration selects
+            "bEnabled": true, // Boolean, the slot currently enabled
+            "bDirty": false, // Boolean or null, the filesystem is marked dirty and may need fsck; null when not checked or unknown
+            "bSyncing": false, // Boolean, indexing its files
+            "bWriting": false, // Boolean, the slot's photo or video tasks are writing; a manual capture does not count
+            "bRotating": false, // Boolean, quota rotation is running
+            "eState": 8, // Integer, -1 ERROR, 1 NOT_FORMATTED_OR_FORMAT_UNSUPPORTED, 2 FORMATTING, 3 NOT_MOUNTED, 4 FILESYSTEM_CHECKING, 5 MOUNTED, 6 CONFIGURED, 7 INDEXING, 8 READY, 9 SATURATED
+            "sState": "READY", // String, the name of eState
+            "iStatsSizeBytes": 1000000000, // Integer, the partition size; accurate from MOUNTED on
+            "iStatsFreeBytes": 500000000, // Integer, the free space; accurate from MOUNTED on
+            "iQuotaMinimumRecommendBytes": 200000000, // Integer, the minimum recommended quota limit; a lower one may not work well
+            "iQuotaPreservedBytes": 0, // Integer, the space preserved for the system; a limit above iStatsSizeBytes minus it may not be fully usable
+            "iQuotaUsedBytes": 10000000, // Integer or null, the space used under the quota; null until the slot has started indexing, accurate from READY on
+            "iQuotaLimitBytes": 100000000, // Integer, the quota limit, -1 for none; the default or inaccurate below CONFIGURED
+            "bQuotaRotate": true // Boolean, quota rotation enabled; the default or inaccurate below CONFIGURED
+        }
     ],
-    "sDataDirPath": "DCIM" // String, path of the record data directory under each storage mount point
+    "sDataDirPath": "DCIM" // String, the record data directory under each mount point
 }
 ```
 
 Notes:
 
 - The status changes at runtime (devices, states, space, activity); poll it to follow the slots.
-- The used quota space (`iQuotaUsedBytes`) may be slightly larger than the sum of the recorded files because of filesystem overhead.
-- `iQuotaPreservedBytes` keeps the filesystem from filling up completely, for system stability.
-- `iQuotaMinimumRecommendBytes` is a guideline; a quota limit below it may perform poorly or not work at all.
-- The quota limit and rotation take effect only once the slot is `CONFIGURED` or later, and are stored per slot: changing one slot's settings does not affect the others.
-- The quota limit is not always fully usable: when the free space on the device is less than `iQuotaLimitBytes` minus `iQuotaUsedBytes`, the free space is the limit, and with rotation enabled the oldest files are deleted when the usable space runs out.
-- Vigil mounts and unmounts the slots as needed, and formats one only on a `FORMAT` request. It enables one slot at a time: enabling a slot disables the one enabled before.
-- Changing many files directly under the record data directory of an enabled slot can interfere with the storage system; use the Storage Control API to remove files.
+- `iQuotaUsedBytes` may exceed the sum of the recorded files slightly, by the filesystem's overhead.
+- `iQuotaPreservedBytes` keeps the filesystem from filling completely, for system stability.
+- `iQuotaMinimumRecommendBytes` is a guideline; a limit below it may perform poorly or not work at all.
+- The quota limit and rotation take effect from `CONFIGURED` on and are stored per slot: one slot's settings do not affect another's.
+- The quota limit is not always fully usable: when the free space is less than `iQuotaLimitBytes` minus `iQuotaUsedBytes`, the free space is the limit, and with rotation on the oldest files are deleted when the usable space runs out.
+- Vigil mounts and unmounts the slots as needed and formats one only on a `FORMAT` request. One slot is enabled at a time: enabling one disables the one enabled before.
+- Changing many files directly under the record data directory of an enabled slot can interfere with the storage system; remove files through Storage Control.
 - A slot takes time to move between states; watch `eState` to see when it is ready.
-- `bDirty` means the filesystem is marked dirty and may need a check (fsck) before it can be used again, for example after the device was removed without an unmount or after write errors. A dirty filesystem is not mounted automatically until it is repaired; enabling the slot attempts the repair (`fsck -p`).
-- `SATURATED` means free space is critically low and new recordings stop. With quota rotation off the state holds until files are removed (`REMOVE_FILES_OR_DIRECTORIES` or `FREE_UP`), the quota limit is raised, rotation is turned on, or the configured file actions' critical watermark falls (one file action instead of two, or a smaller format); a recording accepted just before the state changed is canceled rather than left `PENDING` until then. With rotation on it waits for the rotation, which brings the slot back to `READY`.
+- `bDirty`: the filesystem may need a check (fsck) before use, for example after a removal without an unmount or after write errors. It is not mounted automatically until repaired; enabling the slot attempts the repair (`fsck -p`).
+- `SATURATED`: free space is critically low and new recordings stop. With rotation off the state holds until files are removed (`REMOVE_FILES_OR_DIRECTORIES` or `FREE_UP`), the quota limit is raised, rotation is turned on, or the configured file actions' critical watermark falls (one file action instead of two, or a smaller format); a recording accepted just before the state changed is canceled rather than left `PENDING` until then. With rotation on it waits for the rotation, which returns the slot to `READY`.
 
 ### Storage Control
 
@@ -444,138 +430,80 @@ Perform a sync or async storage action.
 
 ```json
 {
-    "sTask": "ASYNC_STATUS", // String (optional), control operation task type, one of: "SYNC", "ASYNC_SUBMIT", "ASYNC_STATUS", "ASYNC_CANCEL", defaults to "SYNC"
-    "sAction": "FREE_UP", // String, action type, one of: "FORMAT", "FREE_UP", "EJECT", "REMOVE_FILES_OR_DIRECTORIES", "CONFIG", "RELAY", "RELAY_STATUS", "UNRELAY"
-    "sSlotDevPath": "/dev/sda1", // String, device path of the target slot, required for every action
-    "sTaskUID": "0-12345678901234567890", // String (optional), queried by ASYNC_STATUS / ASYNC_CANCEL; currently a non-empty value is ignored and an empty one matches nothing
-    "dSlotConfig": { // Object (optional), required only for sync "CONFIG" action
-        "iQuotaLimitBytes": 1073741824, // Integer, quota limit in bytes, -1 for no limit
-        "bQuotaRotate": true // Boolean, whether quota rotation is enabled
+    "sTask": "ASYNC_STATUS", // String, optional, "SYNC" (the default), "ASYNC_SUBMIT", "ASYNC_STATUS", or "ASYNC_CANCEL"
+    "sAction": "FREE_UP", // String, "FORMAT", "FREE_UP", "EJECT", "REMOVE_FILES_OR_DIRECTORIES", "CONFIG", "RELAY", "RELAY_STATUS", or "UNRELAY"
+    "sSlotDevPath": "/dev/sda1", // String, the target slot's device path, required for every action
+    "sTaskUID": "0-12345678901234567890", // String, optional, for ASYNC_STATUS and ASYNC_CANCEL; a non-empty value is ignored for now and an empty one matches nothing
+    "dSlotConfig": { // Object, required for the sync CONFIG action
+        "iQuotaLimitBytes": 1073741824, // Integer, the quota limit in bytes, -1 for none
+        "bQuotaRotate": true // Boolean, quota rotation
     },
-    "lFilesOrDirectoriesToRemove": [ // Array of strings (optional), required only for "REMOVE_FILES_OR_DIRECTORIES" action with SYNC or ASYNC_SUBMIT
-        "DCIM/20251016/event.mp4" // String, relative path to file or directory
+    "lFilesOrDirectoriesToRemove": [ // Array of strings, required for REMOVE_FILES_OR_DIRECTORIES with SYNC or ASYNC_SUBMIT
+        "2025-10-16/event.mp4" // String, a path relative to the record data directory (sDataDirPath of Storage Status)
     ]
 }
 ```
 
-Notes:
-
-- Async tasks (`ASYNC_*`) are supported only by `FORMAT`, `FREE_UP`, `EJECT`, and `REMOVE_FILES_OR_DIRECTORIES`.
-- `CONFIG`, `RELAY`, `RELAY_STATUS`, and `UNRELAY` are sync only.
+`FORMAT`, `FREE_UP`, `EJECT`, and `REMOVE_FILES_OR_DIRECTORIES` run sync or async; `CONFIG`, `RELAY`, `RELAY_STATUS`, and `UNRELAY` sync only.
 
 **Response Body:**
 
-The payload depends on the `sTask` field.
+The payload depends on `sTask`.
 
 #### Sync (SYNC)
 
 ```json
 {
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "", // String, optional, present only on failure
-    "dRelayStatus": { // Object (optional), present only for "RELAY" and "RELAY_STATUS" on success
-        "iRelayTimeoutRemain": 25, // Integer, relay timeout remain in seconds
-        "iRelayTimeout": 300, // Integer, relay timeout in seconds
-        "sRelayDirectory": "..." // String, relay directory name
-    }
+    "dRelayStatus": { // Object, RELAY and RELAY_STATUS on success only
+        "iRelayTimeoutRemain": 25, // Integer, the seconds left
+        "iRelayTimeout": 300, // Integer, the timeout in seconds
+        "sRelayDirectory": "..." // String, the relay directory name
+    },
+    "code": 0, "message": "" // see Error Handling
 }
 ```
 
-#### Async Submit (ASYNC_SUBMIT)
+#### Async (ASYNC_SUBMIT, ASYNC_STATUS, ASYNC_CANCEL)
+
+`ASYNC_SUBMIT` answers with the submitted task's object, normally still QUEUED with an empty `dResult`, plus `code` and `message`. `ASYNC_STATUS` answers with `lTasks`, the matching tasks' objects, each with `iQueuePosition`, and `ASYNC_CANCEL` with `lCancelledTasks`, the canceled tasks' objects without it; the array is omitted when no task matches, so the response may be just `{ "code": 0 }`.
 
 ```json
 {
-    "sUID": "0-12345678901234567890", // String, unique async task ID
-    "iCreatedTimestamp": 1776353445000, // Integer, Unix timestamp of task creation in milliseconds
-    "iUpdatedTimestamp": 1776353445000, // Integer, Unix timestamp of last task update in milliseconds
-    "sAction": "FREE_UP", // String, action type passed during submission
-    "sDevPath": "/dev/sda1", // String, device path of the target slot
-    "sStatus": "QUEUED", // String, task status, one of: "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCEL_REQUESTED", "CANCELED"
-    "bDone": false, // Boolean, true if status is completed (SUCCEEDED, FAILED, CANCELED)
-    "bCancelable": true, // Boolean, true if task can still be canceled
-    "iProgressPercent": 0, // Integer, estimated completion progress 0-100
-    "dResult": {}, // Object, final or intermediate execution result details
-    "code": 0, // Integer, always present, 0 on success
-    "message": "" // String, optional, present only on failure
-}
-```
-
-#### Async Status (ASYNC_STATUS)
-
-```json
-{
-    "lTasks": [ // Array of objects (optional), omitted if no matched tasks
-        {
-            "sUID": "0-12345678901234567890", // String, unique async task ID
-            "iCreatedTimestamp": 1776353445000, // Integer, Unix timestamp of task creation in milliseconds
-            "iUpdatedTimestamp": 1776353448000, // Integer, Unix timestamp of last task update in milliseconds
-            "sAction": "FREE_UP", // String, action type
-            "sDevPath": "/dev/sda1", // String, device path of the target slot
-            "sStatus": "RUNNING", // String, current active status
-            "bDone": false, // Boolean, true if status is completed
-            "bCancelable": true, // Boolean, true if task can still be canceled
-            "iProgressPercent": 42, // Integer, estimated completion progress 0-100
-            "dResult": { // Object, detailed action outcome (schema varies by sAction)
-                "sFileOpsType": "FREE_UP", // String (optional), "FREE_UP" or "REMOVE" for file ops
-                "iRequestedCount": 10, // Integer (optional)
-                "iProcessedCount": 4, // Integer (optional)
-                "iSuccessCount": 4, // Integer (optional)
-                "iFailedCount": 0, // Integer (optional)
-                "iCode": 0, // Integer (optional), non-zero system error code if failed
-                "sMessage": "" // String (optional), failure reason
-            },
-            "iQueuePosition": 0 // Integer (optional), 0: running, 1..N: queued, null: finished (position at time of completion)
-        }
-    ],
-    "code": 0, // Integer, always present, 0 on success
-    "message": "" // String, optional, present only on failure
-}
-```
-
-#### Async Cancel (ASYNC_CANCEL)
-
-```json
-{
-    "lCancelledTasks": [ // Array of objects (optional), omitted if no matched tasks
-        {
-            "sUID": "0-12345678901234567890", // String, unique async task ID
-            "iCreatedTimestamp": 1776353445000, // Integer, Unix timestamp of task creation in milliseconds
-            "iUpdatedTimestamp": 1776353449000, // Integer, Unix timestamp of last task update in milliseconds
-            "sAction": "FREE_UP", // String, action type
-            "sDevPath": "/dev/sda1", // String, device path of the target slot
-            "sStatus": "CANCEL_REQUESTED", // String, current updated status after cancellation
-            "bDone": false, // Boolean, true if status is completed
-            "bCancelable": false, // Boolean, true if task can still be canceled
-            "iProgressPercent": 42, // Integer, estimated completion progress 0-100
-            "dResult": { // Object, detailed action outcome (schema varies by sAction)
-                "sFileOpsType": "FREE_UP", // String (optional), "FREE_UP" or "REMOVE" for file ops
-                "iRequestedCount": 10, // Integer (optional)
-                "iProcessedCount": 4, // Integer (optional)
-                "iSuccessCount": 4, // Integer (optional)
-                "iFailedCount": 0 // Integer (optional)
-            }
-            // Note: iQueuePosition is not present in ASYNC_CANCEL responses
-        }
-    ],
-    "code": 0, // Integer, always present, 0 on success
-    "message": "" // String, optional, present only on failure
+    "sUID": "0-12345678901234567890", // String, the task's unique ID
+    "iCreatedTimestamp": 1776353445000, // Integer, Unix milliseconds of the task's creation
+    "iUpdatedTimestamp": 1776353448000, // Integer, Unix milliseconds of the last update
+    "sAction": "FREE_UP", // String, the action submitted
+    "sDevPath": "/dev/sda1", // String, the target slot
+    "sStatus": "RUNNING", // String, "QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCEL_REQUESTED", or "CANCELED"
+    "bDone": false, // Boolean, SUCCEEDED, FAILED, or CANCELED
+    "bCancelable": true, // Boolean, can still be canceled
+    "iProgressPercent": 42, // Integer, 0 to 100, estimated
+    "dResult": { // Object, the outcome so far; its fields vary by sAction, and these appear once a file operation runs
+        "sFileOpsType": "FREE_UP", // String, "FREE_UP" or "REMOVE"
+        "iRequestedCount": 10, // Integer
+        "iProcessedCount": 4, // Integer
+        "iSuccessCount": 4, // Integer
+        "iFailedCount": 0, // Integer
+        "iCode": 0, // Integer, optional, a non-zero system error code on failure
+        "sMessage": "" // String, optional, the failure reason
+    },
+    "iQueuePosition": 0 // Integer or null, ASYNC_STATUS only: 0 running, 1 to N queued, null finished (its position at completion)
 }
 ```
 
 Runtime notes:
 
-- `FORMAT` and `EJECT` can be canceled only while queued. Formatting is allowed only in `NOT_FORMATTED_OR_FORMAT_UNSUPPORTED` or `NOT_MOUNTED`.
-- `EJECT` answers after the slot is disabled, its filesystem synced, the unmount attempted, and the slot dropped from the storage status; a sync or unmount failure is logged, not reported. A device pulled and reinserted while the eject runs comes back as a new slot, which the status lists after the answer.
-- A `FREE_UP` or `REMOVE_FILES_OR_DIRECTORIES` of the slot that is still running holds its filesystem, so an eject only detaches the mount and the filesystem stays busy until that request returns. Let such a request finish, or cancel it, before ejecting.
+- `FORMAT` and `EJECT` can be canceled only while queued; formatting is allowed only in `NOT_FORMATTED_OR_FORMAT_UNSUPPORTED` or `NOT_MOUNTED`.
+- `EJECT` answers after the slot is disabled, its filesystem synced, the unmount attempted, and the slot dropped from the status; a sync or unmount failure is logged, not reported. A device pulled and reinserted while the eject runs comes back as a new slot, listed after the answer.
+- A `FREE_UP` or `REMOVE_FILES_OR_DIRECTORIES` still running on the slot holds its filesystem, so an eject only detaches the mount and the filesystem stays busy until that request returns; let it finish, or cancel it, before ejecting.
 - `FREE_UP` and `REMOVE_FILES_OR_DIRECTORIES` can also be canceled while running.
-- An accepted cancellation may still report `sStatus: "CANCEL_REQUESTED"`; a later `ASYNC_STATUS` shows the final `CANCELED`.
-- One async task runs at a time across all slots. The queue holds up to 6 pending tasks, and the history keeps the last 3 completed tasks per `{sAction, sSlotDevPath}`.
-- When no task matches, `lTasks` and `lCancelledTasks` are omitted and the response may be just `{ "code": 0 }`.
-- `REMOVE_FILES_OR_DIRECTORIES` reports aggregate results only: the sync form through `code` and `message`, the async form as progress counts in `dResult`; per-path results are not returned.
+- An accepted cancellation may still report `CANCEL_REQUESTED`; a later `ASYNC_STATUS` shows the final `CANCELED`.
+- One async task runs at a time across all slots; the queue holds up to 6 pending tasks, and the history keeps the last 3 completed per `{sAction, sSlotDevPath}`. `ASYNC_SUBMIT` answers `EAGAIN` while the queue is full.
+- `REMOVE_FILES_OR_DIRECTORIES` reports aggregates only: sync through `code` and `message`, async as the counts in `dResult`; no per-path result.
 
 ## Capture API
 
-The Capture API controls media capture by hand, independently of the rule-based recording, with two exceptions: the `ALWAYS_ON` rule opens no clip while a capture (or any other media operation) is active, and a host with a single video sink cannot run a video capture and a recording at once (see the capability limits).
+Manual capture, independent of the rule-based recording but for two things: the `ALWAYS_ON` rule opens no clip while a capture (or any other media operation) is active, and a host with a single video sink cannot run a video capture and a recording at once (see the capability limits).
 
 ### Capture Status
 
@@ -589,17 +517,17 @@ Get the current capture status.
 
 ```json
 {
-    "dLastCapture": { // Object (optional), the active capture if one is in progress, otherwise the last completed one, null if none
-        "sID": "194e8b2c0000194e8b2c0001", // String, unique capture event ID
-        "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
-        "sFormat": "MP4", // String, capture format ("MP4", "JPG", "RAW")
-        "iVideoLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
-        "sStatus": "WRITING", // String, write event status, one of: "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", "UNKNOWN" (see the notes)
-        "iTimestamp": 1736870400000, // Integer, Unix timestamp in milliseconds
-        "sFileName": "Capture 20260114 143000 123456.mp4" // String, generated file name
+    "dLastCapture": { // Object or null, the capture in progress, else the last completed one
+        "sID": "194e8b2c0000194e8b2c0001", // String, the capture's unique ID
+        "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, the output directory
+        "sFormat": "MP4", // String, "MP4", "JPG", or "RAW"
+        "iVideoLengthSeconds": 60, // Integer, optional, video captures of finite length only
+        "sStatus": "WRITING", // String, "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", or "UNKNOWN" (see the notes)
+        "iTimestamp": 1736870400000, // Integer, Unix milliseconds
+        "sFileName": "Capture 2026-01-14 14.30.00 123456.mp4" // String, the generated file name
     },
-    "bReadyToStartNew": true, // Boolean, whether a new capture can be started (false while a capture is in progress)
-    "bStopRequested": false // Boolean, whether a stop capture request is pending
+    "bReadyToStartNew": true, // Boolean, false while a capture is in progress
+    "bStopRequested": false // Boolean, a stop is pending
 }
 ```
 
@@ -624,9 +552,9 @@ Start a new capture session.
 
 ```json
 {
-    "sOutput": "/mnt/sdcard/DCIM/20260114", // String, absolute path under storage mount point (directory or full file path)
-    "sFormat": "MP4", // String, capture format: "MP4" (video), "JPG" (image), "RAW" (image)
-    "iVideoLengthSeconds": 60 // Integer, optional, video clip length in seconds; omit to record until stopped
+    "sOutput": "/mnt/sdcard/DCIM/20260114", // String, an absolute path under a storage mount point: a directory or a full file path
+    "sFormat": "MP4", // String, "MP4" (video), "JPG" or "RAW" (image)
+    "iVideoLengthSeconds": 60 // Integer, optional, the clip length in seconds; omit to record until stopped
 }
 ```
 
@@ -634,26 +562,18 @@ Start a new capture session.
 
 ```json
 {
-    "dCapture": { // Object, the started capture event
-        "sID": "194e8b2c0000194e8b2c0001", // String, unique capture event ID
-        "sOutputDirectory": "/mnt/sdcard/DCIM/20260114", // String, output directory path
-        "sFormat": "MP4", // String, capture format
-        "iVideoLengthSeconds": 60, // Integer, optional, present only for video captures with finite length
-        "sStatus": "PENDING", // String, initial write event status
-        "iTimestamp": 1736870400000, // Integer, Unix timestamp in milliseconds
-        "sFileName": "Capture 20260114 143000 123456.mp4" // String, generated file name
+    "dCapture": { // Object, the started capture, in the shape of dLastCapture with sStatus "PENDING"
     },
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // see Error Handling
 }
 ```
 
 Notes:
 
-- Returns `EBUSY` if a capture is already in progress: one capture runs at a time.
-- The output path must be absolute and start with `/mnt` or the configured internal mount point. The check compares strings only: it normalizes nothing and does not look for a mounted slot, so a path through `..`, or one that merely shares the prefix, passes, and the capture is written there, replacing a file of that name.
-- A missing output directory is created (and stays if the capture then fails). The file is written under its name prefixed with a dot and renamed to `sFileName` when the capture ends; a stale file of the dot-prefixed name is removed first.
-- A capture is admitted against the same per-filesystem in-flight budget as automatic recording. When the output filesystem's free space, minus what admitted tasks may still write there, is at or below the capture's critical watermark, the capture fails before any callback (`FAILED`, no file). While it runs, its own estimate is in flight on that filesystem and counts against automatic admission there.
+- `EBUSY`: a capture is already in progress; one runs at a time.
+- The output path must be absolute and start with `/mnt` or the configured internal mount point. The check compares strings only, normalizes nothing, and looks for no mounted slot, so a path through `..`, or one that merely shares the prefix, passes and is written to, replacing a file of that name.
+- A missing output directory is created (and stays if the capture then fails). The file is written under its name prefixed with a dot and renamed to `sFileName` when the capture ends; a stale dot-prefixed file is removed first.
+- A capture is admitted against the same per-filesystem in-flight budget as automatic recording: when the output filesystem's free space, minus what admitted tasks may still write there, is at or below the capture's critical watermark, it fails before any callback (`FAILED`, no file); while it runs, its own estimate is in flight there and counts against automatic admission.
 - Nothing runs while media is paused: the capture waits as `PENDING` and runs once media resumes.
 
 ### Stop Capture
@@ -664,21 +584,20 @@ Stop the current capture session.
 
 **Method:** `POST`
 
-**Request Payload:** None required (empty object `{}` accepted).
+**Request Payload:** none (`{}` is accepted).
 
 **Response Body:**
 
 ```json
 {
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 0, "message": "" // see Error Handling
 }
 ```
 
 Notes:
 
-- Returns `ENOENT` if no capture is in progress, and `EALREADY` if a stop is already in progress.
-- A stop ends a video capture as `COMPLETED` on the next key frame, the frames until then included, or when the key frame wait runs out without one; a clip that has not yet seen its first key frame is `CANCELED`. An image capture that has not run yet is still taken. The request is cleared with the capture.
+- `ENOENT`: no capture is in progress; `EALREADY`: a stop is already in progress.
+- A stop ends a video capture as `COMPLETED` on the next key frame, the frames until then included, or when the key frame wait runs out without one; a clip that has not seen its first key frame is `CANCELED`. An image capture that has not run yet is still taken. The request is cleared with the capture.
 
 ## Files API
 
@@ -690,23 +609,21 @@ Fetch file contents through the relay.
 
 **Method:** `GET`
 
-**Description:** To access files, a client first requests a `RELAY` action through the Storage Control API. This creates a temporary relay directory (a symlink) named by a UUID, returned as `dRelayStatus.sRelayDirectory`; the client can then fetch files under it.
-
-**Example:** `.../vigil/relay/550e8400-e29b-41d4-a716-446655440000/DCIM/20251016/event.mp4`
+A client first requests a `RELAY` action through Storage Control, which creates a temporary relay directory (a symlink) named by a UUID, returned as `dRelayStatus.sRelayDirectory`, and then fetches files under it by their path relative to the record data directory, for example `.../vigil/relay/550e8400-e29b-41d4-a716-446655440000/2025-10-16/event.mp4`.
 
 Notes:
 
 - The relay directory times out 300 seconds after the last `RELAY` request; send `RELAY` again to keep it open. Fetching files does not refresh it.
-- Use the `UNRELAY` action to close the relay explicitly.
+- `UNRELAY` closes the relay explicitly.
 - When the host provides `thumbnail_generate_cb`, a recorded video is published with a thumbnail: `/path/to/video.mp4` -> `/path/to/.thumb/video.mp4.thumb.jpg`.
 
 ## Error Handling
 
-Every `POST` response carries a `code` field, 0 on success; a `GET` response carries one only on failure. A non-zero `code` is error_base (30000) plus abs(posix_errno), and a `message` string may be included. Request bodies are limited to 1 MiB; a larger body is rejected before parsing (the C API returns `EFAULT` with no JSON body).
+Every `POST` response carries `code`, 0 on success, else error_base (30000) plus abs(posix_errno), and may carry `message`; a `GET` response carries them only on failure. Request bodies are limited to 1 MiB; a larger body is rejected before parsing (the C API returns `EFAULT` with no JSON body).
 
 ```json
 {
-    "code": 0, // Integer, always present in POST, 0 on success, otherwise error_base + abs(posix_errno)
-    "message": "" // String, optional, present only on failure
+    "code": 30022, // Integer, 0 on success, else error_base + abs(posix_errno)
+    "message": "..." // String, optional, present on failure
 }
 ```
