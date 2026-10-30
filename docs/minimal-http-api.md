@@ -91,20 +91,20 @@ Get the information about the rule system.
 ```json
 {
     "bReadyForNewEvent": true, // Boolean, false while a file channel holds a triggered task (PENDING, WRITING, or HOLDING); a continuous clip does not count
-    "dLastRuleEvent": { // Object or null, the most recently accepted triggered file task: the held one while a channel holds one (the later accepted when both do), else the last retired one; a later continuous clip replaces the video channel's
+    "dLastRuleEvent": { // Object or null, the most recently accepted triggered file task: the held one while a channel holds one (the later accepted when both do), else the last retired one; a continuous clip is never shown but, once retired, takes the video channel's place in that choice
         "sStatus": "COMPLETED", // String, "PENDING", "WRITING", "COMPLETED", "FAILED", "INTERRUPTED", "CANCELED", or "UNKNOWN" (see the notes)
-        "iTimestamp": 1735574400000, // Integer, the owner's event time, Unix milliseconds
+        "iTimestamp": 1735574400000, // Integer, the owner's event time, Unix milliseconds; for a continuous clip, when it was admitted
         "iOwnerUID": 1735574400123, // Integer, the owner's UID (exact 64-bit value); 0 for a continuous clip, seen only under dActionStates.dVideo.dEvent
         "iFileID": 1735574400124 // Integer, the file's identity (exact 64-bit value); its file callback carries it as file_id if the file is published, and the rule events dispatched while the task was PENDING or WRITING list it
     },
     "dLastRuleEventOwner": { // Object or null, the owner of dLastRuleEvent
-        "sRuleType": "TIMER", // String, the rule type; "UNKNOWN" for a direct EVENT delivered without a rule
+        "sRuleType": "TIMER", // String, the rule type, one of the sCurrentSelected values of Record Rule Configuration; "UNKNOWN" for a direct EVENT delivered without a rule
         "sRuleID": "", // String, the condition: the inference member ID, the GPIO signal (e.g. "RISING"), the TTY command, or the SED rule's sID; empty for other rules
         "sSourceID": "", // String, the inference source for inference and direct EVENT owners, the pin name for GPIO, the TTY name for TTY; otherwise empty
         "sSourceDelivery": "EVENT", // String, "FRAME" for inference frame owners, "EVENT" for every other owner
-        "iTimestamp": 1735574400000, // Integer, the event time, Unix milliseconds: the input's timestamp for FRAME and EVENT owners, else when the condition was observed
-        "iDispatchTimestamp": 1735574400000, // Integer, when Vigil created the owner, Unix milliseconds; equals iTimestamp for owners without an input
-        "iUID": 1735574400123 // Integer, the owner's unique ID (exact 64-bit value), also carried by the rule and file callbacks
+        "iTimestamp": 1735574400000, // Integer, the event time, Unix milliseconds: the input's timestamp for FRAME and direct EVENT owners (sRuleType "UNKNOWN"), else when the condition was observed
+        "iDispatchTimestamp": 1735574400000, // Integer, when Vigil created the owner, Unix milliseconds; equals iTimestamp for every owner but FRAME and direct EVENT ones
+        "iUID": 1735574400123 // Integer, the owner's unique ID (exact 64-bit value), carried by the rule callback as uid and by its files' callbacks as event_uid
     },
     "dLastDispatchedOwner": { // Object or null, the owner of the most recent dispatch whatever the actions did with it, in the shape of dLastRuleEventOwner
     },
