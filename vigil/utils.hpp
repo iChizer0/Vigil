@@ -83,23 +83,40 @@ public:
 
         ::pid_t pid;
         ::posix_spawn_file_actions_t file_actions;
+        ::posix_spawnattr_t attr;
+        ::sigset_t none;
+        ::sigset_t term;
         int status;
 
         if ((status = ::posix_spawn_file_actions_init(&file_actions)) != 0) [[unlikely]]
             return -status;
+        if ((status = ::posix_spawnattr_init(&attr)) != 0) [[unlikely]]
+        {
+            ::posix_spawn_file_actions_destroy(&file_actions);
+            return -status;
+        }
 
         if ((status = ::posix_spawn_file_actions_addclosefrom_np(&file_actions, 3)) != 0) [[unlikely]]
             goto l_check_status;
 
-        if ((status
-                = ::posix_spawn_file_actions_addopen(&file_actions, STDIN_FILENO, "/dev/null", O_RDWR | O_CLOEXEC, 0))
-                == 0
+        // The child starts with no signal blocked and SIGTERM at its default, whatever the host blocks (Vigil's threads
+        // inherit its mask) or ignores, so a stop reaches it
+        ::sigemptyset(&none);
+        ::sigemptyset(&term);
+        ::sigaddset(&term, SIGTERM);
+        if ((status = ::posix_spawnattr_setsigmask(&attr, &none)) == 0
+            && (status = ::posix_spawnattr_setsigdefault(&attr, &term)) == 0
+            && (status = ::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF)) == 0
+            && (status = ::posix_spawn_file_actions_addopen(&file_actions, STDIN_FILENO, "/dev/null",
+                    O_RDWR | O_CLOEXEC, 0))
+                   == 0
             && (status = ::posix_spawn_file_actions_adddup2(&file_actions, STDIN_FILENO, STDOUT_FILENO)) == 0
             && (status = ::posix_spawn_file_actions_adddup2(&file_actions, STDIN_FILENO, STDERR_FILENO)) == 0)
             [[likely]]
-            status = ::posix_spawnp(&pid, _args[0], &file_actions, nullptr, _args, environ);
+            status = ::posix_spawnp(&pid, _args[0], &file_actions, &attr, _args, environ);
 
     l_check_status:
+        ::posix_spawnattr_destroy(&attr);
         ::posix_spawn_file_actions_destroy(&file_actions);
         if (status != 0)
             return -status;

@@ -1027,6 +1027,29 @@ VG_TEST_CASE(a_child_the_host_reaps_is_reported_as_a_failure)
     VG_CHECK_EQ(waited, -ECHILD);
 }
 
+VG_TEST_CASE(a_child_is_stopped_whatever_the_host_does_with_sigterm)
+{
+    // A host may block SIGTERM in its threads, to take it with sigwait or signalfd, which Vigil's threads inherit, or
+    // ignore it in the process; a child inherits both. sleep keeps what it inherits (dash resets its mask), so a stop
+    // asked for from the start ends it at once with -SIGTERM, where it would exit 0 after its 3 s.
+    std::atomic<int> sig = SIGTERM;
+    ::sigset_t term {};
+    ::sigset_t previous_mask {};
+    ::sigemptyset(&term);
+    ::sigaddset(&term, SIGTERM);
+    VG_REQUIRE(::pthread_sigmask(SIG_BLOCK, &term, &previous_mask) == 0);
+    const auto blocked = utils::Execute("sleep", { "3" })(&sig);
+    VG_REQUIRE(::pthread_sigmask(SIG_SETMASK, &previous_mask, nullptr) == 0);
+    struct sigaction ignore {};
+    struct sigaction previous {};
+    ignore.sa_handler = SIG_IGN;
+    VG_REQUIRE(::sigaction(SIGTERM, &ignore, &previous) == 0);
+    const auto ignored = utils::Execute("sleep", { "3" })(&sig);
+    VG_REQUIRE(::sigaction(SIGTERM, &previous, nullptr) == 0);
+    VG_CHECK_EQ(blocked, -SIGTERM);
+    VG_CHECK_EQ(ignored, -SIGTERM);
+}
+
 VG_TEST_CASE(a_failed_automatic_task_leaves_no_file_in_the_cache)
 {
     // Over a never-enabled Slot whose gates a triggered task passes (READY and registered, free space, rules enabled,
