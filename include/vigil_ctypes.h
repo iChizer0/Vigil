@@ -133,7 +133,9 @@ typedef struct vg_rule_evt_t
                                     for it, else the one PENDING or WRITING as the channel refused it, a continuous
                                     clip included; a channel with neither adds nothing, and an id's channel is told
                                     by the extension of its file callback's path, or by rule info while the task is
-                                    held. The tasks may still be canceled or fail. */
+                                    held. The tasks may still be canceled or fail. From a continuous clip's closing
+                                    key frame until the next clip is admitted, the Video entry is the ending clip or
+                                    absent, while the event's frames, if recorded, go to the next clip. */
     size_t file_ids_len;         /**< The number of file_ids; 0 when no channel has one. */
 } vg_rule_evt_t;
 
@@ -169,8 +171,10 @@ typedef struct vg_config_basic_t
      * null-terminated and borrowed for the call; the status is ignored. */
     vg_sta_e (*log_cb)(vg_log_level_e level, const char *msg, size_t bytes_len);
     /** Optional. Once per dispatched rule event, after its file tasks were accepted or refused, on the dispatching
-     * thread (the rule thread, or an HTTP activation's) with no Vigil lock held; return promptly. Not an ordered
-     * stream: a file callback for the same event may come first. */
+     * thread (the rule thread, or an HTTP activation's) with no Vigil lock held; return promptly. An HTTP activation
+     * made from another callback runs it on that callback's thread and within that callback's limits; from a media
+     * callback, for one, it may call neither scoped suspension function. Not an ordered stream: a file callback for
+     * the same event may come first. */
     void (*on_rule_event_cb)(const vg_rule_evt_t *evt);
     /** Optional. Once per file a recording Slot publishes (never for a manual capture), on the publishing worker
      * outside Vigil's locks; calls from the Photo and Video workers may overlap. Return promptly, and do not eject,

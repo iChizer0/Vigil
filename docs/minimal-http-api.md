@@ -46,7 +46,7 @@ The payload is the version-2 `record_config.json`, always complete and in the ca
 
 Any combination of actions may be enabled, including none with `bRuleEnabled` true, when every rule event is reported and nothing else happens. Photo and Video run independently on their own intervals and may both publish a file for one rule event. Sound plays through the host's callback, which receives `sFilePath`, and is never queued: a trigger while one is pending or playing is dropped. A SED rule with Sound enabled can retrigger itself through the microphone; any guard time belongs to the host's playback.
 
-`bContinuousRecordEnabled` records clips of the target length (`bVideoClipLengthSeconds` in Rule Info) back to back on the video channel whenever the schedule is open and storage and media allow. Its clips are not rule events: no rule callback reports them and their files carry `event_uid` 0, but a rule event dispatched while a clip is pending or being written lists the clip's file id in `file_ids`, as it lists a triggered clip accepted for it or already in progress, so a host can find a trigger's footage (see `include/vigil_ctypes.h`).
+`bContinuousRecordEnabled` records clips of the target length (`bVideoClipLengthSeconds` in Rule Info) back to back on the video channel whenever the schedule is open and storage and media allow. Its clips are not rule events: no rule callback reports them and their files carry `event_uid` 0, but a rule event dispatched while a clip is pending or being written lists the clip's file id in `file_ids`, as it lists a triggered clip accepted for it or already in progress, so a host can find a trigger's footage (see `include/vigil_ctypes.h`). The exception is a clip boundary: from one clip's closing key frame until the next clip is admitted, an event lists the ending clip or no video file, while its footage, if recorded, opens the next clip.
 
 While it is set, `dVideo` keeps its stored value but no triggered video is admitted; Photo and Sound are unaffected, and an HTTP activation needs storage only when Photo is enabled. `ALWAYS_ON`, the default record rule, cannot be combined with it, even while `bRuleEnabled` is false (see Always-On Rule).
 
@@ -286,7 +286,7 @@ A GPIO rule's events (the rule callback and `dLastRuleEventOwner`) carry the sig
 }
 ```
 
-A TTY rule's events carry the command as the rule ID and the TTY name as the source ID. The rule connects to the TTY's socket when selected and tries again on each evaluation while not connected; a peer that is not accepting connections blocks neither the selection nor the evaluation.
+A TTY rule's events carry the command as the rule ID and the TTY name as the source ID. The rule connects to the TTY's socket when selected and tries again on each evaluation while not connected; a peer that is not accepting connections blocks neither the selection nor the evaluation. Rules are evaluated only while `bRuleEnabled` is true and the schedule is open, but an open connection stays open meanwhile: commands sent then are buffered, up to the socket's buffer, and when evaluation resumes each is reported as a rule event, one per rule round (at least 10 ms apart) and each with the time of its report, unlike the SED rule, whose activations during a closure are reported once. A successful reconnect drops the commands read but not yet reported, such as a burst the peer sent just before closing.
 
 #### HTTP Rule
 

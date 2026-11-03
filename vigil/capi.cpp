@@ -24,7 +24,8 @@ namespace vigil_c_api {
 // Lock order: the lifecycle mutex (init and deinit only), the instance mutex, then the suspend mutex. Every other call
 // holds the instance mutex shared; init and deinit take it exclusively just to publish or detach the pointer, so the
 // runtime is built and destroyed with no instance lock held and a reentering callback gets ESRCH. A suspension drains
-// with the suspend mutex and no instance hold; deinit has emptied the drain by the time init resets the count under it.
+// with the suspend mutex and no instance hold of its own; deinit has emptied the drain by the time init resets the
+// count under it.
 static inline std::mutex vigil_instance_lifecycle_mutex;
 static inline std::shared_mutex vigil_instance_mutex;
 static inline std::atomic<uint64_t> vigil_instance_generation = 0; // bumped whenever an instance is published

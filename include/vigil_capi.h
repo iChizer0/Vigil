@@ -84,9 +84,13 @@ vg_sta_e vg_media_enqueue_audio_frame(const vg_audio_frame_t *frame);
 vg_sta_e vg_media_scoped_suspend_write(bool wait);
 
 /**
- * Ends the innermost suspension. The one that ends the outermost admits media again and, with `reset_media_queue`,
- * first drops the buffered frames: the buffer is trimmed only as frames arrive, so after a stall of the pipeline a
- * triggered clip's pre-roll and a capture would otherwise start with frames from before it.
+ * Ends the innermost suspension, whoever made it: suspensions are counted, not owned. The one that ends the outermost
+ * admits media again and, with `reset_media_queue`, first drops the buffered frames: the buffer is trimmed only as
+ * frames arrive, so after a stall of the pipeline a triggered clip's pre-roll and a capture would otherwise start with
+ * frames from before it.
+ *
+ * A new runtime starts with nothing suspended: a suspension made before a deinit must not be resumed after the next
+ * init, where it would end another's.
  *
  * @return 0; ECANCELED when nothing is suspended (nothing is dropped then); EFAULT on failure.
  */
