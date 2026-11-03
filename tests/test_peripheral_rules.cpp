@@ -1,5 +1,6 @@
 // The GPIO, TTY, and SED rules over fake peripherals; the TTY and SED peers are Unix sockets in a temporary directory.
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -12,6 +13,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -168,6 +170,12 @@ struct SocketPeer
             throw std::runtime_error("mkdtemp failed");
         dir = p;
         path = dir + "/" + name;
+        listen();
+    }
+
+    // Listens at `path`: from the constructor, or again after stopListening.
+    void listen()
+    {
         listen_fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         sockaddr_un addr {};
         addr.sun_family = AF_UNIX;
@@ -175,6 +183,15 @@ struct SocketPeer
         if (listen_fd < 0 || ::bind(listen_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0
             || ::listen(listen_fd, 1) != 0)
             throw std::runtime_error("failed to listen on " + path);
+    }
+
+    // Closes the connection and the listener and removes the path: a peer that is gone, so a connect fails at once.
+    void stopListening()
+    {
+        disconnect();
+        ::close(listen_fd);
+        listen_fd = -1;
+        std::filesystem::remove(path);
     }
 
     ~SocketPeer()
@@ -257,22 +274,39 @@ struct SocketPeer
     }
 };
 
+// Counts the TTY rule's failed connects among the ERROR lines.
+struct ConnectFailures
+{
+    static inline std::atomic<int> count = 0;
+
+    static vg_sta_e log(vg_log_level_e level, const char *msg, size_t len)
+    {
+        if (level == VG_LOG_LEVEL_ERROR
+            && std::string_view(msg, len).find("Failed to connect") != std::string_view::npos)
+            ++count;
+        return TestLogCallback(level, msg, len);
+    }
+};
+
 struct TTYFixture
 {
     SocketPeer peer;
     vg_config_tty_t tty; // borrows peer.path
     Context ctx;
 
-    explicit TTYFixture(size_t buffer_size = 16)
-        : peer(), tty { .name = "tty0", .socket_path = peer.path.c_str(), .buffer_size = buffer_size }, ctx(Config(tty))
+    explicit TTYFixture(size_t buffer_size = 16, vg_sta_e (*log_cb)(vg_log_level_e, const char *, size_t) = nullptr)
+        : peer(), tty { .name = "tty0", .socket_path = peer.path.c_str(), .buffer_size = buffer_size },
+          ctx(Config(tty, log_cb))
     {
     }
 
-    static vg_config_t Config(vg_config_tty_t &tty)
+    static vg_config_t Config(vg_config_tty_t &tty, vg_sta_e (*log_cb)(vg_log_level_e, const char *, size_t) = nullptr)
     {
         auto cfg = MakeFakeConfig();
         cfg.ttys.ttys = &tty;
         cfg.ttys.len = 1;
+        if (log_cb)
+            cfg.basic.log_cb = log_cb;
         return cfg;
     }
 
@@ -446,7 +480,6 @@ VG_TEST_CASE(gpio_pin_lookup_frees_the_host_list_once_however_parsing_ends)
 
 VG_TEST_CASE(tty_rule_config_needs_a_listed_tty_with_a_socket_path)
 {
-    // A length without an array lists nothing.
     vg_config_tty_t no_path { .name = "tty0", .socket_path = nullptr, .buffer_size = 16 };
     {
         const Context ctx(TTYFixture::Config(no_path));
@@ -454,11 +487,24 @@ VG_TEST_CASE(tty_rule_config_needs_a_listed_tty_with_a_socket_path)
         VG_CHECK_THROWS(TTYRuleConfig(nlohmann::json { { "sName", "other" }, { "sCommand", "go" } }, ctx));
     }
     {
+        // A length without an array lists nothing.
         auto cfg = MakeFakeConfig();
         cfg.ttys.ttys = nullptr;
         cfg.ttys.len = 1;
         const Context ctx(cfg);
         VG_CHECK_THROWS(TTYRuleConfig(nlohmann::json { { "sName", "tty0" }, { "sCommand", "go" } }, ctx));
+    }
+    // A path must fit a Unix socket address with its terminator, or no connect could ever succeed.
+    const nlohmann::json go { { "sName", "tty0" }, { "sCommand", "go" } };
+    for (const size_t length: { sizeof(sockaddr_un::sun_path) - 1, sizeof(sockaddr_un::sun_path) })
+    {
+        const std::string path = "/" + std::string(length - 1, 'x');
+        vg_config_tty_t tty { .name = "tty0", .socket_path = path.c_str(), .buffer_size = 16 };
+        const Context ctx(TTYFixture::Config(tty));
+        if (length < sizeof(sockaddr_un::sun_path))
+            VG_CHECK(TTYRuleConfig(go, ctx).socket_path == path);
+        else
+            VG_CHECK_THROWS(TTYRuleConfig(go, ctx));
     }
 }
 
@@ -525,6 +571,31 @@ VG_TEST_CASE(tty_rule_is_not_blocked_by_a_peer_whose_accept_queue_is_full)
     f.peer.accept();
     f.peer.send("go");
     VG_CHECK((*rule)(f.ctx) != nullptr);
+}
+
+VG_TEST_CASE(tty_rule_logs_a_failed_connect_once_until_a_connect_succeeds)
+{
+    // The rule loop retries every 10 ms while the rule is not connected: a peer that is gone is reported once, and
+    // again only after a connection was made and lost.
+    ConnectFailures::count = 0;
+    TTYFixture f(16, &ConnectFailures::log);
+    f.peer.stopListening();
+    const auto rule = std::make_unique<TTYRule>(
+        TTYRuleConfig(nlohmann::json { { "sName", "tty0" }, { "sCommand", "go" } }, f.ctx), f.ctx);
+    VG_CHECK((*rule)(f.ctx) == nullptr);
+    VG_CHECK((*rule)(f.ctx) == nullptr);
+    VG_CHECK_EQ(ConnectFailures::count.load(), 1);
+
+    f.peer.listen();
+    VG_CHECK((*rule)(f.ctx) == nullptr); // connects
+    f.peer.accept();
+    f.peer.send("go");
+    VG_CHECK((*rule)(f.ctx) != nullptr);
+    f.peer.stopListening();
+    VG_CHECK((*rule)(f.ctx) == nullptr); // reads the end of the connection
+    VG_CHECK((*rule)(f.ctx) == nullptr);
+    VG_CHECK((*rule)(f.ctx) == nullptr);
+    VG_CHECK_EQ(ConnectFailures::count.load(), 2);
 }
 
 VG_TEST_CASE(sound_event_rule_config_rejects_a_negative_window_and_malformed_filters)

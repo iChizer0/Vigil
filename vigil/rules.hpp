@@ -776,7 +776,7 @@ class TTYRule final: public BaseRule
 public:
     TTYRule(const TTYRuleConfig &cfg, const Context &ctx)
         : BaseRule(VG_RULE_TYPE_TTY, 0), _name(cfg.name), _socket_path(cfg.socket_path), _cmd(cfg.cmd),
-          _fallback(FallbackTable(_cmd)), _cmd_pos(0), _buffer(cfg.buffer_size), _fd(-1), _found(0)
+          _fallback(FallbackTable(_cmd)), _cmd_pos(0), _buffer(cfg.buffer_size), _fd(-1), _found(0), _open_failed(false)
     {
         if (_cmd.empty())
             throw Exception("TTY rule command cannot be empty while initializing TTY rule");
@@ -860,14 +860,16 @@ private:
     }
 
     // Never blocks: the socket is non-blocking before the connect, which for a Unix stream socket completes at once or
-    // fails (EAGAIN while the peer's accept queue is full); the next evaluation tries again.
+    // fails (EAGAIN while the peer's accept queue is full); the next evaluation tries again. A failure is logged once
+    // until a connect succeeds, since the rule loop retries every 10 ms.
     void openSocket(const Context &ctx) const noexcept
     {
         _fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
         if (_fd < 0)
         {
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create Unix socket for TTY '", _socket_path,
-                "': ", strerror(errno));
+            if (!std::exchange(_open_failed, true))
+                VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to create Unix socket for TTY '", _socket_path,
+                    "': ", strerror(errno));
             return;
         }
 
@@ -875,7 +877,8 @@ private:
         addr.sun_family = AF_UNIX;
         if (_socket_path.size() >= sizeof(addr.sun_path))
         {
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Unix socket path too long for TTY: '", _socket_path, "'");
+            if (!std::exchange(_open_failed, true))
+                VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Unix socket path too long for TTY: '", _socket_path, "'");
             closeSocket();
             return;
         }
@@ -884,12 +887,14 @@ private:
         if (::connect(_fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
         {
             const auto err = errno;
-            VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to connect Unix socket at '", _socket_path,
-                "': ", strerror(err));
+            if (!std::exchange(_open_failed, true))
+                VG_LOG(ctx.log, VG_LOG_LEVEL_ERROR, "Failed to connect Unix socket at '", _socket_path,
+                    "': ", strerror(err));
             closeSocket();
             return;
         }
 
+        _open_failed = false;
         VG_LOG(ctx.log, VG_LOG_LEVEL_INFO, "Connected to Unix socket at '", _socket_path, "' with fd ", _fd);
 
         _cmd_pos = 0;
@@ -915,6 +920,7 @@ private:
     mutable std::vector<char> _buffer;
     mutable int _fd;
     mutable int _found;
+    mutable bool _open_failed; // a failed open was logged since the last connect
 };
 
 class HTTPRule: public BaseRule

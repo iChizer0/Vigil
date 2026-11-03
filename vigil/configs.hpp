@@ -16,6 +16,8 @@
 #include <utility>
 #include <vector>
 
+#include <sys/un.h>
+
 #include "context.hpp"
 #include "json.hpp" // IWYU pragma: keep
 #include "log.hpp"
@@ -394,7 +396,8 @@ struct TTYRuleConfig
     {
         j.at("sName").get_to(name);
         {
-            // The host's TTY list is borrowed for the service lifetime; an entry without a socket path cannot be used
+            // The host's TTY list is borrowed for the service lifetime; an entry without a socket path, or with one
+            // that does not fit a Unix socket address with its terminator, cannot be used
             for (size_t i = 0; ctx.c_api.ttys.ttys && i < ctx.c_api.ttys.len; ++i)
             {
                 const auto &tty = ctx.c_api.ttys.ttys[i];
@@ -411,6 +414,8 @@ struct TTYRuleConfig
                 throw Exception("Failed to find TTY with name '" + name + "' in C API while parsing TTY rule");
             if (buffer_size == 0)
                 throw Exception("TTY '" + name + "' has zero buffer size in C API while parsing TTY rule");
+            if (socket_path.size() >= sizeof(sockaddr_un::sun_path)) // the path and its terminator
+                throw Exception("TTY '" + name + "' has too long a socket path in C API while parsing TTY rule");
         }
         {
             j.at("sCommand").get_to(cmd);

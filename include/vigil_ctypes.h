@@ -4,7 +4,7 @@
 #ifdef VG_CTYPES_VERSION
 #error "Duplicate definition of VG_CTYPES_VERSION"
 #else
-#define VG_CTYPES_VERSION "2026.10.29"
+#define VG_CTYPES_VERSION "2026.11.03"
 #endif
 
 #include <stdbool.h>
@@ -247,7 +247,8 @@ typedef struct vg_config_gpios_t
 typedef struct vg_config_tty_t
 {
     const char *name;        /**< Required. */
-    const char *socket_path; /**< Required. */
+    const char *socket_path; /**< Required, and at most 107 bytes, so that it and its terminator fit a Unix socket
+                                address: a rule selecting a TTY with a longer one is refused. */
     size_t buffer_size;      /**< The rule's read buffer, in bytes: nonzero, and a rule whose command does not fit is
                                 refused. */
 } vg_config_tty_t;
