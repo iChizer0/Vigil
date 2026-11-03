@@ -426,6 +426,7 @@ public:
         return 0;
     }
 
+    // One path of removeFilesOrDirectories, which refuses a linked record root first
     vg_sta_e removeFileOrDirectory(const std::filesystem::path &relative_path)
     {
         if (const auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
@@ -457,6 +458,12 @@ public:
     {
         if (auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
             return EPERM;
+        if (isRecordRootLinked())
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Record root ", getRecordRootPath(),
+                " is a symbolic link or lies below one, cannot remove");
+            return EACCES;
+        }
 
         vg_sta_e ret = 0;
         auto local_progress = SlotFileOpsProgress(SlotFileOpsProgress::Type::Remove);
@@ -508,6 +515,12 @@ public:
     {
         if (auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
             return EPERM;
+        if (isRecordRootLinked())
+        {
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Record root ", getRecordRootPath(),
+                " is a symbolic link or lies below one, cannot free up");
+            return EACCES;
+        }
 
         vg_sta_e ret = 0;
         auto local_progress = SlotFileOpsProgress(SlotFileOpsProgress::Type::FreeUp);
@@ -578,6 +591,22 @@ public:
     inline std::filesystem::path getRecordRootPath() const noexcept
     {
         return _mount_path / _data_dir_path;
+    }
+
+    // Whether an element of the data directory, from the mount point down, is a symbolic link; one that cannot be
+    // examined is not, and leads no removal anywhere. Recording follows a record root that leads elsewhere, the
+    // removals do not.
+    bool isRecordRootLinked() const noexcept
+    {
+        std::error_code ec;
+        auto path = _mount_path;
+        for (const auto &element: _data_dir_path)
+        {
+            path /= element;
+            if (std::filesystem::is_symlink(std::filesystem::symlink_status(path, ec)))
+                return true;
+        }
+        return false;
     }
 
     vg_sta_e formatFileSystem() noexcept

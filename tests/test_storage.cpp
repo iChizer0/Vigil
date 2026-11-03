@@ -1086,6 +1086,59 @@ VG_TEST_CASE(a_removal_acts_only_on_the_entry_its_path_names_below_the_record_ro
     VG_CHECK(std::filesystem::is_regular_file(outside / "x"));
 }
 
+VG_TEST_CASE(the_removals_refuse_a_record_root_that_is_a_link_or_lies_below_one)
+{
+    // Never-enabled Slots made READY. A link at any element of the data directory below the mount point, however the
+    // directory is spelled, keeps both removal actions out of where it leads; a real root, one whose mount path is
+    // reached through a link, and a vanished one keep them, the vanished root with the answers it had before.
+    Fixture f;
+    const auto elsewhere = std::filesystem::path(f.root) / "elsewhere";
+    std::filesystem::create_directories(elsewhere / "DCIM");
+    const std::filesystem::path files[] = { elsewhere / "x.mp4", elsewhere / "DCIM" / "x.mp4" };
+    for (const auto &file: files)
+        std::ofstream(file) << "data";
+    for (const auto *directory: { "/linked-mnt", "/slash-mnt", "/nested-mnt", "/deep-mnt/sub", "/real-mnts/m" })
+        std::filesystem::create_directories(f.root + directory);
+    std::filesystem::create_directory_symlink(elsewhere, f.root + "/linked-mnt/DCIM");
+    std::filesystem::create_directory_symlink(elsewhere, f.root + "/slash-mnt/DCIM");
+    std::filesystem::create_directory_symlink(elsewhere, f.root + "/nested-mnt/sub");
+    std::filesystem::create_directory_symlink(elsewhere, f.root + "/deep-mnt/sub/DCIM");
+    std::filesystem::create_directory_symlink(f.root + "/real-mnts", f.root + "/mnts-link");
+    Slot linked(*f.ctx, f.dev, f.root + "/linked-mnt", /*removable*/ true, /*internal*/ false, "DCIM");
+    Slot slash(*f.ctx, f.dev, f.root + "/slash-mnt", /*removable*/ true, /*internal*/ false, "DCIM/");
+    Slot nested(*f.ctx, f.dev, f.root + "/nested-mnt", /*removable*/ true, /*internal*/ false, "sub/DCIM");
+    Slot deep(*f.ctx, f.dev, f.root + "/deep-mnt", /*removable*/ true, /*internal*/ false, "sub/DCIM");
+    for (auto *slot: { &linked, &slash, &nested, &deep })
+    {
+        SlotTestAccess::openReady(*slot);
+        VG_CHECK_EQ(slot->removeFilesOrDirectories({ "x.mp4" }), EACCES);
+        VG_CHECK_EQ(slot->freeUpUsedSpace(), EACCES);
+    }
+    for (const auto &file: files)
+        VG_CHECK(std::filesystem::is_regular_file(file));
+
+    Slot real(*f.ctx, f.dev, f.root + "/real-mnt", /*removable*/ true, /*internal*/ false, "./DCIM/");
+    Slot through(*f.ctx, f.dev, f.root + "/mnts-link/m", /*removable*/ true, /*internal*/ false, "DCIM");
+    for (auto *slot: { &real, &through })
+    {
+        SlotTestAccess::openReady(*slot);
+        const auto root = slot->getRecordRootPath();
+        std::filesystem::create_directories(root);
+        for (const auto *name: { "y.mp4", "z.mp4" })
+            std::ofstream(root / name) << "data";
+        VG_CHECK_EQ(slot->removeFilesOrDirectories({ "y.mp4" }), 0);
+        VG_CHECK(!std::filesystem::exists(root / "y.mp4"));
+        VG_CHECK_EQ(slot->freeUpUsedSpace(), 0);
+        VG_CHECK(!std::filesystem::exists(root / "z.mp4"));
+    }
+
+    std::filesystem::create_directories(f.root + "/empty-mnt");
+    Slot vanished(*f.ctx, f.dev, f.root + "/empty-mnt", /*removable*/ true, /*internal*/ false, "DCIM");
+    SlotTestAccess::openReady(vanished);
+    VG_CHECK_EQ(vanished.removeFilesOrDirectories({ "x.mp4" }), 0); // nothing there to remove
+    VG_CHECK_EQ(vanished.freeUpUsedSpace(), EIO);                   // no directory to free up
+}
+
 VG_TEST_CASE(a_child_the_host_reaps_is_reported_as_a_failure)
 {
     // The Slot's commands run through Execute. With SIGCHLD ignored the kernel reaps the child, so its exit status is

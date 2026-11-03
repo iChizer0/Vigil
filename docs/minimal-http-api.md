@@ -501,6 +501,7 @@ Runtime notes:
 - One async task runs at a time across all slots; the queue holds up to 6 pending tasks, and the history keeps the last 3 completed per `{sAction, sSlotDevPath}`. `ASYNC_SUBMIT` answers `EAGAIN` while the queue is full.
 - `REMOVE_FILES_OR_DIRECTORIES` reports aggregates only: sync through `code` and `message`, async as the counts in `dResult`; no per-path result.
 - Each path names one entry below the record data directory: symbolic links on the way to it are followed, and an entry that is a symbolic link is removed as the link. A path holding a NUL, ending in `.` or `..`, naming the record data directory itself, or leading outside it is refused with `EACCES` (`30013`).
+- `REMOVE_FILES_OR_DIRECTORIES` and `FREE_UP` are refused with `EACCES` while the record data directory, or a directory between it and the mount point, is a symbolic link; recording follows such a link.
 
 ## Capture API
 
