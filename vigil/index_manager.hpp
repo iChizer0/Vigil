@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <string>
@@ -84,6 +85,43 @@ inline bool IsPathUnderRoot(const fs::path &root, const fs::path &path) noexcept
     catch (...)
     {
         return false;
+    }
+}
+
+// The entry a removal of `path` (relative to `root`, or absolute) acts on: its last element, never followed, in its
+// directory as the kernel resolves it (symlinks before ".."), which must be the resolved `root` or below it. None for
+// a NUL, where the kernel's C string would end, for a last element "." or ".." or none, and for a directory elsewhere.
+// A directory that does not resolve, an element missing or a file on the way, holds nothing to remove: an empty path,
+// unless IsPathUnderRoot refuses the path's spelling.
+inline std::optional<fs::path> RemovalPathUnderRoot(const fs::path &root, const fs::path &path) noexcept
+{
+    try
+    {
+        if (root.is_relative() || path.native().find('\0') != fs::path::string_type::npos)
+            return std::nullopt;
+        auto joined = root / path;
+        while (!joined.has_filename() && joined.has_relative_path())
+            joined = joined.parent_path();
+        const auto name = joined.filename();
+        if (name.empty() || name == "." || name == "..")
+            return std::nullopt;
+
+        std::error_code ec;
+        const auto directory = std::filesystem::canonical(joined.parent_path(), ec);
+        if (ec == std::errc::no_such_file_or_directory || ec == std::errc::not_a_directory)
+            return IsPathUnderRoot(root, path) ? std::optional(fs::path()) : std::nullopt;
+        if (ec)
+            return std::nullopt;
+        const auto root_canonical = std::filesystem::canonical(root, ec);
+        if (ec
+            || std::mismatch(root_canonical.begin(), root_canonical.end(), directory.begin(), directory.end()).first
+                   != root_canonical.end())
+            return std::nullopt;
+        return directory / name;
+    }
+    catch (...)
+    {
+        return std::nullopt;
     }
 }
 

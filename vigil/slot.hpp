@@ -431,10 +431,10 @@ public:
         if (const auto state = _state.load(std::memory_order_acquire); state < SlotState::Configured)
             return EPERM;
 
-        if (const auto p = getRecordRootPath(); IsPathUnderRoot(p, relative_path))
+        if (const auto p = getRecordRootPath(); const auto target = RemovalPathUnderRoot(p, relative_path))
         {
             const std::lock_guard lock(_publication_mutex); // never while a file is being published
-            if (!RemoveWithThumbnailCheck(p / relative_path))
+            if (!target->empty() && !RemoveWithThumbnailCheck(*target))
             {
                 VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Failed to remove file or directory ", relative_path,
                     " on slot with device path ", _dev_path);
@@ -443,7 +443,7 @@ public:
         }
         else
         {
-            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Path ", relative_path, " is outside record root ", p,
+            VG_LOG(_ctx.log, VG_LOG_LEVEL_ERROR, "Path ", relative_path, " names no entry below record root ", p,
                 ", cannot remove");
             return EACCES;
         }

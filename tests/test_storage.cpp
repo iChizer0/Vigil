@@ -1051,6 +1051,41 @@ VG_TEST_CASE(a_failed_thumbnail_leaves_no_file_in_the_cache)
     VG_CHECK(std::filesystem::is_empty(cache));
 }
 
+VG_TEST_CASE(a_removal_acts_only_on_the_entry_its_path_names_below_the_record_root)
+{
+    // Over a never-enabled Slot made READY: beside the record root lie a file of its mount and a directory outside it,
+    // which a link below the root reaches. Each refused path would reach one of them, or the root, if followed.
+    Fixture f;
+    Slot slot(*f.ctx, f.dev, f.root + "/removal-mnt", /*removable*/ true, /*internal*/ false, "DCIM");
+    SlotTestAccess::openReady(slot);
+    const auto root = slot.getRecordRootPath();
+    const auto outside = std::filesystem::path(f.root) / "outside" / "dir";
+    std::filesystem::create_directories(root / "day" / ".thumb");
+    std::filesystem::create_directories(outside);
+    const std::filesystem::path files[] = { root / "day" / "a.mp4", root / "day" / ".thumb" / "a.mp4.thumb.jpg",
+        root / "keep.mp4", root.parent_path() / "beside", outside / "x" };
+    for (const auto &file: files)
+        std::ofstream(file) << "data";
+    std::filesystem::create_directory_symlink(outside, root / "day" / "out");
+
+    for (const auto &path: { std::string("..") + '\0' + "/..", std::string("day") + '\0' + "/x",
+             std::string("day/..") + '\0', std::string("."), std::string("day/.."), root.string() + "/",
+             std::string("day/out/../../removal-mnt/beside") })
+        VG_CHECK_EQ(slot.removeFileOrDirectory(path), EACCES);
+    for (const auto &file: files)
+        VG_CHECK(std::filesystem::is_regular_file(file));
+
+    // An entry goes with its thumbnail, a link as a link, and a path through a missing directory removes nothing
+    VG_CHECK_EQ(slot.removeFileOrDirectory("missing/../keep.mp4"), 0);
+    VG_CHECK(std::filesystem::is_regular_file(files[2]));
+    VG_CHECK_EQ(slot.removeFileOrDirectory("day/a.mp4"), 0);
+    VG_CHECK(!std::filesystem::exists(files[0]));
+    VG_CHECK(!std::filesystem::exists(files[1]));
+    VG_CHECK_EQ(slot.removeFileOrDirectory("day/out/"), 0);
+    VG_CHECK(!std::filesystem::exists(std::filesystem::symlink_status(root / "day" / "out")));
+    VG_CHECK(std::filesystem::is_regular_file(outside / "x"));
+}
+
 VG_TEST_CASE(a_child_the_host_reaps_is_reported_as_a_failure)
 {
     // The Slot's commands run through Execute. With SIGCHLD ignored the kernel reaps the child, so its exit status is
