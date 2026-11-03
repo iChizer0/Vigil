@@ -4,7 +4,7 @@ Created: 2025-10-16
 Revised: 2026-11-03
 Version: 2.0.0
 
-Every `POST` answers with `code`, 0 on success, else 30000 plus the POSIX errno, and `message` on failure; a `GET` carries them only on failure (see Error Handling). The examples show every field once with its type and meaning.
+Every `POST` answers with `code`, 0 on success, else 30000 plus the POSIX errno, and `message` on failure; a `GET` carries them only on failure (see Error Handling). The examples show every field once with its type and meaning. Response strings are UTF-8: where a host or device string is not, such as a FAT volume label written in a Windows codepage, U+FFFD replaces what is invalid.
 
 ## Rule API
 

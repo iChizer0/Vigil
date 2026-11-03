@@ -377,7 +377,8 @@ vg_sta_e vg_inference_queue_reset(const char *source_id)
 
 static vg_sta_e vg_http_api_json_2_response(const nlohmann::json &j, vg_http_api_response_t &response)
 {
-    const auto response_str = j.dump();
+    // Host and device strings are not checked as request strings are: U+FFFD replaces what is not UTF-8
+    const auto response_str = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     size_t len = response_str.size();
     char *body = static_cast<char *>(std::malloc(len + 1));
     if (!body)

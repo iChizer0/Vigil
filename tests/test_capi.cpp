@@ -311,6 +311,23 @@ VG_TEST_CASE(request_bodies_are_bounded_in_depth_before_parsing)
     VG_CHECK_EQ(code, kInvalid);
 }
 
+VG_TEST_CASE(a_host_string_that_is_not_utf8_reaches_a_get_with_replacement_characters)
+{
+    // Request strings are UTF-8, since the parser checks them; the host's TTY and GPIO names and the filesystem labels
+    // libblkid reads (for FAT, bytes in the Windows codepage that wrote them) reach a GET unchecked. Here a Latin-1
+    // e-acute in a TTY name, declared before the fixture: the runtime borrows it until the deinit.
+    vg_config_tty_t tty { .name = "tty\xE9-0", .socket_path = "/tmp/absent.sock", .buffer_size = 16 };
+    Fixture f;
+    f.config.ttys.ttys = &tty;
+    f.config.ttys.len = 1;
+    VG_REQUIRE(vg_service_init(&f.config) == 0);
+    vg_http_api_response_t response {};
+    VG_REQUIRE(vg_http_api_rule_info_get(&response) == 0);
+    const std::string body(static_cast<const char *>(response.body), response.body_len);
+    response.free_cb(response.body);
+    VG_CHECK(body.find("\"tty\xEF\xBF\xBD-0\":") != std::string::npos); // U+FFFD in its place, as raw UTF-8
+}
+
 VG_TEST_CASE(activation_without_a_file_action_needs_no_storage_and_plays_the_sound)
 {
     // No Slot is selected: only a file action makes storage a precondition.
