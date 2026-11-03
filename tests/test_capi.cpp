@@ -13,6 +13,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
 
 #include "inference.pb.h"
 
@@ -262,6 +263,52 @@ VG_TEST_CASE(request_bodies_are_bounded_before_parsing)
     request.payload_len = body.size();
     VG_CHECK_EQ(vg_http_api_rule_http_rule_activate_post(&request, &response), EFAULT);
     VG_CHECK(response.body == nullptr);
+}
+
+VG_TEST_CASE(request_bodies_are_bounded_in_depth_before_parsing)
+{
+    Fixture f;
+    VG_REQUIRE(vg_service_init(&f.config) == 0);
+    // Posts `body` as a record configuration and returns the call's status; `code` is the response's, or -1 for none.
+    int code = 0;
+    const auto post = [&code](std::string body) {
+        vg_http_api_request_t request { .free_cb = nullptr, .payload = body.data(), .payload_len = body.size() };
+        vg_http_api_response_t response {};
+        const auto status = vg_http_api_rule_config_post(&request, &response);
+        code = -1;
+        if (response.body)
+        {
+            const auto *text = static_cast<const char *>(response.body);
+            code = nlohmann::json::parse(text, text + response.body_len).at("code").get<int>();
+            response.free_cb(response.body);
+        }
+        return status;
+    };
+    // A schema version of nested arrays, `levels` arrays and objects with the enclosing one, which the endpoint dumps
+    // to report it, recursing once per level.
+    const auto nested = [](int levels) {
+        return R"({"iSchemaVersion":)" + std::string(levels - 1, '[') + std::string(levels - 1, ']') + "}";
+    };
+    constexpr auto kInvalid = vigil::constants::kEndpointErrorBase + EINVAL;
+    VG_CHECK_EQ(post(nested(vigil::constants::kHTTPAPIRequestMaxDepth)), 0); // at the limit: parsed and answered
+    VG_CHECK_EQ(code, kInvalid);                                             // the version is not an integer
+    VG_CHECK_EQ(post(nested(vigil::constants::kHTTPAPIRequestMaxDepth + 1)), EFAULT); // refused before parsing
+    VG_CHECK_EQ(code, -1);
+    VG_CHECK_EQ(post(nested(100000)), EFAULT); // deep enough to overflow the stack in the endpoint's dump
+    VG_CHECK_EQ(code, -1);
+
+    // Brackets in a string, after an escaped quote, nest nothing; a string ending in an escaped backslash ends there
+    VG_CHECK_EQ(post(R"({"iSchemaVersion":"\")" + std::string(100, '[') + R"("})"), 0);
+    VG_CHECK_EQ(code, kInvalid);
+    VG_CHECK_EQ(post(R"({"s":"\\","iSchemaVersion":)" + std::string(32, '[') + std::string(32, ']') + "}"), EFAULT);
+    VG_CHECK_EQ(code, -1);
+    // As wide as the size limit allows, in objects: answered at once, since the check is linear
+    std::string wide = "[{}";
+    while (wide.size() + 4 <= vigil::constants::kHTTPAPIRequestMaxBytes)
+        wide += ",{}";
+    wide += "]";
+    VG_CHECK_EQ(post(std::move(wide)), 0);
+    VG_CHECK_EQ(code, kInvalid);
 }
 
 VG_TEST_CASE(activation_without_a_file_action_needs_no_storage_and_plays_the_sound)

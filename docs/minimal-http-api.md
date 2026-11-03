@@ -1,7 +1,7 @@
 # Vigil Record Minimal HTTP API Specification
 
 Created: 2025-10-16
-Revised: 2026-10-29
+Revised: 2026-11-03
 Version: 2.0.0
 
 Every `POST` answers with `code`, 0 on success, else 30000 plus the POSIX errno, and `message` on failure; a `GET` carries them only on failure (see Error Handling). The examples show every field once with its type and meaning.
@@ -619,7 +619,7 @@ Notes:
 
 ## Error Handling
 
-Every `POST` response carries `code`, 0 on success, else error_base (30000) plus abs(posix_errno), and may carry `message`; a `GET` response carries them only on failure. Request bodies are limited to 1 MiB; a larger body is rejected before parsing (the C API returns `EFAULT` with no JSON body).
+Every `POST` response carries `code`, 0 on success, else error_base (30000) plus abs(posix_errno), and may carry `message`; a `GET` response carries them only on failure. Request bodies are limited to 1 MiB and to 32 nested arrays and objects; a larger or deeper body is rejected before parsing (the C API returns `EFAULT` with no JSON body).
 
 ```json
 {

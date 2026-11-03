@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <cassert>
 #include <cerrno>
@@ -10,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <string_view>
 #include <utility>
 
 #include "inference.pb.h"
@@ -388,6 +390,36 @@ static vg_sta_e vg_http_api_json_2_response(const nlohmann::json &j, vg_http_api
     return 0;
 }
 
+// The deepest nesting of arrays and objects in `body`, by its brackets outside strings: exact for a body that parses,
+// and the parser refuses one that does not. Linear, where nlohmann's parser callback is quadratic in the objects one
+// array or object holds.
+static int vg_http_api_request_depth(std::string_view body) noexcept
+{
+    int depth = 0;
+    int deepest = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (const char c: body)
+    {
+        if (in_string)
+        {
+            if (escaped)
+                escaped = false;
+            else if (c == '\\')
+                escaped = true;
+            else if (c == '"')
+                in_string = false;
+        }
+        else if (c == '"')
+            in_string = true;
+        else if (c == '[' || c == '{')
+            deepest = std::max(deepest, ++depth);
+        else if (c == ']' || c == '}')
+            --depth;
+    }
+    return deepest;
+}
+
 static nlohmann::json vg_http_api_request_2_json(const vg_http_api_request_t &request)
 {
     if (!request.payload || request.payload_len == 0)
@@ -395,8 +427,11 @@ static nlohmann::json vg_http_api_request_2_json(const vg_http_api_request_t &re
     if (request.payload_len > vigil::kHTTPAPIRequestMaxBytes)
         throw vigil::Exception("Request body of " + std::to_string(request.payload_len) + " bytes exceeds the limit of "
                                + std::to_string(vigil::kHTTPAPIRequestMaxBytes) + " bytes");
-    return nlohmann::json::parse(static_cast<const char *>(request.payload),
-        static_cast<const char *>(request.payload) + request.payload_len);
+    const std::string_view body(static_cast<const char *>(request.payload), request.payload_len);
+    if (const auto depth = vg_http_api_request_depth(body); depth > vigil::kHTTPAPIRequestMaxDepth)
+        throw vigil::Exception("Request body nests " + std::to_string(depth) + " levels deep, past the limit of "
+                               + std::to_string(vigil::kHTTPAPIRequestMaxDepth));
+    return nlohmann::json::parse(body.data(), body.data() + body.size());
 }
 
 vg_sta_e vg_http_api_rule_config_get(vg_http_api_response_t *response)

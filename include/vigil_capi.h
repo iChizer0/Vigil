@@ -4,7 +4,7 @@
 #ifdef VG_CAPI_VERSION
 #error "Duplicate definition of VG_CAPI_VERSION"
 #else
-#define VG_CAPI_VERSION "2026.10.29"
+#define VG_CAPI_VERSION "2026.11.03"
 #endif
 
 #include "vigil_ctypes.h"
@@ -126,8 +126,8 @@ vg_sta_e vg_inference_queue_reset(const char *source_id);
  * carries and a GET only on failure. On failure `response` is left untouched.
  *
  * Returns 0; EINVAL for a null request or response, or a response not released; ENOMEM when the body could not be
- * allocated; EFAULT for a request body over 1 MiB or one that does not parse, or when the endpoint failed (the cause
- * goes to log_cb).
+ * allocated; EFAULT for a request body over 1 MiB, nesting more than 32 arrays and objects, or not parsing, or when
+ * the endpoint failed (the cause goes to log_cb).
  */
 
 // Rule endpoints

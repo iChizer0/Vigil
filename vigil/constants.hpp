@@ -33,6 +33,8 @@ static inline constexpr const size_t kMaskHeight = 128;
 static inline constexpr const size_t kInferenceQueueSize = 60 * 1;
 
 static inline constexpr const size_t kHTTPAPIRequestMaxBytes = 1024 * 1024; // largest request body the C API parses
+// Most arrays and objects a request body may nest: copying and dumping a value recurse once per level
+static inline constexpr const int kHTTPAPIRequestMaxDepth = 32;
 
 // The file channel worker's probe period and the defaults of its failure cooldown and limit
 static inline constexpr const std::chrono::milliseconds kWriterProbeInterval = std::chrono::milliseconds(50);
