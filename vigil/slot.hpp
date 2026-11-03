@@ -644,6 +644,8 @@ protected:
         {
             VG_LOG(_ctx.log, VG_LOG_LEVEL_WARN, "Failed to generate thumbnail for cache file ", cache_file_info.path,
                 ", code: ", static_cast<int>(ret));
+            std::error_code ec;
+            std::filesystem::remove_all(thumbnail_cache_path, ec); // what the callback wrote before it failed
             return;
         }
         cache_file_info.thumbnail_path = thumbnail_cache_path;

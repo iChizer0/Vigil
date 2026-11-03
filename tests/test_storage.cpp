@@ -117,6 +117,12 @@ struct SlotTestAccess
         slot.markFailed();
     }
 
+    // What a clip's writer does once the clip is finished, with the frame it kept.
+    static void generateThumbnail(Slot &slot, CacheFileInfo &info)
+    {
+        slot.generateThumbnail(info);
+    }
+
     // READY and registered by hand, for a Slot that was never enabled, so that no thread of its own moves its
     // state: what the manager thread and `enable` do for a Slot over a device.
     static void openReady(Slot &slot)
@@ -504,6 +510,19 @@ struct FailingSink
     {
         created_path = path;
         std::ofstream(path) << "partial";
+        return EIO;
+    }
+};
+
+// A host thumbnail encoder that creates its output and then fails, as at ENOSPC or EIO mid-write.
+struct FailingThumbnail
+{
+    static inline std::string created_path;
+
+    static vg_sta_e Generate(const void *, size_t, const char *, const char *thumb_filepath, const char *, int, void *)
+    {
+        if (std::ofstream(thumb_filepath) << "partial")
+            created_path = thumb_filepath;
         return EIO;
     }
 };
@@ -1007,6 +1026,29 @@ VG_TEST_CASE(the_internal_device_keeps_its_slot_kind_across_a_bounce_of_its_node
     VG_CHECK_EQ(second->mountPath().string(), f.internal_mount);
     VG_CHECK_EQ(storage.ejectSlot(dev_path), ENOTSUP); // refused for the internal Slot, as for the scan's
     VG_CHECK_EQ(storage.getStatus().slots_status.size(), size_t { 1 });
+}
+
+VG_TEST_CASE(a_failed_thumbnail_leaves_no_file_in_the_cache)
+{
+    // The clip is published without a thumbnail. What the callback wrote goes with the failure; publication never
+    // learns of it, so it would stay in the cache, unindexed and never rotated.
+    Fixture f;
+    auto cfg = MakeFakeConfig(f.root.c_str());
+    cfg.media.thumbnail_generate_cb = &FailingThumbnail::Generate;
+    Context ctx(cfg);
+    Slot slot(ctx, f.dev, f.root + "/thumbnail-mnt", /*removable*/ true, /*internal*/ false, "DCIM");
+    const auto cache = SlotTestAccess::recordCachePath(slot);
+    std::filesystem::create_directories(cache);
+    CacheFileInfo info;
+    info.path = cache / "clip.mp4";
+    info.thumbnail.data = new uint8_t[4] { 1, 2, 3, 4 };
+    info.thumbnail.size = 4;
+    info.thumbnail.format = "MP4";
+    FailingThumbnail::created_path.clear();
+    SlotTestAccess::generateThumbnail(slot, info);
+    VG_CHECK(!FailingThumbnail::created_path.empty()); // the callback ran and created its file
+    VG_CHECK(info.thumbnail_path.empty());
+    VG_CHECK(std::filesystem::is_empty(cache));
 }
 
 VG_TEST_CASE(a_child_the_host_reaps_is_reported_as_a_failure)
