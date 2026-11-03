@@ -35,7 +35,7 @@ Get or set rule enablement and the post-trigger actions.
         },
         "dSound": {
             "bEnabled": false, // Boolean, required, play a sound on trigger through the host's playback callback; unavailable without one
-            "sFilePath": "" // String, optional, the absolute path of the audio file to play; empty or absent plays the host's own sound, and Vigil checks only that it is absolute
+            "sFilePath": "" // String, optional, the absolute path of the audio file to play; empty or absent plays the host's own sound, and Vigil checks only that it is absolute and holds no NUL
         }
     },
     "code": 0, "message": "" // POST response only, see Error Handling
@@ -62,7 +62,7 @@ A stored record configuration, record rule, or schedule file that cannot be load
 
 Notes:
 
-- `EINVAL` (`30022`): a missing field (`sFilePath` excepted), a wrong type, a non-positive or non-integer interval, an unknown photo format, a relative `sFilePath`, or another `iSchemaVersion`. A rejected payload changes neither the runtime nor the stored file.
+- `EINVAL` (`30022`): a missing field (`sFilePath` excepted), a wrong type, a non-positive or non-integer interval, an unknown photo format, a relative `sFilePath` or one holding a NUL, or another `iSchemaVersion`. A rejected payload changes neither the runtime nor the stored file.
 - `EINVAL` also while `ALWAYS_ON` is selected (the default) and the payload has actions it cannot pace (see Always-On Rule); select another record rule first.
 - `EAGAIN` (`30011`): the action settings changed (a media refresh or another commit) while the document was being prepared or applied. Post it again; the document may already be stored, with the runtime still on the previous one.
 - The C API reports rule events and published files through its callbacks, best-effort: the objects are borrowed for the call, a file callback may precede the rule callback of its event, and a rule event is followed by zero, one, or two file callbacks. Every automatic file has a file id, carried by its file callback and by rule info as `iFileID`, and a rule event lists in `file_ids` the file of each channel that has one at its dispatch: the one accepted for it, else the one already pending or being written. The contract is in `include/vigil_ctypes.h`.

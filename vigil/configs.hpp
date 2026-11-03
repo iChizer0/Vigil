@@ -617,8 +617,11 @@ struct RecordConfig
         const auto &sound_j = actions.at("dSound");
         sound.enabled = sound_j.at("bEnabled").get<bool>();
         sound.file_path = sound_j.value("sFilePath", std::string());
-        if (!sound.file_path.empty() && sound.file_path.front() != '/') // whether it plays is the host's to find out
-            throw Exception("Invalid sound file path '" + sound.file_path + "', expected an absolute path");
+        // Absolute, and with no NUL for the callback's C string to end at; whether it plays is the host's to find out
+        if (!sound.file_path.empty()
+            && (sound.file_path.front() != '/' || sound.file_path.find('\0') != std::string::npos))
+            throw Exception("Invalid sound file path " + nlohmann::json(sound.file_path).dump()
+                            + ", expected an absolute path with no NUL");
 
         // Any combination of actions is valid here; what ALWAYS_ON can pace is the endpoint's check
     }

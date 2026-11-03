@@ -173,10 +173,11 @@ VG_TEST_CASE(the_sound_file_path_is_optional_and_must_be_absolute)
     VG_CHECK_EQ(refreshed->sound_file_path, "/srv/sounds/alarm.wav");
     VG_CHECK(*refreshed == *settings);
 
-    // Only that it is absolute: whether it exists or plays is the host's to find out.
+    // Only that it is absolute, with no NUL for the callback's C string to end at: whether it exists or plays is the
+    // host's to find out.
     VG_CHECK(!Rejected(Document({ { "/dActions/dSound/sFilePath", "/" } }), f.ctx));
-    for (const auto &value:
-        { nlohmann::json("alarm.wav"), nlohmann::json("./alarm.wav"), nlohmann::json(nullptr), nlohmann::json(1) })
+    for (const auto &value: { nlohmann::json("alarm.wav"), nlohmann::json("./alarm.wav"), nlohmann::json(nullptr),
+             nlohmann::json(1), nlohmann::json(std::string("/srv/sounds/") + '\0' + "alarm.wav") })
         VG_CHECK(Rejected(Document({ { "/dActions/dSound/sFilePath", value } }), f.ctx));
 }
 
