@@ -405,7 +405,7 @@ VG_TEST_CASE(startup_without_files_uses_defaults_and_writes_nothing)
     VG_CHECK_EQ(f.endpoint->getScheduleRuleConfig(),
         nlohmann::json::parse(
             R"({"bEnabled":false,"lActiveWeekdays":[{"sStart":"Mon 00:00:00","sEnd":"Sun 24:00:00"}]})"));
-    VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON"));
+    VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("")); // no default selection
 
     const auto info = f.endpoint->getRuleInfo();
     VG_CHECK(!info.contains("code"));
@@ -488,7 +488,7 @@ VG_TEST_CASE(startup_leaves_unusable_files_untouched_and_keeps_rules_disabled)
         VG_CHECK(!f.ctx->record_rule_enabled.load());
         VG_CHECK_EQ(f.endpoint->getRecordConfig(), RecordJson(false, "MP4", 5000)); // reported as disabled
         VG_CHECK_EQ(ReadFile(f.file(c.name)), c.text);
-        VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON"));
+        VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("")); // no default selection
         VG_CHECK_EQ(f.endpoint->getScheduleRuleConfig().at("bEnabled").get<bool>(), false);
         f.evaluate();
         VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
@@ -962,8 +962,9 @@ VG_TEST_CASE(continuous_recording_is_admitted_by_the_rule_loop_whatever_the_rule
     // with it: a POST is refused, and a stored pair fails closed with continuous recording off as well.
     Fixture f;
     f.start();
+    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("ALWAYS_ON")), 0);
     const auto doc = WithContinuous(RecordJson(false, nullptr, 0));    // rules disabled, nothing but the switch
-    VG_CHECK_EQ(f.postRecordConfig(doc), kEndpointErrorBase + EINVAL); // ALWAYS_ON, the default, is selected
+    VG_CHECK_EQ(f.postRecordConfig(doc), kEndpointErrorBase + EINVAL); // ALWAYS_ON cannot be combined with it
     VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0);
     VG_CHECK_EQ(f.postRecordConfig(doc), 0);
     VG_CHECK_EQ(f.endpoint->getRecordConfig(), doc);
@@ -1024,10 +1025,21 @@ VG_TEST_CASE(continuous_recording_is_admitted_by_the_rule_loop_whatever_the_rule
     VG_REQUIRE(g.ctx->file_channels.video.current() != nullptr);
     VG_CHECK(g.ctx->file_channels.video.current()->kind == FileTask::Kind::Continuous);
 
-    // Stored under the default ALWAYS_ON, the pair fails closed: nothing records, both switches read false with
-    // the file untouched, and a supporting rule, then the configuration, recovers.
+    // No rule file at all: no selection, and continuous recording still records from startup, gated only by the
+    // schedule, storage, and media.
+    Fixture e;
+    WriteFile(e.file("record_config.json"), doc.dump());
+    e.start();
+    VG_CHECK_EQ(e.endpoint->getRecordRuleConfig(), SelectedRuleJson(""));
+    e.evaluate();
+    VG_REQUIRE(e.ctx->file_channels.video.current() != nullptr);
+    VG_CHECK(e.ctx->file_channels.video.current()->kind == FileTask::Kind::Continuous);
+
+    // Stored under ALWAYS_ON, the pair fails closed: nothing records, both switches read false with both files
+    // untouched, and a supporting rule, then the configuration, recovers.
     Fixture h;
     WriteFile(h.file("record_config.json"), doc.dump());
+    WriteFile(h.file("record_rule_config.json"), SelectedRuleJson("ALWAYS_ON").dump());
     h.start();
     VG_CHECK(!h.ctx->record_rule_enabled.load());
     VG_CHECK_EQ(h.endpoint->getRecordConfig(), RecordJson(false, nullptr, 0));
@@ -1048,7 +1060,7 @@ VG_TEST_CASE(schedule_closure_finishes_a_running_continuous_clip_and_reopening_a
     // The clip ends at its next check, Interrupted with UID 0 and its sink finished.
     Fixture f;
     f.start();
-    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0); // any rule but ALWAYS_ON
+    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("HTTP")), 0); // any rule, including the empty default, admits it
     VG_CHECK_EQ(f.postRecordConfig(WithContinuous(RecordJson(false, nullptr, 0))), 0);
     auto &video = f.ctx->file_channels.video;
     f.evaluate();
@@ -1219,7 +1231,7 @@ VG_TEST_CASE(record_rule_config_switches_rules_persists_and_rolls_back_failures)
     f.evaluate();
     VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
 
-    // Back to the default rule.
+    // Back to ALWAYS_ON, selectable again over the single enabled channel.
     const auto always = SelectedRuleJson("ALWAYS_ON");
     VG_CHECK_EQ(f.postRecordRuleConfig(always), 0);
     VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), always);
@@ -1270,6 +1282,7 @@ VG_TEST_CASE(record_config_post_persists_only_valid_payloads_in_canonical_form)
 {
     Fixture f;
     f.start();
+    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("ALWAYS_ON")), 0);
     const auto valid = RecordJson(true, "MP4", 1234);
     VG_CHECK_EQ(f.postRecordConfig(valid), 0);
     VG_CHECK_EQ(f.endpoint->getRecordConfig(), valid);
@@ -1280,7 +1293,7 @@ VG_TEST_CASE(record_config_post_persists_only_valid_payloads_in_canonical_form)
     const auto revision = f.ctx->action_settings.getRevision();
 
     // Rejected payloads change neither the runtime nor the file: an invalid interval, and two actions that
-    // ALWAYS_ON, the default rule, cannot pace.
+    // the selected ALWAYS_ON cannot pace.
     const auto res = f.endpoint->updateRecordConfig(RecordJson(true, "MP4", 0));
     VG_CHECK_EQ(res.at("code").get<int>(), kEndpointErrorBase + EINVAL);
     VG_CHECK(res.contains("message"));
@@ -1349,7 +1362,8 @@ VG_TEST_CASE(the_always_on_invariant_is_enforced_by_both_posts_in_either_order)
     // rejected POST changes neither the runtime nor a file.
     Fixture f;
     f.start();
-    VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON")); // the default selection
+    VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("")); // no default selection
+    VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("ALWAYS_ON")), 0);
     const auto photo_video = WithActions(RecordJson(true, "MP4", 5000), true, true, false);
     const auto everything = WithActions(RecordJson(true, "MP4", 5000), true, true, true);
     const auto sound_only = WithActions(RecordJson(false, nullptr, 0), false, false, true);
@@ -1423,15 +1437,17 @@ VG_TEST_CASE(startup_fails_closed_when_the_stored_pair_violates_the_always_on_in
     // reported; a supporting rule, then the record configuration, recovers.
     const auto everything = WithActions(RecordJson(true, "MP4", 5000), true, true, true);
     {
-        Fixture f; // no rule file: the default ALWAYS_ON is selected
+        Fixture f; // a stored ALWAYS_ON rule over the violating pair fails closed
         const std::string record = everything.dump();
+        const std::string rule = SelectedRuleJson("ALWAYS_ON").dump();
         WriteFile(f.file("record_config.json"), record);
+        WriteFile(f.file("record_rule_config.json"), rule);
         f.start();
         VG_CHECK(!f.ctx->record_rule_enabled.load());
         VG_CHECK_EQ(f.endpoint->getRecordConfig(), WithActions(RecordJson(false, "MP4", 5000), true, true, true));
         VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON"));
         VG_CHECK_EQ(ReadFile(f.file("record_config.json")), record);
-        VG_CHECK(!std::filesystem::exists(f.file("record_rule_config.json")));
+        VG_CHECK_EQ(ReadFile(f.file("record_rule_config.json")), rule); // both files left in place
         f.evaluate();
         VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
         VG_CHECK_EQ(f.postRecordConfig(everything), kEndpointErrorBase + EINVAL); // ALWAYS_ON is still selected
@@ -1467,11 +1483,22 @@ VG_TEST_CASE(startup_fails_closed_when_the_stored_pair_violates_the_always_on_in
         VG_CHECK(events[0].writer_created);
         VG_CHECK(f.ctx->file_channels.photo.holdsTask() && f.ctx->file_channels.video.holdsTask());
     }
+    {
+        // No rule file: no selection, no invariant. The same pair is a plain configuration that nothing triggers.
+        Fixture f;
+        WriteFile(f.file("record_config.json"), everything.dump());
+        f.start();
+        VG_CHECK(f.ctx->record_rule_enabled.load());
+        VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson(""));
+        VG_CHECK_EQ(f.endpoint->getRecordConfig(), everything);
+        f.evaluate();
+        VG_CHECK_EQ(RuleEventRecorder::size(), size_t { 0 });
+    }
 }
 
 VG_TEST_CASE(always_on_runs_each_single_file_action_with_its_format_and_paces_on_its_interval)
 {
-    // Under ALWAYS_ON, the default rule: the format and the interval reach the task unchanged, nothing is converted
+    // Under ALWAYS_ON: the format and the interval reach the task unchanged, nothing is converted
     // to continuous recording, the rule waits through the hold without consuming its interval, and rule disable and
     // schedule closure stop it.
     struct Single
@@ -1489,7 +1516,7 @@ VG_TEST_CASE(always_on_runs_each_single_file_action_with_its_format_and_paces_on
         const auto interval = std::chrono::milliseconds(s.interval_ms);
         Fixture f;
         f.start();
-        VG_CHECK_EQ(f.endpoint->getRecordRuleConfig(), SelectedRuleJson("ALWAYS_ON")); // the default selection
+        VG_CHECK_EQ(f.postRecordRuleConfig(SelectedRuleJson("ALWAYS_ON")), 0);
         const auto doc = RecordJson(true, s.format, s.interval_ms);
         VG_CHECK_EQ(f.postRecordConfig(doc), 0);
         VG_CHECK_EQ(f.endpoint->getRecordConfig(), doc); // returned as posted: no continuous conversion

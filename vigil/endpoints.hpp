@@ -277,8 +277,6 @@ public:
         {
             _record_rule_config_store = std::make_unique<ConfigStore>(*_ctx, kRecordRuleConfigName);
             _record_rule_config = nlohmann::json::object();
-            if (!swapTypedRecordRule<AlwaysOnRule>(AlwaysOnRuleConfig(), []() noexcept { return true; }))
-                throw Exception("Failed to initialize default record rule");
             load(*_record_rule_config_store,
                 [&](const nlohmann::json &j) { return code(updateRecordRuleConfig(j, false)); });
         }
@@ -302,6 +300,9 @@ public:
                 VG_LOG(_ctx->log, VG_LOG_LEVEL_ERROR, "Failed to withdraw the stored continuous recording switch");
             _ctx->record_rule_enabled.store(false, std::memory_order_release);
         }
+
+        VG_LOG(_ctx->log, VG_LOG_LEVEL_DEBUG,
+            "Record rule at startup: ", _record_rule ? BaseRule::TypeString(_record_rule->type()) : "none");
 
         if (!run_rule_thread)
             return;

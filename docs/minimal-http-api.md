@@ -48,7 +48,7 @@ Any combination of actions may be enabled, including none with `bRuleEnabled` tr
 
 `bContinuousRecordEnabled` records clips of the target length (`bVideoClipLengthSeconds` in Rule Info) back to back on the video channel whenever the schedule is open and storage and media allow. Its clips are not rule events: no rule callback reports them and their files carry `event_uid` 0, but a rule event dispatched while a clip is pending or being written lists the clip's file id in `file_ids`, as it lists a triggered clip accepted for it or already in progress, so a host can find a trigger's footage (see `include/vigil_ctypes.h`). The exception is a clip boundary: from one clip's closing key frame until the next clip is admitted, an event lists the ending clip or no video file, while its footage, if recorded, opens the next clip.
 
-While it is set, `dVideo` keeps its stored value but no triggered video is admitted; Photo and Sound are unaffected, and an HTTP activation needs storage only when Photo is enabled. `ALWAYS_ON`, the default record rule, cannot be combined with it, even while `bRuleEnabled` is false (see Always-On Rule).
+While it is set, `dVideo` keeps its stored value but no triggered video is admitted; Photo and Sound are unaffected, and an HTTP activation needs storage only when Photo is enabled. `ALWAYS_ON` cannot be combined with it, even while `bRuleEnabled` is false (see Always-On Rule).
 
 Switching either way finishes the running clip under its own identity before the other mode's first clip starts, and after a completed triggered clip the first continuous clip also waits out the rest of that clip's interval.
 
@@ -58,12 +58,12 @@ A clip checks the schedule and the pause as it starts and between frames, so it 
 
 A triggered video recording starts from the oldest buffered key frame, so it holds up to the buffer period (10 seconds) before its event, and ends on the first key frame after the target length has elapsed since the recording started or, if none arrives, when the key frame wait runs out. A continuous clip following a completed one with no closure, pause, or switch between them starts at the key frame that clip ended on, with neither overlap nor gap; any other continuous clip starts at a key frame enqueued after its admission.
 
-A stored record configuration, record rule, or schedule file that cannot be loaded at startup stays in place, and rules and continuous recording stay off until a valid record configuration is posted; meanwhile `GET` reports the defaults in its place: every action disabled, the `ALWAYS_ON` rule, or the disabled schedule, whose gate is always open. Recover by posting the unusable file's own document (the record rule or schedule configuration) first, then the record configuration; the other order would turn on the defaults those `GET`s show. Every valid schedule `POST` is stored, so posting back what its `GET` shows repairs that file.
+A stored record configuration, record rule, or schedule file that cannot be loaded at startup stays in place, and rules and continuous recording stay off until a valid record configuration is posted; meanwhile `GET` reports the defaults in its place: every action disabled, no selected record rule, or the disabled schedule, whose gate is always open. Recover by posting the unusable file's own document (the record rule or schedule configuration) first, then the record configuration; the other order would turn on the defaults those `GET`s show. Every valid schedule `POST` is stored, so posting back what its `GET` shows repairs that file.
 
 Notes:
 
 - `EINVAL` (`30022`): a missing field (`sFilePath` excepted), a wrong type, a non-positive or non-integer interval, an unknown photo format, a relative `sFilePath` or one holding a NUL, or another `iSchemaVersion`. A rejected payload changes neither the runtime nor the stored file.
-- `EINVAL` also while `ALWAYS_ON` is selected (the default) and the payload has actions it cannot pace (see Always-On Rule); select another record rule first.
+- `EINVAL` also while `ALWAYS_ON` is selected and the payload has actions it cannot pace (see Always-On Rule); select another record rule first.
 - `EAGAIN` (`30011`): the action settings changed (a media refresh or another commit) while the document was being prepared or applied. Post it again; the document may already be stored, with the runtime still on the previous one.
 - The C API reports rule events and published files through its callbacks, best-effort: the objects are borrowed for the call, a file callback may precede the rule callback of its event, and a rule event is followed by zero, one, or two file callbacks. Every automatic file has a file id, carried by its file callback and by rule info as `iFileID`, and a rule event lists in `file_ids` the file of each channel that has one at its dispatch: the one accepted for it, else the one already pending or being written. The contract is in `include/vigil_ctypes.h`.
 
@@ -74,7 +74,7 @@ Capability limits:
 - Sound plays only through the host's callback, which must return in bounded time; Vigil queues no playback and retries nothing.
 - The timing in this document (the buffer period, the clip length and its key frame and input loss waits, the action intervals, and the 10 ms rule evaluation and 50 ms worker probe periods behind them) is the host logic's target, verified with fake callbacks on a development host; real-device latency, callback duration, and the gap between clips depend on the host's media pipeline and storage, and are the integration's to measure.
 - Storage calls on the slot's filesystem must return promptly: the free-space probe at each admission (on the rule thread or an HTTP activation's), the directory creation and rename at publication (on the slot's workers), and the sync at a disable or before an unmount (on the thread of the switch, the eject, or the removal). A hanging device stalls those threads.
-- On FAT a day's directory holds about 16,000 files: a FAT directory has at most 65,536 entries and each recorded file's name takes four. Once it is full, every further file of that day fails to publish and counts as a failed task, so the slot reaches `ERROR` soon after. A photo every 5 seconds, the `ALWAYS_ON` default, fills it at about 23:00; under another rule one every 6 seconds or more leaves room for continuous clips too. Keep a day's files under that on FAT, or use ext4.
+- On FAT a day's directory holds about 16,000 files: a FAT directory has at most 65,536 entries and each recorded file's name takes four. Once it is full, every further file of that day fails to publish and counts as a failed task, so the slot reaches `ERROR` soon after. A photo every 5 seconds, the default action interval, fills it at about 23:00; under another rule one every 6 seconds or more leaves room for continuous clips too. Keep a day's files under that on FAT, or use ext4.
 - The host's video sink must admit every file Vigil creates. With a single sink the second create fails and counts like any other failure: a manual video capture overlapping continuous recording fails the automatic clips meanwhile, and ten such failures reach the limit in about 30 seconds (one 3-second cooldown each).
 - Video frames must carry a key frame at least every 10 seconds, the buffer period: a clip's first and closing key frames are waited for at most that long, and a longer GOP cancels clips or ends them without a boundary.
 
@@ -190,13 +190,13 @@ Get or set the record rule (trigger) configuration.
 
 **Response Body for `GET` or Request Payload for `POST`:**
 
-The payload depends on `sCurrentSelected`. An activation while a file channel still holds its previous task (through the interval after its start, plus the cooldown after a failed one) is reported and triggers Sound, but admits no new file on that channel; `ALWAYS_ON` waits for the channel instead.
+The payload depends on `sCurrentSelected`. The empty string selects no record rule — the first-start state until one is posted — and only the schedule-gated continuous recording runs without one; dormant parameter blocks keep their stored values for a later selection. An activation while a file channel still holds its previous task (through the interval after its start, plus the cooldown after a failed one) is reported and triggers Sound, but admits no new file on that channel; `ALWAYS_ON` waits for the channel instead.
 
 #### Inference Set Rule
 
 ```json
 {
-    "sCurrentSelected": "INFERENCE_SET", // String, "SED", "INFERENCE_SET", "TIMER", "GPIO", "TTY", "HTTP", or "ALWAYS_ON"
+    "sCurrentSelected": "INFERENCE_SET", // String, "SED", "INFERENCE_SET", "TIMER", "GPIO", "TTY", "HTTP", "ALWAYS_ON", or "" for no rule
     "lInferenceSet": [ // Array of member rules, ORed together
         {
             "sID": "person_detection", // String, the member's ID; uniqueness is recommended, not enforced
@@ -303,7 +303,7 @@ No further configuration: select it and trigger through HTTP Rule Activation.
 
 No further configuration. Selected, it triggers every `iIntervalMs` of the enabled file action (General Rule Configuration): the next recording starts no earlier than the interval after the previous one started, and only once the previous write has finished.
 
-Because it paces one file action, selecting `ALWAYS_ON` requires the stored general rule configuration to satisfy an invariant: `dSound` and `bContinuousRecordEnabled` false, at most one of `dPhoto` and `dVideo` enabled, and exactly one while `bRuleEnabled` is true; the first-start configuration satisfies it. The record rule `POST` selecting `ALWAYS_ON` is otherwise rejected with `EINVAL`, and while it is selected the general rule configuration `POST` is held to the same limit, so simplify the actions or select another rule first; both checks share one lock, so neither the order of the posts nor concurrent posts bypass it. At startup a stored pair that violates it keeps rules and continuous recording off (`bRuleEnabled` and `bContinuousRecordEnabled` read false), with both files left in place.
+Because it paces one file action, selecting `ALWAYS_ON` requires the stored general rule configuration to satisfy an invariant: `dSound` and `bContinuousRecordEnabled` false, at most one of `dPhoto` and `dVideo` enabled, and exactly one while `bRuleEnabled` is true; the first-start configuration satisfies it. The record rule `POST` selecting `ALWAYS_ON` is otherwise rejected with `EINVAL`, and while it is selected the general rule configuration `POST` is held to the same limit, so simplify the actions or select another rule first; both checks share one lock, so neither the order of the posts nor concurrent posts bypass it. At startup a stored pair that violates it keeps rules and continuous recording off (`bRuleEnabled` and `bContinuousRecordEnabled` read false), with both files left in place. `ALWAYS_ON` is never selected by default; new periodic recording selects `TIMER`.
 
 ```json
 {
